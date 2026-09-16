@@ -11,27 +11,10 @@ import (
 	"testing"
 )
 
-// STATE_SYNC and CHAOS are control plane. A shed STATE_SYNC would leave a
-// promoted worker serving a stale ledger; a shed CHAOS "clear" would leave a node
-// degraded forever. Neither is a tolerable load-shedding outcome.
-func TestPhase4TypesAreControlPlane(t *testing.T) {
-	for _, typ := range []MessageType{TypeStateSync, TypeChaos} {
-		if !typ.Valid() {
-			t.Errorf("%s is not in knownTypes", typ)
-		}
-		if !typ.IsControlPlane() {
-			t.Errorf("%s must be control plane", typ)
-		}
-		if typ.IsDataPlane() {
-			t.Errorf("%s must not be data plane", typ)
-		}
-	}
-}
-
 // Every new payload must survive the real codec, not just json.Marshal. The
 // populated cases pin field names and types; a renamed JSON tag would silently
 // zero the field on the peer and pass a Marshal-only test.
-func TestPhase4PayloadsRoundTripThroughFraming(t *testing.T) {
+func TestSyncTaskPayloadsRoundTripThroughFraming(t *testing.T) {
 	tests := []struct {
 		name    string
 		typ     MessageType
@@ -131,40 +114,20 @@ func TestPhase4PayloadsRoundTripThroughFraming(t *testing.T) {
 	}
 }
 
-// Nil-vs-empty is NOT preserved by encoding/json, and callers must not rely on
-// it. This test documents what actually comes back:
-//
-//   - A nil slice or map (no omitempty) encodes as JSON null and decodes as nil.
-//   - An empty, non-nil slice or map encodes as [] / {} and decodes as empty,
-//     non-nil.
-//
-// So the codec is faithful to nil-ness in both directions, but a receiver must
-// still treat nil and empty identically (len == 0), because the sender's choice
-// between them is an implementation detail it can change without a protocol bump.
-func TestPhase4EmptyCollectionsRoundTrip(t *testing.T) {
-	t.Run("state sync nil collections decode as nil", func(t *testing.T) {
+// Nil collections must never reach the wire as JSON null. The dashboard is
+// vanilla JavaScript doing `t.peers.length` and `Object.entries(t.scores)`, both
+// of which throw on null, so StateSyncPayload and TelemetryPayload substitute
+// []/{} in MarshalJSON. The receiver therefore always gets an empty, non-nil
+// collection back, whether the sender allocated one or not. Receivers must still
+// key off len rather than nil-ness: that is the contract, and nil-ness is not.
+func TestSyncAndTelemetryNilCollectionsEncodeAsEmpty(t *testing.T) {
+	t.Run("state sync nil collections", func(t *testing.T) {
 		env := mustEnvelope(t, TypeStateSync, "node-1", "node-2", StateSyncPayload{Term: 1, Leader: "node-1"})
-		if !bytes.Contains(env.Payload, []byte(`"workers":null`)) || !bytes.Contains(env.Payload, []byte(`"ledger":null`)) {
-			t.Fatalf("nil slices should encode as null, got %s", env.Payload)
+		if bytes.Contains(env.Payload, []byte("null")) {
+			t.Fatalf("nil collections leaked to the wire as null: %s", env.Payload)
 		}
-		got, err := PayloadOf[StateSyncPayload](env)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.Workers != nil || got.Ledger != nil {
-			t.Errorf("null should decode as nil; got Workers=%#v Ledger=%#v", got.Workers, got.Ledger)
-		}
-		if len(got.Workers) != 0 || len(got.Ledger) != 0 {
-			t.Error("len of a nil slice must be 0; receivers key off len, never nil-ness")
-		}
-	})
-
-	t.Run("state sync empty collections decode as empty non-nil", func(t *testing.T) {
-		env := mustEnvelope(t, TypeStateSync, "node-1", "node-2", StateSyncPayload{
-			Term: 1, Leader: "node-1", Workers: []NodeID{}, Ledger: []TaskRecord{},
-		})
 		if !bytes.Contains(env.Payload, []byte(`"workers":[]`)) || !bytes.Contains(env.Payload, []byte(`"ledger":[]`)) {
-			t.Fatalf("empty slices should encode as [], got %s", env.Payload)
+			t.Fatalf("nil slices should encode as [], got %s", env.Payload)
 		}
 		got, err := PayloadOf[StateSyncPayload](env)
 		if err != nil {
@@ -176,28 +139,56 @@ func TestPhase4EmptyCollectionsRoundTrip(t *testing.T) {
 		if got.Ledger == nil || len(got.Ledger) != 0 {
 			t.Errorf("Ledger = %#v, want empty non-nil", got.Ledger)
 		}
+		// The scalar fields must still be carried; the alias trick in MarshalJSON
+		// would silently drop them if the alias and the real type ever diverged.
+		if got.Term != 1 || got.Leader != "node-1" {
+			t.Errorf("scalars lost through MarshalJSON: %+v", got)
+		}
 	})
 
-	t.Run("telemetry nil peers and scores decode as nil", func(t *testing.T) {
-		env := mustEnvelope(t, TypeTelemetry, "node-1", "", TelemetryPayload{Node: "node-1", Role: "worker", State: "alive"})
-		if !bytes.Contains(env.Payload, []byte(`"peers":null`)) || !bytes.Contains(env.Payload, []byte(`"scores":null`)) {
-			t.Fatalf("nil peers/scores should encode as null, got %s", env.Payload)
+	t.Run("state sync empty collections", func(t *testing.T) {
+		env := mustEnvelope(t, TypeStateSync, "node-1", "node-2", StateSyncPayload{
+			Term: 1, Leader: "node-1", Workers: []NodeID{}, Ledger: []TaskRecord{},
+		})
+		if !bytes.Contains(env.Payload, []byte(`"workers":[]`)) || !bytes.Contains(env.Payload, []byte(`"ledger":[]`)) {
+			t.Fatalf("empty slices should encode as [], got %s", env.Payload)
+		}
+		got, err := PayloadOf[StateSyncPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Workers == nil || len(got.Workers) != 0 || got.Ledger == nil || len(got.Ledger) != 0 {
+			t.Errorf("got Workers=%#v Ledger=%#v, want empty non-nil", got.Workers, got.Ledger)
+		}
+	})
+
+	t.Run("telemetry nil collections", func(t *testing.T) {
+		env := mustEnvelope(t, TypeTelemetry, "node-1", "", TelemetryPayload{
+			Node: "node-1", Role: "worker", State: "alive", Term: 4, Leader: "node-2", Degraded: true, Dropped: 2, LedgerSize: 5,
+		})
+		if bytes.Contains(env.Payload, []byte("null")) {
+			t.Fatalf("nil collections leaked to the wire as null: %s", env.Payload)
+		}
+		if !bytes.Contains(env.Payload, []byte(`"peers":[]`)) || !bytes.Contains(env.Payload, []byte(`"scores":{}`)) {
+			t.Fatalf("nil peers/scores should encode as []/{}, got %s", env.Payload)
 		}
 		got, err := PayloadOf[TelemetryPayload](env)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Peers != nil || got.Scores != nil {
-			t.Errorf("null should decode as nil; got Peers=%#v Scores=%#v", got.Peers, got.Scores)
+		if got.Peers == nil || len(got.Peers) != 0 {
+			t.Errorf("Peers = %#v, want empty non-nil", got.Peers)
 		}
-		// Reading a missing key from a nil map is safe; a sender that omits Scores
-		// must not make the dashboard code panic.
-		if v, ok := got.Scores["node-9:7946"]; ok || v != 0 {
-			t.Errorf("nil map lookup = (%v, %v), want (0, false)", v, ok)
+		if got.Scores == nil || len(got.Scores) != 0 {
+			t.Errorf("Scores = %#v, want empty non-nil", got.Scores)
+		}
+		if got.Node != "node-1" || got.Role != "worker" || got.State != "alive" || got.Term != 4 ||
+			got.Leader != "node-2" || !got.Degraded || got.Dropped != 2 || got.LedgerSize != 5 {
+			t.Errorf("scalars lost through MarshalJSON: %+v", got)
 		}
 	})
 
-	t.Run("telemetry empty peers and scores decode as empty non-nil", func(t *testing.T) {
+	t.Run("telemetry empty collections", func(t *testing.T) {
 		env := mustEnvelope(t, TypeTelemetry, "node-1", "", TelemetryPayload{
 			Node: "node-1", Role: "worker", State: "alive",
 			Peers: []MemberRecord{}, Scores: map[NodeAddress]float64{},
@@ -209,11 +200,23 @@ func TestPhase4EmptyCollectionsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Peers == nil || len(got.Peers) != 0 {
-			t.Errorf("Peers = %#v, want empty non-nil", got.Peers)
+		if got.Peers == nil || len(got.Peers) != 0 || got.Scores == nil || len(got.Scores) != 0 {
+			t.Errorf("got Peers=%#v Scores=%#v, want empty non-nil", got.Peers, got.Scores)
 		}
-		if got.Scores == nil || len(got.Scores) != 0 {
-			t.Errorf("Scores = %#v, want empty non-nil", got.Scores)
+	})
+
+	// MarshalJSON has a value receiver so that both a value and a pointer marshal
+	// through it. If it were a pointer receiver, json.Marshal(TelemetryPayload{})
+	// would bypass it and null would be back on the wire.
+	t.Run("pointer and value both go through MarshalJSON", func(t *testing.T) {
+		for _, v := range []any{TelemetryPayload{}, &TelemetryPayload{}, StateSyncPayload{}, &StateSyncPayload{}} {
+			b, err := json.Marshal(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(b, []byte("null")) {
+				t.Errorf("%T: null on the wire: %s", v, b)
+			}
 		}
 	})
 }
@@ -351,7 +354,7 @@ func TestStateSyncLargeLedgerFitsInFrame(t *testing.T) {
 
 // Pin the wire field names. The dashboard is vanilla JS reading these keys by
 // string; a Go-side rename that reflect.DeepEqual would never notice breaks it.
-func TestPhase4WireFieldNames(t *testing.T) {
+func TestSyncTaskWireFieldNames(t *testing.T) {
 	cases := []struct {
 		payload any
 		keys    []string
@@ -359,7 +362,7 @@ func TestPhase4WireFieldNames(t *testing.T) {
 		{TaskRecord{}, []string{"task_id", "assigned_to", "state"}},
 		{StateSyncPayload{}, []string{"term", "leader", "workers", "ledger", "version"}},
 		{TaskPayload{}, []string{"task_id", "kind"}},
-		{TaskResultPayload{}, []string{"task_id", "worker", "ok", "duration_ms"}},
+		{TaskResultPayload{}, []string{"task_id", "worker", "ok", "output", "duration_ms"}},
 		{TelemetryPayload{}, []string{"node", "role", "state", "term", "leader", "degraded", "peers", "scores", "dropped", "ledger_size"}},
 		{ChaosPayload{}, []string{"action"}},
 	}

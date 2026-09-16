@@ -436,6 +436,22 @@ type StateSyncPayload struct {
 	Version uint64       `json:"version"`
 }
 
+// MarshalJSON substitutes [] for nil Workers and Ledger. See
+// TelemetryPayload.MarshalJSON for why the wire never carries null collections.
+func (p StateSyncPayload) MarshalJSON() ([]byte, error) {
+	// The alias has the same fields but none of the methods, which is what stops
+	// json.Marshal from calling this MarshalJSON again and recursing forever.
+	type alias StateSyncPayload
+	a := alias(p)
+	if a.Workers == nil {
+		a.Workers = []NodeID{}
+	}
+	if a.Ledger == nil {
+		a.Ledger = []TaskRecord{}
+	}
+	return json.Marshal(a)
+}
+
 // TaskPayload is one unit of work injected at the Control Center.
 //
 // Body is opaque to this package and to every relay between the Control Center
@@ -455,8 +471,9 @@ type TaskResultPayload struct {
 	TaskID string `json:"task_id"`
 	Worker NodeID `json:"worker"`
 	OK     bool   `json:"ok"`
-	// Output is the result on success or the error text on failure.
-	Output string `json:"output,omitempty"`
+	// Output is the result on success or the error text on failure. It is not
+	// omitempty: the dashboard must see "" rather than undefined.
+	Output string `json:"output"`
 	// DurationMS is measured by the worker, locally, on its monotonic clock: read
 	// before the handler starts, read after it returns, subtract. It is NOT derived
 	// from Envelope.SentAtUnixNano on the task envelope -- that would subtract the
@@ -488,14 +505,38 @@ type TelemetryPayload struct {
 	Leader NodeID `json:"leader"`
 	// Degraded is set while a chaos "delay" is in effect on this node, so the
 	// dashboard can distinguish injected latency from genuine trouble.
-	Degraded bool                    `json:"degraded"`
-	Peers    []MemberRecord          `json:"peers"`
-	Scores   map[NodeAddress]float64 `json:"scores"`
+	Degraded bool           `json:"degraded"`
+	Peers    []MemberRecord `json:"peers"`
+	// Scores is keyed by NodeAddress; the dashboard joins it to Peers via
+	// MemberRecord.Advertise.
+	Scores map[NodeAddress]float64 `json:"scores"`
 	// Dropped counts data-plane frames this node shed under backpressure since it
 	// started. It is the dashboard's evidence that a gap in telemetry was load,
 	// not a partition.
 	Dropped    uint64 `json:"dropped"`
 	LedgerSize int    `json:"ledger_size"`
+}
+
+// MarshalJSON substitutes [] for a nil Peers and {} for a nil Scores.
+//
+// encoding/json encodes a nil slice or map as JSON null, and the consumer of this
+// payload is vanilla JavaScript that does `t.peers.length` and
+// `Object.entries(t.scores)` -- both of which throw on null. Fixing that on the
+// wire, rather than asking every sender to remember to allocate empty
+// collections, means the dashboard's safety does not depend on sender discipline
+// that no compiler enforces. The receiver-side contract is unchanged: after a
+// round trip a collection is empty and non-nil, and callers key off len either way.
+func (p TelemetryPayload) MarshalJSON() ([]byte, error) {
+	// See StateSyncPayload.MarshalJSON for why the alias exists.
+	type alias TelemetryPayload
+	a := alias(p)
+	if a.Peers == nil {
+		a.Peers = []MemberRecord{}
+	}
+	if a.Scores == nil {
+		a.Scores = map[NodeAddress]float64{}
+	}
+	return json.Marshal(a)
 }
 
 // ChaosPayload is a fault-injection instruction to one node.
