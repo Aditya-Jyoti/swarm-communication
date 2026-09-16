@@ -776,3 +776,66 @@ func TestDrainUnsentReturnsQueuedFramesControlFirst(t *testing.T) {
 		t.Errorf("second drain = %d frames", len(again))
 	}
 }
+
+// drainUnsent must not return until the writer goroutine has exited: a writer
+// blocked inside Write can still be holding a frame it dequeued, and a drain
+// that raced it would report the queue empty while the frame is about to be
+// lost on the closed socket.
+type holdWriteConn struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *holdWriteConn) Write(p []byte) (int, error) {
+	select {
+	case h.entered <- struct{}{}:
+	default:
+	}
+	<-h.release // ignores Close on purpose
+	return 0, errors.New("holdWriteConn: released")
+}
+
+func TestDrainUnsentWaitsForWriterExit(t *testing.T) {
+	_, server := net.Pipe()
+	w := &holdWriteConn{Conn: server, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	c := NewConn("node-2", w, nil, ConnConfig{})
+
+	if err := c.Send(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+		t.Fatal(err)
+	}
+	<-w.entered // the writer holds the first frame inside Write
+	queued := mustEnv(t, protocol.TypePing)
+	if err := c.Send(context.Background(), queued); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+
+	drained := make(chan []*protocol.Envelope, 1)
+	go func() { drained <- c.drainUnsent() }()
+	select {
+	case got := <-drained:
+		t.Fatalf("drainUnsent returned %d frames while the writer was still inside Write", len(got))
+	default:
+	}
+	select {
+	case <-c.writerDone:
+		t.Fatal("writerDone closed while the writer is parked in Write")
+	default:
+	}
+
+	close(w.release)
+	select {
+	case got := <-drained:
+		if len(got) != 1 || got[0].ID != queued.ID {
+			t.Errorf("drainUnsent = %v, want exactly the queued frame", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainUnsent did not return after the writer exited")
+	}
+	select {
+	case <-c.writerDone:
+	default:
+		t.Error("drainUnsent returned before writerDone was closed")
+	}
+}
