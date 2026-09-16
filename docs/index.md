@@ -41,17 +41,15 @@ the Go memory model. Every guide points back at the code that depends on it.
 
 ## How to read it
 
-```
-Architecture  ──▶  what this system does, and why it is shaped this way
-     │
-     ▼
-Concepts      ──▶  the foundations it stands on:
-                     Networking & OS internals
-                     Go runtime & concurrency
-                     Distributed systems theory
-     │
-     ▼
-Worklog       ──▶  the decisions, the alternatives rejected, and the reasoning
+```mermaid
+flowchart TD
+  A["Architecture"] --> A1["What this system does,<br/>and why it is shaped this way"]
+  A --> B["Concepts"]
+  B --> B1["Networking and OS internals"]
+  B --> B2["Go runtime and concurrency"]
+  B --> B3["Distributed systems theory"]
+  B --> C["Worklog"]
+  C --> C1["The decisions, the alternatives<br/>rejected, and the reasoning"]
 ```
 
 If you are here to learn rather than to operate, read the Architecture overview first for the map,
