@@ -996,3 +996,214 @@ func TestRegisterAfterCloseDiscardsTheSocket(t *testing.T) {
 		t.Error("a peer was registered on a closed pool")
 	}
 }
+
+// --- claims: deferring PeerDown while a replacement handshake is in flight ----------
+
+// The connection dies while our own dial to the same peer is mid-handshake. The
+// PeerDown must wait for the dial: if it succeeds, the peer never went away.
+func TestDeathDuringOwnDialIsSilentWhenTheDialSucceeds(t *testing.T) {
+	h := newHarness(t, idB, nil)
+	inbound, _, err := h.inboundFrom(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inbound.Close()
+	h.event(PeerUp)
+
+	old := entryFor(t, h.pool, idA.ID)
+	h.pool.Connect(addrA)
+	peer := h.nextDial() // the dial claim on addrA is held from before this point
+	defer peer.Close()
+
+	inbound.Close()
+	// Wait for the pool to process the death under the dial claim, so the
+	// handshake below completes against a parked entry rather than racing it
+	// (the other order is the ordinary tie-break path, covered elsewhere).
+	waitState(t, h.pool, "PeerDown parked", func() bool { return h.pool.deferred[idA.ID] == old })
+	if _, err := acceptHandshake(peer, idA, nil, far(), acceptAll); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, h.pool, "replacement registered", func() bool {
+		cur := h.pool.peers[idA.ID]
+		return cur != nil && cur != old
+	})
+	env := mustEnv(t, protocol.TypePing)
+	if err := h.pool.Send(context.Background(), idA.ID, env); err != nil {
+		t.Fatalf("Send after silent replacement: %v", err)
+	}
+	if got := readFrame(t, peer); got.ID != env.ID {
+		t.Error("frame did not arrive on the replacement connection")
+	}
+	h.noEvent()
+}
+
+func TestDeathDuringOwnDialEmitsPeerDownWhenTheDialFails(t *testing.T) {
+	h := newHarness(t, idB, func(c *PoolConfig) { c.MaxRedials = 1 })
+	inbound, _, err := h.inboundFrom(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inbound.Close()
+	h.event(PeerUp)
+
+	old := entryFor(t, h.pool, idA.ID)
+	h.pool.Connect(addrA)
+	peer := h.nextDial()
+	inbound.Close()
+	waitState(t, h.pool, "PeerDown parked", func() bool { return h.pool.deferred[idA.ID] == old })
+	// The peer hangs up mid-handshake: the claim resolves as a failure and the
+	// deferred PeerDown is emitted -- exactly once.
+	peer.Close()
+	ev := h.event(PeerDown)
+	if ev.Peer.ID != idA.ID {
+		t.Errorf("PeerDown for %q", ev.Peer.ID)
+	}
+	if len(h.pool.Peers()) != 0 {
+		t.Errorf("dead entry still listed: %+v", h.pool.Peers())
+	}
+	// The loop redials once more (MaxRedials=1) and then gives up; drain it.
+	h.nextDial().Close()
+	h.pool.Close()
+	h.noEvent()
+}
+
+// White-box: an inbound claim that is released without a registration must
+// surface the deferred PeerDown, and a claim that is released while the
+// connection is still alive changes nothing.
+func TestInboundClaimReleaseResolvesDeadEntry(t *testing.T) {
+	h := newHarness(t, idB, nil)
+	h.pool.Connect(addrA)
+	peer := h.acceptAs(idA)
+	defer peer.Close()
+	h.event(PeerUp)
+
+	// Take a claim as admitPolicy would for an approved HELLO.
+	if ok, _ := h.pool.admitPolicy(PeerInfo{ID: idA.ID, Incarnation: idA.Incarnation}); !ok {
+		t.Fatal("policy rejected a lower-ID inbound")
+	}
+	// Releasing it while the connection is healthy is a no-op.
+	h.pool.releaseClaim(idA.ID)
+	h.noEvent()
+	if len(h.pool.Peers()) != 1 {
+		t.Fatal("healthy entry was removed by a claim release")
+	}
+
+	// Claim again, kill the connection: the entry leaves the map but its
+	// PeerDown is parked until the claim resolves.
+	h.pool.admitPolicy(PeerInfo{ID: idA.ID, Incarnation: idA.Incarnation})
+	e := entryFor(t, h.pool, idA.ID)
+	peer.Close()
+	waitState(t, h.pool, "PeerDown parked", func() bool { return h.pool.deferred[idA.ID] == e })
+	select {
+	case <-e.gone:
+		t.Fatal("a parked entry was retired before its fate was decided")
+	default:
+	}
+	h.noEvent()
+	if len(h.pool.Peers()) != 0 {
+		t.Fatal("a dead entry is still listed")
+	}
+	if err := h.pool.Send(context.Background(), idA.ID, mustEnv(t, protocol.TypePing)); !errors.Is(err, ErrUnknownPeer) {
+		t.Errorf("Send to a parked peer = %v, want ErrUnknownPeer", err)
+	}
+
+	h.pool.releaseClaim(idA.ID)
+	ev := h.event(PeerDown)
+	if ev.Peer.ID != idA.ID || ev.Disposition != DispositionCleanClose {
+		t.Errorf("deferred PeerDown = %+v", ev)
+	}
+	select {
+	case <-e.gone:
+	case <-time.After(failsafe):
+		t.Fatal("resolved entry was never retired")
+	}
+	// The redial loop was parked on e.gone throughout; only now does it dial.
+	h.nextDial().Close()
+	if n := h.dialer.count(); n != 2 {
+		t.Errorf("dial attempts = %d, want 2 (no redial while parked)", n)
+	}
+}
+
+// While a PeerDown is parked, a replacement that arrives from the higher ID is
+// accepted (there is nothing to tie-break against) and the parked event is
+// discarded without a PeerUp: the consumer never learned the peer was gone.
+func TestParkedPeerDownIsDiscardedByReplacement(t *testing.T) {
+	h := newHarness(t, idA, nil) // we are the lower ID
+	h.pool.Connect(addrB)
+	peer := h.acceptAs(idB)
+	defer peer.Close()
+	h.event(PeerUp)
+	e := entryFor(t, h.pool, idB.ID)
+
+	// Hold a claim so the death is parked, then kill the connection. Taken
+	// directly: as the lower ID our own policy would not approve an inbound
+	// from node-b while this connection is alive, which is the point.
+	h.pool.mu.Lock()
+	h.pool.claims[idB.ID]++
+	h.pool.mu.Unlock()
+	peer.Close()
+	waitState(t, h.pool, "PeerDown parked", func() bool { return h.pool.deferred[idB.ID] == e })
+
+	inbound, _, err := h.inboundFrom(idB)
+	if err != nil {
+		t.Fatalf("inbound while a PeerDown is parked was rejected: %v", err)
+	}
+	defer inbound.Close()
+	h.pool.releaseClaim(idB.ID)
+	h.noEvent()
+	if cur := entryFor(t, h.pool, idB.ID); cur == e {
+		t.Error("old entry is back in the map")
+	}
+	// Traffic proves the replacement is live.
+	env := mustEnv(t, protocol.TypePing)
+	if err := h.pool.Send(context.Background(), idB.ID, env); err != nil {
+		t.Fatal(err)
+	}
+	readFrame(t, inbound)
+	// The redial loop was parked on the old entry throughout and is now parked
+	// on the replacement: no redial happened.
+	if n := h.dialer.count(); n != 1 {
+		t.Errorf("dial attempts = %d, want 1", n)
+	}
+}
+
+// entryFor returns the registered entry for id, failing the test if none exists.
+func entryFor(t *testing.T, p *Pool, id protocol.NodeID) *peerEntry {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.peers[id]
+	if e == nil {
+		t.Fatalf("%s has no entry for %s", p.Self(), id)
+	}
+	return e
+}
+
+// waitState blocks until pred, evaluated with the pool's mutex held, is true. It
+// rides the pool's Cond, so it wakes on the exact mutation that satisfies it
+// rather than polling; the failsafe only fires when something is broken.
+func waitState(t *testing.T, p *Pool, what string, pred func() bool) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		for !pred() {
+			p.changed.Wait()
+		}
+		p.mu.Unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(failsafe):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// waitQuiescent blocks until no handshake is in flight and no PeerDown is parked.
+func waitQuiescent(t *testing.T, p *Pool) {
+	t.Helper()
+	waitState(t, p, "quiescence", func() bool {
+		return len(p.claims) == 0 && len(p.dialing) == 0 && len(p.deferred) == 0 && len(p.pending) == 0
+	})
+}

@@ -301,6 +301,36 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// drainUnsent returns every frame that was queued but never handed to the socket,
+// control frames first. It blocks until Done is closed: that is the happens-before
+// edge proving the writer goroutine has exited and no longer competes for the
+// queues, so the receives below cannot race with it.
+//
+// The pool uses this when it replaces a connection with a better one to the same
+// peer, so a caller's frame is not silently lost in the swap. A frame the writer
+// had already dequeued and was mid-Write on is not recoverable and is not returned.
+func (c *Conn) drainUnsent() []*protocol.Envelope {
+	<-c.done
+	var out []*protocol.Envelope
+	for drained := false; !drained; {
+		select {
+		case env := <-c.ctrl:
+			out = append(out, env)
+		default:
+			drained = true
+		}
+	}
+	for drained := false; !drained; {
+		select {
+		case env := <-c.data:
+			out = append(out, env)
+		default:
+			drained = true
+		}
+	}
+	return out
+}
+
 // closeWith records why the connection ended, then closes it. Only the reader
 // goroutine calls this, so the unsynchronised writes to disposition and closeErr
 // happen before close(done) and are safely published by it.
