@@ -133,7 +133,100 @@ anything else.
 
 ---
 
-## Open questions for the user — blocking Phase 2
+## 2026-09-16 — Phase 1 Checkpoint — Decisions locked by the user
+
+### 2.1 Wire format: length-prefixed JSON
+**Decided:** `uint32` big-endian length prefix + JSON body.
+
+```
+┌────────────┬────────────────────────────────┐
+│ uint32 BE  │ JSON payload                   │
+│ length     │ {"type":"HEARTBEAT","node":...}│
+└────────────┴────────────────────────────────┘
+```
+
+**Rejected:** newline-delimited JSON — no bound before the delimiter arrives, so a peer that never
+sends `\n` is a one-packet OOM primitive; `bufio.Reader.ReadString` has no maximum. Also rejected:
+hand-rolled binary — schema evolution becomes manual versioning work for a saving we do not need at
+this message rate.
+
+**Binding consequences for `pkg/protocol`:**
+- A `MaxFrameSize` constant is enforced *before* the payload buffer is allocated. Reading the length,
+  then allocating that many bytes, then discovering it was 4 GB, is the bug this ordering exists to
+  prevent.
+- A frame decode error is unrecoverable on a stream: once the reader is off a frame boundary, every
+  subsequent length is plausible garbage. The connection is dropped, never resynchronised.
+- `TCP_NODELAY` stays on (Go's default). See
+  [Stream Framing](/concepts/stream-framing) for why the Nagle/delayed-ACK interaction is a
+  correctness bug in a latency-derived health model, not a performance nuisance.
+
+### 2.2 Discovery: gossip from a seed
+**Decided:** a joining node contacts a seed, receives the membership view, then propagates deltas
+peer-to-peer. $N$ is genuinely dynamic — not known at compose time.
+
+**Rejected:** a static peer list from compose environment (simpler, but fixes $N$ at deploy time and
+makes "scale the swarm live" impossible); a shared Docker network alias (Docker-specific, and the
+DNS view lags real membership).
+
+**Accepted costs, recorded honestly:**
+- The seed is a bootstrap single point of failure. Mitigation: accept a *list* of seeds and treat
+  reachability of any one as sufficient. The seed matters only at join time — an established swarm
+  survives seed loss.
+- This materially expands Phase 3. Gossip needs a membership CRDT or versioned deltas, anti-entropy
+  to repair divergence, and a decision on whether membership is eventually consistent (it is).
+- Peer addresses are resolved by name at dial time and never cached. Container IP recycling after a
+  chaos kill means a cached address can point at a *different, live* node — the worst failure mode,
+  because it fails silently. See [Docker Bridge Networking](/concepts/docker-bridge-networking).
+
+### 2.3 `HealthStrategy` contract amended
+**Decided:** the brief's signature is amended to carry a context, and score direction is fixed as
+**lower-is-better (a cost)**.
+
+```go
+type HealthStrategy interface {
+    Name() string
+    EvaluateScore(ctx context.Context, target NodeAddress) (float64, error)
+}
+```
+
+**Rationale for deviating from the brief:** without a context, a probe cannot be cancelled or
+bounded by its caller, the deadline hides inside each implementation, and shutdown must wait out
+every in-flight probe. That contradicts the deadline discipline committed to in
+[The Netpoller](/concepts/go-netpoller) and
+[Context & Cancellation](/concepts/context-cancellation). Lower-is-better was chosen over
+higher-is-better because latency and CPU load map directly, and only capacity-style metrics need
+inverting; inverting a latency near zero is numerically awkward in a way inverting free memory is not.
+
+**Binding consequences:** `pkg/cluster` compares scores and never interprets them. A probe returning
+an error is *not* a score of zero — the distinction between "unreachable" and "excellent" must be
+represented in the type, not encoded in a magic float. And per
+[Context & Cancellation](/concepts/context-cancellation), a probe cancelled by shutdown must never be
+counted as a missed heartbeat.
+
+### 2.4 Election trigger: event-driven with a periodic floor
+**Decided:** elect on membership change (join, or $K$-missed-beat eviction), and additionally
+re-evaluate on a slow timer (~30 s) as a safety net.
+
+**Rejected:** periodic-only (failover latency bounded below by $T$ even when death was detected
+instantly); event-only (a single missed event leaves the swarm in a stale topology forever, with no
+self-correction path).
+
+**Accepted cost:** two paths into the same election routine, which must therefore be idempotent and
+must produce the same result from the same membership view regardless of which path invoked it. This
+is a testable property and will be tested as one. The periodic path must also not cause churn —
+re-electing because a score moved by 0.3 ms is thrash, so hysteresis is required.
+
+### 2.5 Syllabus additions triggered by these decisions
+
+| Nominated concept | Why | Needed by |
+|---|---|---|
+| Gossip protocols & SWIM | The chosen discovery mechanism. Infection-style dissemination, fanout vs convergence time, piggybacked failure detection. | Phase 3 |
+| Anti-entropy & eventual consistency of membership | Gossip converges; it does not agree. What that means when two nodes hold different views of $N$ at election time. | Phase 3 |
+| Idempotence & hysteresis in control loops | Two triggers into one election routine, and the thrash that follows if a 0.3 ms score change can flip a leader. | Phase 4 |
+
+---
+
+## Open questions — resolved 2026-09-16, retained for the record
 
 1. **Wire serialisation and framing.** JSON over newline-delimited frames (readable with `netcat`,
    trivially debuggable, allocation-heavy) versus a length-prefixed binary envelope (bounded,
