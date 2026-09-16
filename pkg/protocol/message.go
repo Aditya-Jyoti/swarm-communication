@@ -93,6 +93,19 @@ const (
 	// requirement: the failure detector must reach the same conclusion without it,
 	// because a SIGKILLed container never gets to send one.
 	TypeLeave MessageType = "LEAVE"
+
+	// TypeStateSync is a leader replicating its authoritative state (term, roster,
+	// task ledger) to an attached worker. Carries StateSyncPayload. It is control
+	// plane despite carrying the ledger: a worker promoted after a failover serves
+	// from the last snapshot it received, so a shed STATE_SYNC is lost work, not a
+	// gap in a chart.
+	TypeStateSync MessageType = "STATE_SYNC"
+
+	// TypeChaos is a fault-injection instruction from the Control Center to one
+	// node. Carries ChaosPayload. Control plane because a "clear" that is dropped
+	// under load leaves a node permanently degraded, which would make every chaos
+	// experiment after it unreproducible.
+	TypeChaos MessageType = "CHAOS"
 )
 
 // ---------------------------------------------------------------------------
@@ -136,6 +149,8 @@ var knownTypes = map[MessageType]plane{
 	TypeJoinCluster:     planeControl,
 	TypeJoinAck:         planeControl,
 	TypeLeave:           planeControl,
+	TypeStateSync:       planeControl,
+	TypeChaos:           planeControl,
 
 	TypeTask:       planeData,
 	TypeTaskResult: planeData,
@@ -381,6 +396,118 @@ type JoinAckPayload struct {
 // the K-missed-beat wait.
 type LeavePayload struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+// TaskRecord is one entry in a leader's task ledger, as replicated to workers.
+//
+// State is a string rather than a typed enum for the same reason as
+// MemberRecord.Role: this package must not know what "done" means, and a string
+// keeps a state introduced by a newer build decodable by an older one instead of
+// failing the whole snapshot. The cluster layer maps it at the boundary.
+type TaskRecord struct {
+	TaskID     string `json:"task_id"`
+	AssignedTo NodeID `json:"assigned_to"`
+	State      string `json:"state"` // "pending" | "done" | "failed"
+	// Result is the worker's output, populated once State leaves "pending".
+	Result string `json:"result,omitempty"`
+}
+
+// StateSyncPayload is a leader's full state snapshot for an attached worker.
+//
+// It is a snapshot, not a delta: a receiver REPLACES its copy, never merges. That
+// is the opposite rule from MembershipDeltaPayload, and the difference is who is
+// allowed to speak. Membership is gossip -- every node asserts facts about the
+// peers it happens to know, no single node has the whole picture, and merging is
+// how partial views converge. Cluster state has exactly one author, the leader of
+// the current term, and a worker keeps only the newest thing that author said. A
+// worker that merged snapshots would resurrect ledger entries the leader had
+// already retired, and after a failover the promoted worker would serve a ledger
+// no leader ever held.
+//
+// Version is the leader's monotonic snapshot counter. A worker discards a
+// snapshot with a lower (Term, Version) than the one it holds, which is what makes
+// reordered delivery across a reconnect harmless. Like ViewVersion, it orders
+// snapshots from ONE leader and says nothing across leaders; Term does that.
+type StateSyncPayload struct {
+	Term    uint64       `json:"term"`
+	Leader  NodeID       `json:"leader"`
+	Workers []NodeID     `json:"workers"`
+	Ledger  []TaskRecord `json:"ledger"`
+	Version uint64       `json:"version"`
+}
+
+// TaskPayload is one unit of work injected at the Control Center.
+//
+// Body is opaque to this package and to every relay between the Control Center
+// and the worker that executes it. json.RawMessage keeps it verbatim through each
+// hop, so a leader forwarding a task never has to understand -- or re-encode --
+// what the task is.
+type TaskPayload struct {
+	TaskID string `json:"task_id"`
+	// Kind selects the handler on the worker. A worker that does not recognise it
+	// reports failure via TaskResultPayload rather than dropping the connection.
+	Kind string          `json:"kind"`
+	Body json.RawMessage `json:"body,omitempty"`
+}
+
+// TaskResultPayload is a worker's completion report for one TaskPayload.
+type TaskResultPayload struct {
+	TaskID string `json:"task_id"`
+	Worker NodeID `json:"worker"`
+	OK     bool   `json:"ok"`
+	// Output is the result on success or the error text on failure.
+	Output string `json:"output,omitempty"`
+	// DurationMS is measured by the worker, locally, on its monotonic clock: read
+	// before the handler starts, read after it returns, subtract. It is NOT derived
+	// from Envelope.SentAtUnixNano on the task envelope -- that would subtract the
+	// Control Center's wall clock from the worker's, which is meaningless here for
+	// the reasons given on that field.
+	DurationMS float64 `json:"duration_ms"`
+}
+
+// TelemetryPayload is a node's periodic self-report for the dashboard.
+//
+// Scores are this node's health scores for its peers as produced by ITS OWN
+// HealthStrategy instance. They are comparable with each other and with nothing
+// else: two nodes' scores for the same peer are measured over different links by
+// different strategy state, and the dashboard must not rank nodes across the swarm
+// with them. Show them per-node, or not at all.
+//
+// The sender MUST sanitise Scores before building the envelope. A strategy that
+// has never completed a probe can legitimately produce NaN or +Inf, and
+// encoding/json refuses to marshal either, so SetPayload fails and the whole
+// sample is lost -- including the Degraded flag the dashboard most needs at that
+// moment. Drop the offending key, or replace it with a sentinel the dashboard
+// understands; do not let it reach the codec.
+type TelemetryPayload struct {
+	Node  NodeID `json:"node"`
+	Role  string `json:"role"`  // "leader" | "worker"
+	State string `json:"state"` // "alive" | "suspect" | "dead"
+	Term  uint64 `json:"term"`
+	// Leader is the leader this node is attached to, or itself if it leads.
+	Leader NodeID `json:"leader"`
+	// Degraded is set while a chaos "delay" is in effect on this node, so the
+	// dashboard can distinguish injected latency from genuine trouble.
+	Degraded bool                    `json:"degraded"`
+	Peers    []MemberRecord          `json:"peers"`
+	Scores   map[NodeAddress]float64 `json:"scores"`
+	// Dropped counts data-plane frames this node shed under backpressure since it
+	// started. It is the dashboard's evidence that a gap in telemetry was load,
+	// not a partition.
+	Dropped    uint64 `json:"dropped"`
+	LedgerSize int    `json:"ledger_size"`
+}
+
+// ChaosPayload is a fault-injection instruction to one node.
+//
+// Action is a string rather than an enum so that a new fault type can be added at
+// the Control Center without every node needing to fail the decode. DelayMS is
+// meaningful only for "delay". Neither field is validated here: a negative or
+// absurd DelayMS round-trips unchanged, and it is the RECEIVER that rejects it,
+// because only the receiver knows what its transport can honour.
+type ChaosPayload struct {
+	Action  string `json:"action"` // "kill" | "delay" | "clear"
+	DelayMS int    `json:"delay_ms,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
