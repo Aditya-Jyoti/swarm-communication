@@ -309,6 +309,80 @@ type HeartbeatAckPayload struct {
 	ObservedLeader NodeID `json:"observed_leader"`
 }
 
+// MemberRecord is the wire representation of one node in a membership view.
+//
+// Role and State are strings rather than typed enums on purpose. This package must
+// not know what a leader IS -- that is cluster semantics -- and a string keeps an
+// unrecognised future role forward-compatible instead of failing to decode. The
+// cluster layer maps these to and from its own enum at the boundary, and is the only
+// place that attaches meaning to them.
+type MemberRecord struct {
+	ID        NodeID      `json:"id"`
+	Advertise NodeAddress `json:"advertise"`
+	// Incarnation increases each time a node restarts. It is the tie-breaker that
+	// lets a rejoining node's own claim about itself beat a stale rumour that it is
+	// dead, which is what makes membership converge rather than oscillate.
+	Incarnation int64  `json:"incarnation"`
+	Role        string `json:"role"`  // "leader" | "worker"
+	State       string `json:"state"` // "alive" | "suspect" | "dead"
+}
+
+// MembershipDeltaPayload carries a set of member records that the sender believes
+// the receiver may not have.
+//
+// It is a delta, not a snapshot: it asserts facts about the members it names and
+// says nothing about members it omits. A receiver must therefore merge, never
+// replace. Treating a delta as a complete view would let one message silently
+// evict every node the sender happened not to mention.
+type MembershipDeltaPayload struct {
+	Members []MemberRecord `json:"members"`
+	// ViewVersion is the sender's monotonic view counter, used to spot staleness.
+	// It is NOT a logical clock across the swarm and cannot order two nodes'
+	// versions against each other.
+	ViewVersion uint64 `json:"view_version"`
+}
+
+// ElectionResultPayload announces the outcome of an election as the sender computed it.
+//
+// It is an announcement, not a command. Every node runs the same deterministic
+// election over its own view, so this exists to converge faster and to make
+// disagreement observable -- two nodes reporting different leader sets for the same
+// term is exactly the split-brain signal the dashboard needs to surface.
+type ElectionResultPayload struct {
+	Term        uint64   `json:"term"`
+	Leaders     []NodeID `json:"leaders"`
+	ClusterSize int      `json:"cluster_size"`
+}
+
+// JoinClusterPayload is a worker asking a leader to attach it.
+type JoinClusterPayload struct {
+	Worker NodeID `json:"worker"`
+	// Score is the worker's measured health score for this leader, lower being
+	// better, included so the leader can log why it was chosen. The leader must not
+	// compare it against scores from other workers: scores are only comparable
+	// within one strategy instance on one node.
+	Score float64 `json:"score"`
+}
+
+// JoinAckPayload answers a JoinClusterPayload.
+type JoinAckPayload struct {
+	Accepted bool   `json:"accepted"`
+	Reason   string `json:"reason,omitempty"`
+	// Leader is the node the requester should attach to. On rejection it may name a
+	// different leader -- for instance when the receiver has already been demoted
+	// and knows who replaced it.
+	Leader NodeID `json:"leader"`
+}
+
+// LeavePayload announces a voluntary departure.
+//
+// It is an optimisation, never a guarantee. A node that is SIGKILLed sends nothing,
+// so failure detection must work without it; receiving one only lets the swarm skip
+// the K-missed-beat wait.
+type LeavePayload struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Envelope construction and payload access.
 // ---------------------------------------------------------------------------
