@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -593,4 +594,185 @@ func TestConcurrentSends(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// --- coverage of the failure branches ---------------------------------------------
+
+func TestDispositionString(t *testing.T) {
+	want := map[Disposition]string{
+		DispositionOther:             "other",
+		DispositionCleanClose:        "clean-close",
+		DispositionPeerDied:          "peer-died",
+		DispositionProtocolViolation: "protocol-violation",
+		DispositionTimeout:           "timeout",
+		Disposition(99):              "other",
+	}
+	for d, s := range want {
+		if got := d.String(); got != s {
+			t.Errorf("%d.String() = %q, want %q", d, got, s)
+		}
+	}
+}
+
+func TestPeerAndDispositionBeforeDone(t *testing.T) {
+	_, server := net.Pipe()
+	c := NewConn("node-2", server, nil, ConnConfig{})
+	defer c.Close()
+	if c.Peer() != "node-2" {
+		t.Errorf("Peer() = %q", c.Peer())
+	}
+	// Before Done is closed the disposition is deliberately not meaningful and
+	// must not block or race: it returns the zero values.
+	if d, err := c.Disposition(); d != DispositionOther || err != nil {
+		t.Errorf("Disposition before Done = %v, %v", d, err)
+	}
+}
+
+// failingDeadlineConn is a socket whose deadline setters fail, standing in for a
+// descriptor the kernel has already invalidated. Writes and reads otherwise block
+// until closed so the goroutine under test is parked, not spinning.
+type failingDeadlineConn struct {
+	net.Conn
+	failRead, failWrite bool
+}
+
+func (f *failingDeadlineConn) SetReadDeadline(time.Time) error {
+	if f.failRead {
+		return errors.New("EBADF: read deadline")
+	}
+	return f.Conn.SetReadDeadline(time.Time{})
+}
+
+func (f *failingDeadlineConn) SetWriteDeadline(time.Time) error {
+	if f.failWrite {
+		return errors.New("EBADF: write deadline")
+	}
+	return f.Conn.SetWriteDeadline(time.Time{})
+}
+
+func TestReadDeadlineFailureClosesTheConnection(t *testing.T) {
+	_, server := net.Pipe()
+	c := NewConn("node-2", &failingDeadlineConn{Conn: server, failRead: true}, nil, ConnConfig{})
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader did not close on a SetReadDeadline failure")
+	}
+	d, err := c.Disposition()
+	if d != DispositionOther || err == nil || !strings.Contains(err.Error(), "read deadline") {
+		t.Errorf("Disposition = %v, %v", d, err)
+	}
+}
+
+func TestWriteDeadlineFailureClosesTheConnection(t *testing.T) {
+	_, server := net.Pipe()
+	c := NewConn("node-2", &failingDeadlineConn{Conn: server, failWrite: true}, nil, ConnConfig{})
+	// Nothing happens until there is a frame to write; the writer is parked on
+	// its queues, not on the socket.
+	if err := c.Send(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not close on a SetWriteDeadline failure")
+	}
+	d, err := c.Disposition()
+	if d != DispositionOther || err == nil || !strings.Contains(err.Error(), "write deadline") {
+		t.Errorf("Disposition = %v, %v", d, err)
+	}
+}
+
+// A write that fails with a deadline error is classified as a timeout, exactly
+// like a read that does: the peer stopped draining its receive window, which
+// is silence by another name.
+func TestWriteFailureIsClassified(t *testing.T) {
+	client, server := tcpPair(t)
+	defer client.Close()
+	c := NewConn("node-2", server, nil, ConnConfig{
+		WriteTimeout: time.Nanosecond, // every write deadline is already in the past
+		IdleTimeout:  time.Hour,
+	})
+	defer c.Close()
+
+	if err := c.Send(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not close on a failed write")
+	}
+	d, err := c.Disposition()
+	if d != DispositionTimeout {
+		t.Errorf("Disposition = %v (%v), want timeout", d, err)
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("error %v does not wrap os.ErrDeadlineExceeded", err)
+	}
+}
+
+// writeFailConn fails every Write with a plain error and keeps Read parked until
+// the test releases it, so the writer goroutine -- not the reader -- is the one
+// that ends the connection, and the disposition it records is the one asserted.
+type writeFailConn struct {
+	net.Conn
+	readRelease chan struct{}
+}
+
+func (w *writeFailConn) Read([]byte) (int, error) {
+	<-w.readRelease
+	return 0, errors.New("writeFailConn: released")
+}
+
+func (w *writeFailConn) Write([]byte) (int, error) { return 0, errors.New("EPIPE") }
+
+// A write that fails with a plain socket error is a transport error, not a
+// timeout and not a protocol violation.
+func TestWriteFailureWithPlainErrorIsOther(t *testing.T) {
+	_, server := net.Pipe()
+	w := &writeFailConn{Conn: server, readRelease: make(chan struct{})}
+	defer close(w.readRelease)
+	c := NewConn("node-2", w, nil, ConnConfig{})
+	if err := c.Send(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not close on a failed write")
+	}
+	d, err := c.Disposition()
+	if d != DispositionOther || err == nil || !strings.Contains(err.Error(), "EPIPE") {
+		t.Errorf("Disposition = %v, %v; want other with the write error", d, err)
+	}
+}
+
+func TestDrainUnsentReturnsQueuedFramesControlFirst(t *testing.T) {
+	g := newGateConn()
+	c := NewConn("node-2", g, nil, ConnConfig{CtrlDepth: 4, DataDepth: 4})
+
+	// First frame parks the writer inside the gated Write; the rest queue.
+	if err := c.Send(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+		t.Fatal(err)
+	}
+	<-g.entered
+	data := mustEnv(t, protocol.TypeTelemetry)
+	ctrl := mustEnv(t, protocol.TypePing)
+	if err := c.Send(context.Background(), data); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send(context.Background(), ctrl); err != nil {
+		t.Fatal(err)
+	}
+
+	c.Close()
+	got := c.drainUnsent()
+	if len(got) != 2 || got[0].ID != ctrl.ID || got[1].ID != data.ID {
+		t.Errorf("drainUnsent = %v, want [ctrl data] regardless of send order", got)
+	}
+	// Idempotent: a second drain finds nothing.
+	if again := c.drainUnsent(); len(again) != 0 {
+		t.Errorf("second drain = %d frames", len(again))
+	}
 }
