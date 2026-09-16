@@ -13,11 +13,6 @@ import (
 type ListenerConfig struct {
 	// Addr is the "host:port" to bind, e.g. ":7000" or "127.0.0.1:0".
 	Addr string
-	// Now is accepted for symmetry with PoolConfig and ConnConfig. The accept
-	// loop itself sets no deadlines -- Accept blocks until a connection arrives or
-	// the listener is closed, and the handshake deadline is the pool's business --
-	// so it is currently unused.
-	Now func() time.Time
 }
 
 // Listener binds a TCP port and feeds every accepted socket to a Pool.
@@ -45,6 +40,14 @@ type Listener struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+
+	// stopped is closed by acceptLoop on exit, and err records why. A loop that
+	// dies on a permanent error without anyone calling Close would otherwise be
+	// invisible: the process keeps running and simply never accepts again. err is
+	// written once before stopped is closed and read only after, which is the
+	// happens-before edge that makes the plain field safe.
+	stopped chan struct{}
+	err     error
 }
 
 // Listen binds cfg.Addr and starts accepting into pool.
@@ -59,7 +62,7 @@ func Listen(cfg ListenerConfig, pool *Pool) (*Listener, error) {
 // serve wraps an already-bound listener. It is the seam tests use to inject a
 // listener that fails in controlled ways.
 func serve(ln net.Listener, pool *Pool) *Listener {
-	l := &Listener{ln: ln, pool: pool, done: make(chan struct{})}
+	l := &Listener{ln: ln, pool: pool, done: make(chan struct{}), stopped: make(chan struct{})}
 	l.wg.Add(1)
 	go l.acceptLoop()
 	return l
@@ -68,6 +71,21 @@ func serve(ln net.Listener, pool *Pool) *Listener {
 // Addr returns the bound address, which is how a caller that asked for port 0
 // learns what it got.
 func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
+
+// Done is closed when the accept loop has exited, whether by Close or because
+// Accept failed permanently. A supervisor selects on it to notice the latter.
+func (l *Listener) Done() <-chan struct{} { return l.stopped }
+
+// Err reports why the accept loop exited: nil after a Close, otherwise the Accept
+// error. Only meaningful once Done is closed.
+func (l *Listener) Err() error {
+	select {
+	case <-l.stopped:
+		return l.err
+	default:
+		return nil
+	}
+}
 
 // Close stops the accept loop and joins it. Idempotent. Sockets already handed to
 // the pool are the pool's to close.
@@ -92,6 +110,7 @@ const (
 
 func (l *Listener) acceptLoop() {
 	defer l.wg.Done()
+	defer close(l.stopped)
 	delay := time.Duration(0)
 	for {
 		raw, err := l.ln.Accept()
@@ -104,7 +123,8 @@ func (l *Listener) acceptLoop() {
 			if !isTemporaryAcceptError(err) {
 				// Anything else means the listener itself is broken (closed by
 				// someone other than us, or the interface went away). There is
-				// no accepting left to do.
+				// no accepting left to do; record why and stop.
+				l.err = fmt.Errorf("network: node %q: accept on %s: %w", l.pool.Self(), l.ln.Addr(), err)
 				return
 			}
 			if delay == 0 {

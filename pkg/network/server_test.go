@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -364,19 +365,43 @@ func TestAcceptLoopReturnsOnPermanentError(t *testing.T) {
 	defer pool.Close()
 	ln := newScriptedListener(acceptStep{err: errors.New("EBADF")})
 	l := serve(ln, pool)
+	if err := l.Err(); err != nil {
+		t.Errorf("Err() before the loop exited = %v", err)
+	}
 	<-ln.accepts
-	// Close joins the loop; if the loop had treated EBADF as temporary it would
-	// be parked in a backoff timer or on the next Accept, and this would still
-	// return because Close unblocks both. So prove the loop exited on its own:
-	// wait on the WaitGroup directly, without closing.
-	waited := make(chan struct{})
-	go func() { l.wg.Wait(); close(waited) }()
+	// Close would also return here, because it unblocks a loop parked in a
+	// backoff or on the next Accept. Done is the proof the loop exited on its own.
 	select {
-	case <-waited:
+	case <-l.Done():
 	case <-time.After(failsafe):
 		t.Fatal("accept loop did not return on a permanent error")
 	}
+	err := l.Err()
+	if err == nil || !strings.Contains(err.Error(), "EBADF") || !strings.Contains(err.Error(), string(idA.ID)) {
+		t.Errorf("Err() = %v, want the accept error naming the node", err)
+	}
 	l.Close()
+	if l.Err() != err {
+		t.Error("Err() changed after Close")
+	}
+}
+
+func TestListenerDoneAfterCloseHasNoError(t *testing.T) {
+	pool := NewPool(PoolConfig{Self: idA})
+	defer pool.Close()
+	l, err := Listen(ListenerConfig{Addr: "127.0.0.1:0"}, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	select {
+	case <-l.Done():
+	case <-time.After(failsafe):
+		t.Fatal("Done not closed after Close")
+	}
+	if err := l.Err(); err != nil {
+		t.Errorf("Err() after a deliberate Close = %v", err)
+	}
 }
 
 func TestAcceptLoopCloseDuringBackoff(t *testing.T) {
