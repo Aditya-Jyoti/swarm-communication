@@ -1,13 +1,15 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
+import mathjax3 from 'markdown-it-mathjax3'
 
 // Sidebar groups are extended dynamically by the `doc-educator` agent after every
 // Concept Discovery pass. Keep groups ordered from "how this system works" toward
 // "the foundations it stands on", so the site reads as a curriculum rather than a
 // reference dump.
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: 'swarm-net',
   description:
-    'A self-healing peer-to-peer swarm network in Go — built in the open, documented as a curriculum.',
+    'A self-healing peer-to-peer swarm network in Go -- built in the open, documented as a curriculum.',
   lang: 'en-US',
   cleanUrls: true,
   lastUpdated: true,
@@ -37,29 +39,36 @@ export default defineConfig({
         ]
       },
       {
-        text: 'Concepts — Networking & OS Internals',
+        text: 'Concepts -- Networking & OS Internals',
         collapsed: false,
         items: [
           { text: 'TCP Sockets & The Kernel', link: '/concepts/tcp-sockets-and-the-kernel' },
           { text: 'Stream Framing', link: '/concepts/stream-framing' },
+          { text: 'io.Reader, io.Writer & ReadFull', link: '/concepts/io-reader-writer-contracts' },
+          { text: 'Wire Protocol Design', link: '/concepts/wire-protocol-design' },
           { text: 'epoll, select & Non-Blocking I/O', link: '/concepts/nonblocking-io-and-epoll' },
           { text: 'Docker Bridge Networking', link: '/concepts/docker-bridge-networking' }
         ]
       },
       {
-        text: 'Concepts — Go Runtime & Concurrency',
+        text: 'Concepts -- Go Runtime & Concurrency',
         collapsed: false,
         items: [
           { text: 'The GMP Scheduler', link: '/concepts/go-scheduler-gmp' },
           { text: 'The Netpoller', link: '/concepts/go-netpoller' },
           { text: 'CSP, Channels & The Memory Model', link: '/concepts/csp-channels-and-memory-model' },
-          { text: 'Context & Cancellation Propagation', link: '/concepts/context-cancellation' }
+          { text: 'Context & Cancellation Propagation', link: '/concepts/context-cancellation' },
+          { text: 'Interface Polymorphism', link: '/concepts/interface-polymorphism' },
+          { text: 'Error Wrapping & Classification', link: '/concepts/error-wrapping-and-classification' },
+          { text: 'Monotonic vs Wall Clocks', link: '/concepts/monotonic-vs-wall-clocks' }
         ]
       },
       {
-        text: 'Concepts — Distributed Systems Theory',
+        text: 'Concepts -- Distributed Systems Theory',
         collapsed: false,
-        items: []
+        items: [
+          { text: 'Latency as a Statistic', link: '/concepts/latency-as-a-statistic' }
+        ]
       }
     ],
 
@@ -70,5 +79,18 @@ export default defineConfig({
       message: 'Built as a teaching artifact. Every page cites the code it explains.',
       copyright: 'swarm-net'
     }
+  },
+
+  // LaTeX: $inline$ and $$block$$, per CLAUDE.md 4.3.
+  markdown: {
+    config: (md) => {
+      md.use(mathjax3)
+    }
+  },
+
+  // Mermaid replaces ASCII art entirely, per CLAUDE.md 4.2.
+  mermaid: {
+    theme: 'base',
+    securityLevel: 'strict'
   }
-})
+}))

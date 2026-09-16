@@ -7,9 +7,16 @@
   "scripts": {
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "docs:check:ascii": "node scripts/check-ascii.mjs docs/*.md docs/**/*.md",
+    "docs:check:mermaid": "node scripts/check-mermaid.mjs docs/*.md docs/**/*.md",
+    "docs:check": "npm run docs:check:ascii && npm run docs:check:mermaid && npm run docs:build"
   },
   "devDependencies": {
-    "vitepress": "^1.6.3"
+    "markdown-it-mathjax3": "^4.3.2",
+    "mermaid": "^11.17.2",
+    "vitepress": "^1.6.3",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "jsdom": "^30.0.1"
   }
 }
