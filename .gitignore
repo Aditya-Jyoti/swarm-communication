@@ -1,0 +1,15 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# Node / VitePress
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# Local
+.DS_Store
+*.log
+.env

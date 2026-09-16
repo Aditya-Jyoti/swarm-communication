@@ -1,0 +1,15 @@
+{
+  "name": "swarm-net-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for swarm-net: a self-healing P2P swarm network in Go.",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}
