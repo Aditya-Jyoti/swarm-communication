@@ -48,6 +48,11 @@ type PeerEvent struct {
 
 // Transport is what pkg/cluster consumes: a way to reach peers by NodeID without
 // knowing anything about sockets. *Pool implements it.
+//
+// Peers and Send reflect the connection table at the instant of the call, while
+// Events is a queue; during a replacement handshake for a peer the two can
+// briefly disagree (Send may return ErrUnknownPeer for a peer whose PeerDown has
+// not arrived yet, or succeed for one whose PeerUp has not).
 type Transport interface {
 	// Self returns this node's identity.
 	Self() protocol.NodeID

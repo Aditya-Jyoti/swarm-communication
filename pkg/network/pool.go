@@ -146,7 +146,7 @@ type dialEntry struct {
 // # Synchronisation
 //
 // mu guards every mutable field below it: peers, dials, pending, claims, dialing,
-// deferred, known, closed. Nothing blocking is ever done under mu -- handshakes, event
+// deferred, downInFlight, addrOf, known, closed. Nothing blocking is ever done under mu -- handshakes, event
 // emission and Conn.Close all happen outside it -- so a stalled peer or a slow
 // Events consumer cannot make Send block on the lock.
 //
@@ -198,6 +198,15 @@ type Pool struct {
 	dialing map[protocol.NodeAddress]int
 	// deferred holds, per peer, the entry whose PeerDown is waiting on a claim.
 	deferred map[protocol.NodeID]*peerEntry
+	// downInFlight holds, per peer, an entry whose PeerDown has been decided but
+	// not yet delivered (emission happens outside mu). register consults it so a
+	// PeerUp for the same peer is never delivered ahead of that PeerDown.
+	downInFlight map[protocol.NodeID]*peerEntry
+	// addrOf records which dialled addresses have turned out to reach which peer,
+	// so a dial claim on an address also covers the peer it is known to reach.
+	// Needed because a node is dialled by whatever name the seed list or gossip
+	// used, which need not be the string it advertises.
+	addrOf map[protocol.NodeID]map[protocol.NodeAddress]struct{}
 	// known accumulates every address we have learned from handshakes and Connect.
 	known map[protocol.NodeAddress]struct{}
 	// closed is set once by Close. Every entry point checks it under mu before
@@ -223,7 +232,10 @@ func NewPool(cfg PoolConfig) *Pool {
 		claims:   make(map[protocol.NodeID]int),
 		dialing:  make(map[protocol.NodeAddress]int),
 		deferred: make(map[protocol.NodeID]*peerEntry),
-		known:    make(map[protocol.NodeAddress]struct{}),
+
+		downInFlight: make(map[protocol.NodeID]*peerEntry),
+		addrOf:       make(map[protocol.NodeID]map[protocol.NodeAddress]struct{}),
+		known:        make(map[protocol.NodeAddress]struct{}),
 	}
 	p.changed = sync.NewCond(&p.mu)
 	return p
@@ -457,6 +469,21 @@ func (p *Pool) dialOnce(ctx context.Context, addr protocol.NodeAddress) (PeerInf
 	}
 	info, err := dialHandshake(raw, p.cfg.Self, p.Known(), p.cfg.Now().Add(p.cfg.HandshakeTimeout))
 	p.untrackPending(raw)
+	if info.ID != "" {
+		// The ACK has named the peer. From here on the claim is by ID as well,
+		// which covers a peer that advertises a different string from the one we
+		// dialled; and the address is remembered against the ID so the next dial
+		// to it is covered from its first packet.
+		p.mu.Lock()
+		p.claims[info.ID]++
+		if p.addrOf[info.ID] == nil {
+			p.addrOf[info.ID] = make(map[protocol.NodeAddress]struct{})
+		}
+		p.addrOf[info.ID][addr] = struct{}{}
+		p.changed.Broadcast()
+		p.mu.Unlock()
+		defer p.releaseClaim(info.ID)
+	}
 	if err != nil {
 		_ = raw.Close()
 		return info, nil, err
@@ -554,6 +581,9 @@ func (p *Pool) admitPolicy(info PeerInfo) (bool, string) {
 	defer p.mu.Unlock()
 	existing := p.peers[info.ID]
 	if existing != nil && !p.prefer(info, existing.info, false) {
+		if info.Incarnation < existing.info.Incarnation {
+			return false, fmt.Sprintf("already connected to %q at incarnation %d; incarnation %d is older", info.ID, existing.info.Incarnation, info.Incarnation)
+		}
 		return false, fmt.Sprintf("already connected to %q; the connection initiated by the lower node id (%q) wins", info.ID, p.cfg.Self.ID)
 	}
 	p.claims[info.ID]++
@@ -571,6 +601,7 @@ func (p *Pool) releaseClaim(id protocol.NodeID) {
 	e := p.deferred[id]
 	if e != nil && !p.claimed(e) {
 		delete(p.deferred, id)
+		p.downInFlight[id] = e
 	} else {
 		e = nil
 	}
@@ -582,7 +613,7 @@ func (p *Pool) releaseClaim(id protocol.NodeID) {
 }
 
 // releaseDialing drops one dial claim on addr and resolves any deferred PeerDown
-// whose advertised address matches, as releaseClaim does by ID.
+// that is no longer covered by any claim, as releaseClaim does by ID.
 func (p *Pool) releaseDialing(addr protocol.NodeAddress) {
 	p.mu.Lock()
 	if p.dialing[addr]--; p.dialing[addr] <= 0 {
@@ -590,8 +621,9 @@ func (p *Pool) releaseDialing(addr protocol.NodeAddress) {
 	}
 	var resolved []*peerEntry
 	for id, e := range p.deferred {
-		if e.info.Advertise == addr && !p.claimed(e) {
+		if !p.claimed(e) {
 			delete(p.deferred, id)
+			p.downInFlight[id] = e
 			resolved = append(resolved, e)
 		}
 	}
@@ -604,15 +636,30 @@ func (p *Pool) releaseDialing(addr protocol.NodeAddress) {
 
 // claimed reports whether a handshake that may replace e is in flight. mu held.
 func (p *Pool) claimed(e *peerEntry) bool {
-	return p.claims[e.info.ID] > 0 || p.dialing[e.info.Advertise] > 0
+	if p.claims[e.info.ID] > 0 || p.dialing[e.info.Advertise] > 0 {
+		return true
+	}
+	for a := range p.addrOf[e.info.ID] {
+		if p.dialing[a] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // emitDown emits PeerDown for an entry that has left the map, then retires it.
-// Event first, retire second: a redial loop released by retire must not get its
-// next PeerUp ahead of this PeerDown.
+// The caller has put e in downInFlight under mu; it is cleared only after the
+// event is delivered, and retire follows that, so both a redial loop waiting on
+// gone and a register waiting on downInFlight see the Down land first.
 func (p *Pool) emitDown(e *peerEntry) {
 	d, err := e.conn.Disposition()
 	p.emit(PeerEvent{Kind: PeerDown, Peer: copyInfo(e.info), Disposition: d, Err: err})
+	p.mu.Lock()
+	if p.downInFlight[e.info.ID] == e {
+		delete(p.downInFlight, e.info.ID)
+	}
+	p.changed.Broadcast()
+	p.mu.Unlock()
 	e.retire()
 }
 
@@ -663,6 +710,9 @@ func (p *Pool) register(info PeerInfo, raw net.Conn, weInitiated bool) *peerEntr
 		delete(p.deferred, info.ID)
 		parked.retire()
 	}
+	// A PeerDown for this peer may be decided but not yet delivered (emission
+	// happens outside mu). The PeerUp below must queue behind it.
+	inFlight := p.downInFlight[info.ID]
 	e := &peerEntry{
 		info: copyInfo(info),
 		conn: NewConn(info.ID, raw, p.cfg.Handler, p.cfg.Conn),
@@ -677,20 +727,31 @@ func (p *Pool) register(info PeerInfo, raw net.Conn, weInitiated bool) *peerEntr
 	p.mu.Unlock()
 
 	if existing != nil {
-		// Close the loser, then move whatever it had not yet written onto the
-		// winner. Without this, a frame queued in the instant between the two
-		// handshakes completing would vanish with no PeerDown to explain it.
-		// What the loser had already handed to the socket may still be lost if
-		// the peer closed first; that is the same exposure as any close and is
-		// why control traffic is periodic rather than one-shot.
+		// Close the loser, then move its unsent control frames onto the winner.
+		// Without this, a heartbeat or election frame queued in the instant
+		// between the two handshakes completing would vanish with no PeerDown
+		// to explain it. Data frames are not moved: they are shed under
+		// pressure anyway, and moving them would count their drops against a
+		// connection that never saw them. Re-queued control frames land behind
+		// anything already queued on the winner, so control traffic may be
+		// reordered across a swap; the cluster layer is idempotent on its
+		// inputs, which is what makes that tolerable. What the loser had
+		// already handed to the socket may still be lost if the peer closed
+		// first -- the same exposure as any close.
 		_ = existing.conn.Close()
 		for _, env := range existing.conn.drainUnsent() {
+			if env.Type.IsDataPlane() {
+				continue
+			}
 			_ = e.conn.Send(context.Background(), env)
 		}
 		existing.retire()
 		return e
 	}
 	if parked == nil {
+		if inFlight != nil {
+			<-inFlight.gone
+		}
 		p.emit(PeerEvent{Kind: PeerUp, Peer: copyInfo(info)})
 	}
 	return e
@@ -721,6 +782,8 @@ func (p *Pool) watch(ctx context.Context, e *peerEntry) {
 	parked := p.claimed(e)
 	if parked {
 		p.deferred[e.info.ID] = e
+	} else {
+		p.downInFlight[e.info.ID] = e
 	}
 	p.changed.Broadcast()
 	p.mu.Unlock()

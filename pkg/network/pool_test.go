@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1206,4 +1207,186 @@ func waitQuiescent(t *testing.T, p *Pool) {
 	waitState(t, p, "quiescence", func() bool {
 		return len(p.claims) == 0 && len(p.dialing) == 0 && len(p.deferred) == 0 && len(p.pending) == 0
 	})
+}
+
+// --- ordering, re-queue and claim-by-ID fixes -----------------------------------------
+
+// A PeerDown that has been decided but is still blocked in emission must be
+// delivered before a PeerUp for the same peer from a fresh handshake. The
+// interleaving is forced by filling a one-slot event buffer so the Down blocks,
+// then completing a new inbound handshake for the same ID.
+func TestPeerDownStrictlyPrecedesPeerUpForSamePeer(t *testing.T) {
+	h := newHarness(t, idB, func(c *PoolConfig) { c.EventBuffer = 1 })
+	first, _, err := h.inboundFrom(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	h.event(PeerUp)
+	old := entryFor(t, h.pool, idA.ID)
+
+	// Occupy the only buffer slot with an unrelated event.
+	z, _, err := h.inboundFrom(Identity{ID: "node-z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer z.Close()
+
+	// Kill a's connection: its PeerDown is decided but cannot be delivered.
+	first.Close()
+	waitState(t, h.pool, "PeerDown in flight", func() bool { return h.pool.downInFlight[idA.ID] == old })
+
+	// A new inbound from a passes the policy (no entry, nothing parked) and
+	// registers. Its PeerUp must queue behind the blocked PeerDown.
+	second, _, err := h.inboundFrom(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	waitState(t, h.pool, "replacement registered", func() bool {
+		cur := h.pool.peers[idA.ID]
+		return cur != nil && cur != old
+	})
+
+	want := []struct {
+		kind PeerEventKind
+		id   protocol.NodeID
+	}{{PeerUp, "node-z"}, {PeerDown, idA.ID}, {PeerUp, idA.ID}}
+	for _, w := range want {
+		ev := h.event(w.kind)
+		if ev.Peer.ID != w.id {
+			t.Fatalf("got %s for %q, want %s for %q", ev.Kind, ev.Peer.ID, w.kind, w.id)
+		}
+	}
+}
+
+// Control frames queued on a superseded connection reach the winner; data
+// frames do not, and their loss is not counted against the winner.
+func TestSupersededControlFramesAreRequeuedOnWinner(t *testing.T) {
+	h := newHarness(t, idA, nil) // lower ID: our own dial supersedes an inbound
+	// The inbound runs over a net.Pipe so the writer parks in Write and every
+	// later frame stays queued until the swap.
+	remote, local := net.Pipe()
+	defer remote.Close()
+	h.pool.Admit(local)
+	if _, err := dialHandshake(remote, idB, nil, far()); err != nil {
+		t.Fatal(err)
+	}
+	h.event(PeerUp)
+
+	blocker := mustEnv(t, protocol.TypeHeartbeat) // parks the writer
+	data := mustEnv(t, protocol.TypeTelemetry)
+	ctrl := mustEnv(t, protocol.TypePing)
+	for _, env := range []*protocol.Envelope{blocker, data, ctrl} {
+		if err := h.pool.Send(context.Background(), idB.ID, env); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h.pool.Connect(addrB)
+	winner := h.acceptAs(idB)
+	defer winner.Close()
+	h.noEvent()
+
+	// Read until the control frame arrives on the winner. The blocker may or
+	// may not precede it (it was mid-write, and may have been dequeued before
+	// the swap); the data frame must never appear.
+	for {
+		got := readFrame(t, winner)
+		if got.Type == protocol.TypeTelemetry {
+			t.Fatal("a data frame was re-queued across the swap")
+		}
+		if got.ID == ctrl.ID {
+			break
+		}
+	}
+	cur := entryFor(t, h.pool, idB.ID)
+	if n := cur.conn.Dropped(); n != 0 {
+		t.Errorf("winner's Dropped = %d, want 0", n)
+	}
+}
+
+// A peer dialled by one name and advertising another: the dial claim must still
+// cover the peer's entry, by the ID the HELLO_ACK revealed on the previous dial.
+func TestDialClaimCoversPeerDialledByADifferentName(t *testing.T) {
+	const dialled = protocol.NodeAddress("seed-host:7000") // != idA.Advertise
+	h := newHarness(t, idB, nil)
+	h.pool.Connect(dialled)
+	peer := h.acceptAs(idA)
+	h.event(PeerUp)
+	waitState(t, h.pool, "address learned against ID", func() bool {
+		_, ok := h.pool.addrOf[idA.ID][dialled]
+		return ok
+	})
+	peer.Close()
+	h.event(PeerDown)
+
+	// The loop redials; hold the handshake open (pre-ACK) so the address claim
+	// is the only thing covering node-a.
+	held := h.nextDial()
+	defer held.Close()
+
+	// Meanwhile node-a connects to us and that connection dies.
+	inbound, _, err := h.inboundFrom(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inbound.Close()
+	h.event(PeerUp)
+	old := entryFor(t, h.pool, idA.ID)
+	inbound.Close()
+	waitState(t, h.pool, "PeerDown parked under the address claim", func() bool { return h.pool.deferred[idA.ID] == old })
+
+	// Completing the held dial replaces the parked entry silently.
+	if _, err := acceptHandshake(held, idA, nil, far(), acceptAll); err != nil {
+		t.Fatal(err)
+	}
+	waitQuiescent(t, h.pool)
+	h.noEvent()
+	if p := h.pool.Peers(); len(p) != 1 || p[0].ID != idA.ID {
+		t.Errorf("Peers() = %+v", p)
+	}
+}
+
+func TestStaleIncarnationRejectionNamesTheIncarnations(t *testing.T) {
+	h := newHarness(t, idB, nil)
+	h.pool.Connect(addrA)
+	cur := h.acceptAs(idA)
+	defer cur.Close()
+	h.event(PeerUp)
+	stale := Identity{ID: idA.ID, Advertise: idA.Advertise, Incarnation: idA.Incarnation - 1}
+	inbound, _, err := h.inboundFrom(stale)
+	defer inbound.Close()
+	if err == nil || !strings.Contains(err.Error(), "incarnation") {
+		t.Errorf("stale rejection reason = %v, want one naming incarnations", err)
+	}
+}
+
+// Close must leave no goroutine behind. The count is sampled once the runtime
+// has had a chance to reap the exited goroutines; the loop is bounded by a
+// deadline and yields via Gosched rather than sleeping.
+func TestCloseLeaksNoGoroutines(t *testing.T) {
+	before := runtime.NumGoroutine()
+	h := newHarness(t, idA, nil)
+	h.pool.Connect(addrB)
+	peerB := h.acceptAs(idB)
+	defer peerB.Close()
+	h.event(PeerUp)
+	peerZ, _, err := h.inboundFrom(Identity{ID: "node-z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerZ.Close()
+	h.event(PeerUp)
+	h.pool.Close()
+	for range h.pool.Events() {
+	}
+
+	deadline := time.Now().Add(failsafe)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if after := runtime.NumGoroutine(); after > before {
+		t.Errorf("goroutines after Close = %d, before = %d", after, before)
+	}
 }
