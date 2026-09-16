@@ -58,7 +58,7 @@ a poor fit for *state* that is inherently shared, long-lived, and read far more 
 it is written.
 
 The swarm's cluster membership table is exactly that shape: one authoritative map of peer
-identity → role → health score, written by heartbeat goroutines every few hundred
+identity -> role -> health score, written by heartbeat goroutines every few hundred
 milliseconds and read by the telemetry path, the election path, and the dashboard fan-out,
 possibly many times per second.
 
@@ -148,7 +148,7 @@ The buffer is a plain ring:
  Next send writes buf[3] and wraps sendx to 0.
 ```
 
-`recvq` and `sendq` are queues of `sudog` — a runtime struct representing "a goroutine
+`recvq` and `sendq` are queues of `sudog` -- a runtime struct representing "a goroutine
 parked on this channel", carrying a `*g` (the goroutine), an `elem` pointer into that
 goroutine's stack (where the value should be read from or written to), and the list links.
 `sudog`s are pooled per-P to avoid allocating on every block.
@@ -156,7 +156,7 @@ goroutine's stack (where the value should be read from or written to), and the l
 Crucially: **every channel operation takes `hchan.lock`.** A channel is a mutex-protected
 queue with a scheduler integration bolted on. It is not lock-free, and it is not free. A
 buffered channel send on an uncontended channel is roughly an atomic-lock acquire, a memory
-copy, an index bump, and a release — fast, but measurably slower than a bare mutex around
+copy, an index bump, and a release -- fast, but measurably slower than a bare mutex around
 the same copy, because it also has to check the wait queues.
 
 ### The direct handoff
@@ -171,7 +171,7 @@ receiver's stack*, via `sudog.elem`, then marks the receiving goroutine runnable
 
    G1 (sender)                          G2 (parked in recvq)
    +-------------+                      +-------------+
-   | v = Peer{…} |   memmove(dst,src)   | var p Peer  |
+   | v = Peer{...} |   memmove(dst,src)   | var p Peer  |
    |   &v  ------------------------------->  &p       |
    +-------------+                      +-------------+
                                         goready(G2)
@@ -183,13 +183,13 @@ The reverse also holds: a receiver arriving at a channel with a non-empty `sendq
 unbuffered channel takes the value straight out of the blocked sender's stack.
 
 There is a second-order effect worth knowing. `send` calls `goready` on the receiver with a
-hint that encourages the scheduler to run it on the current P soon — good for latency and
+hint that encourages the scheduler to run it on the current P soon -- good for latency and
 cache locality, because the data was just written by this core and is hot in its L1.
 
 ### Unbuffered vs buffered is a statement about synchronisation
 
 `make(chan T)` (unbuffered) means: *the send does not complete until a receiver has taken
-the value*. It is a rendezvous. Both goroutines are, for an instant, synchronised — and you
+the value*. It is a rendezvous. Both goroutines are, for an instant, synchronised -- and you
 get a happens-before edge in **both** directions of reasoning: the receiver knows the sender
 reached the send, and the sender knows the receiver reached the receive.
 
@@ -198,8 +198,8 @@ is a deliberate decoupling with a deliberate bound. The bound is the point: it i
 backpressure. An unbounded queue is a memory leak with good manners.
 
 The common mistake is choosing the capacity to "make it faster". If you cannot state what
-the capacity *means* — "the telemetry fan-out may lag the heartbeat loop by at most 64
-samples before we start dropping" — the number is wrong, whatever it is. Capacity 1 has a
+the capacity *means* -- "the telemetry fan-out may lag the heartbeat loop by at most 64
+samples before we start dropping" -- the number is wrong, whatever it is. Capacity 1 has a
 specific and useful meaning: a mailbox holding the latest handoff, used so the producer need
 not block on a consumer that is momentarily busy.
 
@@ -209,7 +209,7 @@ not block on a consumer that is momentarily busy.
 
 1. Build a list of the cases and generate a random permutation of the poll order
    (`fastrandn`), plus a lock order sorted by channel address.
-2. Lock every involved channel in address order — this is why the lock order is sorted:
+2. Lock every involved channel in address order -- this is why the lock order is sorted:
    it prevents deadlock between two `select`s covering the same channels.
 3. Pass 1: walk cases in the *random* order looking for one that can proceed immediately.
    If found, execute it, unlock, return.
@@ -222,8 +222,8 @@ not block on a consumer that is momentarily busy.
 Two consequences follow directly.
 
 **The random order prevents starvation.** If cases were polled top-to-bottom, a hot channel
-in case 1 would permanently mask case 2. In the swarm's node event loop — which will
-simultaneously select over inbound frames, a heartbeat ticker, and a shutdown signal — a
+in case 1 would permanently mask case 2. In the swarm's node event loop -- which will
+simultaneously select over inbound frames, a heartbeat ticker, and a shutdown signal -- a
 node under heavy inbound traffic would never observe its own heartbeat tick. Randomisation
 makes the choice among *ready* cases uniform, so every ready case is served in expectation.
 
@@ -252,7 +252,7 @@ the standard "drop if the consumer is behind" idiom, which is exactly what a tel
 broadcast wants: dropping a sample is correct, blocking the heartbeat loop is not.
 
 An empty `select{}` blocks forever and is deadlock-detected. A `select` over a nil channel
-never fires — which is a useful trick: setting a case's channel variable to `nil` disables
+never fires -- which is a useful trick: setting a case's channel variable to `nil` disables
 that case for subsequent iterations without restructuring the loop.
 
 ### Closed channels
@@ -268,8 +268,8 @@ The rules, exactly:
 - `close` on a nil channel **panics**.
 - Send or receive on a nil channel blocks forever.
 
-Because close is broadcast — every current and future receiver observes it, with no value
-consumed — `close(chan struct{})` is the canonical one-to-many signal. This is precisely
+Because close is broadcast -- every current and future receiver observes it, with no value
+consumed -- `close(chan struct{})` is the canonical one-to-many signal. This is precisely
 what `context.Context.Done()` is (see [Context & Cancellation
 Propagation](./context-cancellation)).
 
@@ -332,7 +332,7 @@ which edges exist. The ones that matter here:
    as **sequentially consistent**: all atomic operations across the whole program behave as
    if executed in a single total order consistent with each goroutine's program order. An
    atomic store therefore synchronises with an atomic load that observes it, giving a real
-   happens-before edge — not just an indivisible read.
+   happens-before edge -- not just an indivisible read.
 
 ```
   G1                                  G2
@@ -358,7 +358,7 @@ reasons are concrete:
   a loop, rematerialise a load, reorder non-dependent loads and stores, or duplicate a load
   so that two syntactic reads of one variable observe different values. Code such as
   `if p != nil { p.Use() }` can, in principle, load `p` twice.
-- **The CPU reorders.** x86-64 is relatively strong (TSO) but still permits store→load
+- **The CPU reorders.** x86-64 is relatively strong (TSO) but still permits store->load
   reordering; arm64, which Docker on Apple silicon and most cloud ARM instances run, permits
   far more. A racy publish of a pointer to a freshly-built struct can be observed as a
   non-nil pointer to a *zero* struct on arm64.
@@ -390,14 +390,14 @@ lookup of a few hundred nanoseconds is fine at swarm scale.
 - *Writer starvation is bounded but reader starvation is not free.* Go's `RWMutex` blocks
   *new* readers once a writer is waiting (`readerCount` is decremented by `rwmutexMaxReaders`
   to signal this), so a stream of readers cannot starve a writer indefinitely. But readers
-  arriving while a writer waits must block, so a write-heavy phase — a mass re-election
-  updating many peers — degrades every reader.
+  arriving while a writer waits must block, so a write-heavy phase -- a mass re-election
+  updating many peers -- degrades every reader.
 - *Cacheline contention on the reader counter.* `RLock` atomically increments a single
   `readerCount` field. Every reader on every core does a read-modify-write on the *same*
   cacheline, forcing it to bounce between cores' L1 caches. Above roughly a handful of
   concurrent readers on separate cores, `RLock`/`RUnlock` can cost more than the critical
   section it protects. `RWMutex` only wins when the read critical section is substantially
-  longer than the atomic contention — iterating the whole table qualifies; looking up one
+  longer than the atomic contention -- iterating the whole table qualifies; looking up one
   key often does not.
 
 **`atomic.Pointer[T]` / copy-on-write.** The read path becomes a single atomic load with no
@@ -472,7 +472,7 @@ What it cannot give you:
   happen.
 - **Bounded history.** Shadow memory keeps a limited number of prior accesses per location;
   very old accesses are evicted and the race can be missed.
-- **Cost.** Roughly 5–10× CPU and 5–10× memory. It changes timing enough to hide some races
+- **Cost.** Roughly 5-10x CPU and 5-10x memory. It changes timing enough to hide some races
   and expose others, which is an argument for running it routinely rather than once.
 - **It does not see into C, into `unsafe` tricks the instrumentation cannot follow, or
   across process boundaries.**
@@ -487,8 +487,8 @@ schedules that produce the races a happy-path test never reaches.
 
 No Go code exists yet; the following are commitments the implementation will have to honour.
 
-**`pkg/cluster/` — the membership table.** This is the central shared mutable structure: peer
-ID → role (leader/worker) → assigned leader → last-heartbeat timestamp → health score.
+**`pkg/cluster/` -- the membership table.** This is the central shared mutable structure: peer
+ID -> role (leader/worker) -> assigned leader -> last-heartbeat timestamp -> health score.
 Written by the heartbeat goroutines, read by the election evaluator, the telemetry
 collector, and the dashboard fan-out. It will be implemented as a copy-on-write snapshot
 behind `atomic.Pointer`, with a writer-side mutex, for the reasons above: the read path must
@@ -496,34 +496,34 @@ never block the heartbeat path, and the telemetry path must be able to iterate a
 without holding a lock across a network write. Access to the underlying map will never be
 exposed; only immutable snapshots will leave the package.
 
-**`pkg/cluster/` — the node event loop.** Each node will run a single `select` loop over:
+**`pkg/cluster/` -- the node event loop.** Each node will run a single `select` loop over:
 inbound decoded frames, the heartbeat ticker, the re-election trigger, and `ctx.Done()`.
 The pseudo-random case order is what stops a node saturated with inbound frames from
-silently ceasing to emit its own heartbeats — which would present as that node being
+silently ceasing to emit its own heartbeats -- which would present as that node being
 declared dead by its peers while it is perfectly healthy and busy. The shutdown case will
 additionally be checked in a non-blocking pre-select, so termination is not merely fair but
 prompt.
 
-**`pkg/cluster/` — heartbeat failure counters.** The K-consecutive-missed-beats counter is a
+**`pkg/cluster/` -- heartbeat failure counters.** The K-consecutive-missed-beats counter is a
 single integer per peer, incremented by one goroutine and read by the election path. It will
 live either inside the copy-on-write snapshot or as an `atomic.Int64`; it will not be a
 plain `int` read without synchronisation, because "worst case we read a stale count" is
 exactly the reasoning the memory model does not permit.
 
-**`pkg/network/` — the connection pool.** Per-connection read goroutines will hand decoded
+**`pkg/network/` -- the connection pool.** Per-connection read goroutines will hand decoded
 frames to the cluster layer over a buffered channel whose capacity is a stated backpressure
 bound, not a tuning knob. Writes to a socket will be owned by exactly one goroutine per
-connection — `net.Conn` writes are safe to call concurrently but give no framing guarantee,
+connection -- `net.Conn` writes are safe to call concurrently but give no framing guarantee,
 so two concurrent `Write`s of two frames can interleave bytes and corrupt the stream. See
 [Stream Framing](./stream-framing). Ownership of the write side is transferred to a single
 writer goroutine via a channel: CSP used where it fits.
 
-**`pkg/telemetry/` — the dashboard fan-out.** Broadcasting to WebSocket subscribers will use
+**`pkg/telemetry/` -- the dashboard fan-out.** Broadcasting to WebSocket subscribers will use
 `select` with `default` to drop samples for subscribers that are behind, rather than blocking.
 A slow browser must never be able to stall a heartbeat. Subscriber teardown will use
 `close(done)` as a broadcast, with the subscriber's own goroutine as the sole closer.
 
-**`pkg/health/` — `HealthStrategy` implementations.** Strategy instances will be invoked
+**`pkg/health/` -- `HealthStrategy` implementations.** Strategy instances will be invoked
 concurrently from multiple probe goroutines, so the interface carries an implicit contract:
 `EvaluateScore` must be safe for concurrent use. Any strategy holding internal state (an
 EWMA of past latencies, say) owns its own synchronisation.
@@ -571,7 +571,7 @@ you can justify in a sentence, and drop explicitly with `default` when it is exc
 **Range over a channel that is never closed.** `for v := range ch` blocks forever after the
 last value. *Symptom:* a worker that appears to hang after processing all its work; the
 program does not exit. *Fix:* close from the sender, or use an explicit
-`for { select { case v, ok := <-ch: if !ok { return } … } }`.
+`for { select { case v, ok := <-ch: if !ok { return } ... } }`.
 
 **RWMutex held across I/O.** Taking `RLock` on the membership table and then writing JSON to
 a WebSocket while holding it. *Symptom:* a single slow or malicious dashboard client stalls
@@ -584,7 +584,7 @@ the only possible shape.
 `RLock` again; meanwhile goroutine B calls `Lock` between the two. B blocks waiting for
 readers; A's second `RLock` blocks because a writer is waiting. *Symptom:* a hard deadlock
 that only appears under concurrent load. `RWMutex` read locks are explicitly **not**
-reentrant. *Fix:* never call outward — into an interface, a callback, or another package —
+reentrant. *Fix:* never call outward -- into an interface, a callback, or another package --
 while holding a read lock.
 
 **Concurrent map write crash.** *Symptom:* `fatal error: concurrent map writes` or
@@ -605,8 +605,8 @@ shown above.
 
 **A clean `-race` run mistaken for proof.** *Symptom:* a crash in production that CI has
 never reproduced. *Cause:* the detector reports only observed races. *Fix:* deliberately
-exercise adversarial interleavings — kill a leader during replication, spike latency during
-an election — under `-race`, rather than relying on the happy path.
+exercise adversarial interleavings -- kill a leader during replication, spike latency during
+an election -- under `-race`, rather than relying on the happy path.
 
 ---
 

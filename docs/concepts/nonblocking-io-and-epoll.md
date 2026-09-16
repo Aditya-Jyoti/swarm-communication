@@ -10,8 +10,8 @@ and let it block. That deal is a lie told by a very good liar. Underneath, the G
 a single `epoll` instance per operating system thread group and never lets a real kernel thread
 block on a socket if it can avoid it. This page is about what is underneath the lie, because the
 moment you have `N` swarm nodes each holding `N-1` peer connections plus heartbeat timers, the
-properties of that machinery — how many descriptors it can hold, what it costs per wakeup, what
-happens when you fail to drain a buffer — become your properties.
+properties of that machinery -- how many descriptors it can hold, what it costs per wakeup, what
+happens when you fail to drain a buffer -- become your properties.
 
 Read this alongside [TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel), which covers what a
 socket *is*, and [The Netpoller](./go-netpoller), which covers how the Go runtime bolts the
@@ -26,41 +26,20 @@ mechanism described here onto the goroutine scheduler.
 Every I/O design in Unix is one of four shapes. The difference between them is entirely a
 question of *who waits* and *where the waiting happens*.
 
-```
-                     ┌─────────────────────────────────────────────┐
-  1. BLOCKING        │ read(fd) ──────► kernel: no data yet        │
-                     │    │                     ...sleep...        │
-                     │    │             kernel: data arrives       │
-                     │    ◄──────────── copy to userspace, return  │
-                     └─────────────────────────────────────────────┘
-       cost: one kernel thread parked per in-flight connection.
-
-                     ┌─────────────────────────────────────────────┐
-  2. NON-BLOCKING    │ read(fd) ──► EAGAIN                         │
-     POLLING         │ read(fd) ──► EAGAIN     (burn CPU)          │
-                     │ read(fd) ──► EAGAIN                         │
-                     │ read(fd) ──► 47 bytes                       │
-                     └─────────────────────────────────────────────┘
-       cost: no threads parked, but a core spins for nothing.
-
-                     ┌─────────────────────────────────────────────┐
-  3. I/O             │ epoll_wait(ep) ─► sleeps on MANY fds at once│
-     MULTIPLEXING    │       ◄── "fd 7 and fd 19 are readable"     │
-                     │ read(7); read(19)   (both guaranteed ready) │
-                     └─────────────────────────────────────────────┘
-       cost: one thread waits on thousands of sockets. This is the model
-       every production server and the Go runtime actually uses.
-
-                     ┌─────────────────────────────────────────────┐
-  4. ASYNCHRONOUS    │ submit(read, fd, buf) ──► returns instantly │
-     (io_uring, AIO) │ ... kernel fills buf itself ...             │
-                     │ completion ◄── "your buffer is already full"│
-                     └─────────────────────────────────────────────┘
-       cost: lowest syscall overhead; highest complexity. Note the
-       distinction: 1-3 tell you WHEN to do I/O, 4 does the I/O for you.
+```mermaid
+flowchart LR
+    B1["1. BLOCKING<br/>read(fd) -> kernel: no data yet<br/>... sleep ...<br/>kernel: data arrives<br/>copy to userspace, return<br/><br/>cost: one kernel thread parked<br/>per in-flight connection"]
+    
+    B2["2. NON-BLOCKING POLLING<br/>read(fd) -> EAGAIN<br/>read(fd) -> EAGAIN (burn CPU)<br/>read(fd) -> EAGAIN<br/>read(fd) -> 47 bytes<br/><br/>cost: no threads parked,<br/>but a core spins for nothing"]
+    
+    B3["3. I/O MULTIPLEXING<br/>epoll_wait(ep) -> sleeps on MANY fds<br/>fd 7 and fd 19 are readable<br/>read(7); read(19) (both ready)<br/><br/>cost: one thread waits on thousands<br/>of sockets. Used by production<br/>servers and the Go runtime"]
+    
+    B4["4. ASYNCHRONOUS<br/>(io_uring, AIO)<br/>submit(read, fd, buf) -> returns instantly<br/>... kernel fills buf itself ...<br/>completion: buffer is already full<br/><br/>cost: lowest syscall overhead,<br/>highest complexity. 1-3 tell WHEN<br/>to do I/O, 4 does the I/O for you"]
+    
+    B1 --> B2 --> B3 --> B4
 ```
 
-Models 1–3 are all *readiness* notification: the kernel tells you a subsequent `read` will not
+Models 1-3 are all *readiness* notification: the kernel tells you a subsequent `read` will not
 block, and you still perform the `read`. Model 4 is *completion* notification: the kernel performs
 the transfer and tells you it is finished. Conflating readiness with completion is the single most
 common source of confusion when people first meet `epoll` after using Windows IOCP or `io_uring`.
@@ -91,7 +70,7 @@ Every serious bug in this area is some variation of forgetting one half of that 
 
 ### select(): the original, and its two hard walls
 
-`select()` takes three bitmaps — read, write, exception — plus the highest descriptor number plus
+`select()` takes three bitmaps -- read, write, exception -- plus the highest descriptor number plus
 one, and a timeout.
 
 ```c
@@ -110,13 +89,13 @@ typedef struct {
 
 Two consequences follow directly from that struct, and neither is fixable:
 
-**Wall one — FD_SETSIZE.** Descriptor 1024 cannot be represented. `FD_SET(1024, &set)` writes past
+**Wall one -- FD_SETSIZE.** Descriptor 1024 cannot be represented. `FD_SET(1024, &set)` writes past
 the end of the array. This is not a documented error return; it is memory corruption. Raising
 `RLIMIT_NOFILE` does not help, because the limit lives in a userspace type, not in the kernel.
 People have tried recompiling with a larger `FD_SETSIZE`, which breaks the ABI against every
 library that was compiled with the old one.
 
-**Wall two — the O(n) rescan.** The bitmaps are both input and output. Every call must:
+**Wall two -- the O(n) rescan.** The bitmaps are both input and output. Every call must:
 
 1. copy the three bitmaps from userspace into kernel memory,
 2. walk every set bit, look up the `struct file`, and call its `->poll()` method,
@@ -126,19 +105,19 @@ library that was compiled with the old one.
 
 Then userspace walks all `n` bits a third time to find the ready ones. So even if exactly one of
 your thousand connections has a heartbeat waiting, you pay a full thousand-element scan, twice in
-the kernel and once in userspace, plus three bitmap copies across the syscall boundary — every
+the kernel and once in userspace, plus three bitmap copies across the syscall boundary -- every
 single call. The bitmaps are destroyed by the call, so you must rebuild them from scratch before
 the next one.
 
 ```
 select() with 1000 idle fds and 1 ready:
   userspace: rebuild 3 bitmaps          ~1000 ops
-  copy_from_user                        3 × 128 bytes
+  copy_from_user                        3 x 128 bytes
   kernel: poll() every fd               ~1000 ops
   kernel: rescan after wake             ~1000 ops
-  copy_to_user                          3 × 128 bytes
+  copy_to_user                          3 x 128 bytes
   userspace: scan for the ready one     ~1000 ops
-  ───────────────────────────────────────────────
+  -------------------------------------------
   useful work: one read(). Overhead: ~4000 ops.
 ```
 
@@ -150,12 +129,12 @@ select() with 1000 idle fds and 1 ready:
 struct pollfd {
     int   fd;
     short events;   /* what you want:    POLLIN | POLLOUT */
-    short revents;  /* what you got — kernel writes here  */
+    short revents;  /* what you got -- kernel writes here  */
 };
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 ```
 
-This removes `FD_SETSIZE` entirely — the array is as large as you make it — and it separates
+This removes `FD_SETSIZE` entirely -- the array is as large as you make it -- and it separates
 input (`events`) from output (`revents`), so you no longer rebuild the request set each time.
 Those are real improvements.
 
@@ -166,7 +145,7 @@ worse. `poll()` is `select()` with a better data type and identical asymptotics:
 where n is the number of descriptors you are watching, not the number that are ready.**
 
 That distinction is the whole story. For a swarm node holding 9 peers, nobody cares. For a server
-holding 10,000 mostly idle connections — the classic C10K problem — it is fatal, and it is fatal
+holding 10,000 mostly idle connections -- the classic C10K problem -- it is fatal, and it is fatal
 for a reason that has nothing to do with hardware speed. **C10K was a data-structure problem.**
 The interest set was being rebuilt and rescanned on every wait, when it barely changes between
 waits. The fix is not a faster scan; it is not scanning.
@@ -185,32 +164,26 @@ int epoll_wait(int ep, struct epoll_event *out, int maxevents, int timeout);
 
 Inside the kernel, `struct eventpoll` holds two things:
 
-```
-        struct eventpoll
-        ┌──────────────────────────────────────────────────────┐
-        │ rbr  ── red-black tree of ALL registered epitems     │
-        │        keyed by (fd, struct file*) — O(log n) add,   │
-        │        modify, delete. Persists across waits.        │
-        │                                                      │
-        │        ┌────┐                                        │
-        │        │ 12 │                                        │
-        │        ├────┴──┐                                     │
-        │     ┌──┴─┐  ┌──┴─┐                                   │
-        │     │ 7  │  │ 19 │   ... thousands of epitems ...    │
-        │     └────┘  └────┘                                   │
-        │                                                      │
-        │ rdllist ── doubly-linked READY list                  │
-        │        ┌────┐   ┌────┐                               │
-        │        │ 19 │──►│ 7  │──► NULL                       │
-        │        └────┘   └────┘                               │
-        │        Contains ONLY descriptors with pending events │
-        │                                                      │
-        │ wq ── wait queue of tasks blocked in epoll_wait()    │
-        └──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    EP["struct eventpoll"]
+    
+    RBR["rbr -- red-black tree of ALL registered epitems<br/>keyed by (fd, struct file*)<br/>O(log n) add, modify, delete<br/>Persists across waits"]
+    
+    TREE["12<br/>|-7, |-19<br/>... thousands of epitems ..."]
+    
+    RDLLIST["rdllist -- doubly-linked READY list<br/>19 <-> 7 <-> NULL<br/>Contains ONLY descriptors with pending events"]
+    
+    WQ["wq -- wait queue of tasks<br/>blocked in epoll_wait()"]
+    
+    EP --> RBR
+    RBR --> TREE
+    EP --> RDLLIST
+    EP --> WQ
 ```
 
 When you `epoll_ctl(ADD)` a socket, the kernel allocates an `epitem`, inserts it into the
-red-black tree, and — crucially — registers a **callback** (`ep_poll_callback`) on that socket's
+red-black tree, and -- crucially -- registers a **callback** (`ep_poll_callback`) on that socket's
 own wait queue. There is no polling anywhere. When a packet arrives, the network softirq runs
 `tcp_data_queue`, which wakes the socket's wait queue, which invokes `ep_poll_callback`, which
 links that `epitem` onto `rdllist` and wakes anyone sleeping in `epoll_wait`.
@@ -226,7 +199,7 @@ instead of once per event loop iteration.
 ### Level-triggered vs edge-triggered
 
 `epoll` supports two notification semantics, and choosing wrongly produces one of the nastiest
-classes of networking bug — the kind where everything works in testing and one connection silently
+classes of networking bug -- the kind where everything works in testing and one connection silently
 freezes in production.
 
 **Level-triggered (LT, the default):** `epoll_wait` reports a descriptor as readable *whenever
@@ -234,7 +207,7 @@ there is data in its receive buffer*. If you read 10 bytes of a 100-byte buffer 
 `epoll_wait`, it reports readable again immediately. It behaves like `poll()`. It is forgiving.
 
 **Edge-triggered (EPOLLET):** `epoll_wait` reports a descriptor only when its readiness state
-*transitions* — when new data arrives on a buffer the kernel considers you to have caught up with.
+*transitions* -- when new data arrives on a buffer the kernel considers you to have caught up with.
 If you read 10 bytes of 100 and loop back, `epoll_wait` **blocks**, because no new packet has
 arrived. The remaining 90 bytes sit in the receive buffer forever.
 
@@ -258,12 +231,12 @@ your read buffer is 512 bytes:
 ```
 
 The symptom is not a crash and not an error log. It is a *stall on one connection under load*,
-because the bug only manifests when a message happens to exceed your read buffer — which happens
+because the bug only manifests when a message happens to exceed your read buffer -- which happens
 only when the system is busy. That is the worst possible failure signature.
 
 The rule that fixes it: **under EPOLLET you must loop on `read()` until it returns `EAGAIN`.**
 Only `EAGAIN` proves you have drained the buffer and that the next arrival will generate a fresh
-edge. The same applies symmetrically to `write()` — write until `EAGAIN`, then and only then arm
+edge. The same applies symmetrically to `write()` -- write until `EAGAIN`, then and only then arm
 `EPOLLOUT`.
 
 Why use ET at all, given that trap? Two reasons. First, fewer syscalls: LT will keep returning a
@@ -301,8 +274,8 @@ Go's runtime dodges the problem structurally: there is one netpoller and one gor
 `io_uring` (Linux 5.1+) is a genuine architectural change, not an `epoll` refinement. It is two
 lock-free ring buffers shared between kernel and userspace: a submission queue you write
 operations into, and a completion queue the kernel writes results into. It is a *completion*
-interface — you submit "read 4 KiB from fd 7 into this buffer" and later collect "done, 904 bytes"
-— and with `IORING_SETUP_SQPOLL` the kernel side can poll the submission ring so that steady-state
+interface -- you submit "read 4 KiB from fd 7 into this buffer" and later collect "done, 904 bytes"
+-- and with `IORING_SETUP_SQPOLL` the kernel side can poll the submission ring so that steady-state
 I/O involves **zero syscalls**.
 
 So why does the Go runtime still use `epoll`? Honestly:
@@ -328,7 +301,7 @@ production path on Linux is `epoll`.
 This is the whole point of the page. Left: what the kernel offers. Right: what Go presents.
 
 ```c
-/* ─── C-shaped epoll loop (level-triggered, elided error handling) ─── */
+/* --- C-shaped epoll loop (level-triggered, elided error handling) --- */
 
 int ep = epoll_create1(EPOLL_CLOEXEC);
 
@@ -360,7 +333,7 @@ for (;;) {
         if (r > 0) {
             /* You now own a PARTIAL byte range. You must hold per-connection
                parse state on the heap yourself, because there is no stack to
-               keep it on — this callback returns before the message is whole. */
+               keep it on -- this callback returns before the message is whole. */
             conn_feed(conn_lookup(fd), buf, r);
         } else if (r == 0) {
             epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);  /* peer sent FIN */
@@ -374,7 +347,7 @@ for (;;) {
 ```
 
 ```go
-// ─── The same server in Go. Identical syscalls underneath. ───
+// --- The same server in Go. Identical syscalls underneath. ---
 
 ln, err := net.Listen("tcp", ":7946")
 if err != nil {
@@ -427,7 +400,7 @@ read(7, "\0\0\3\210{\"type\":\"heartbeat\"", 4096) = 904
 
 Note `EPOLLET` in that registration: Go registers **edge-triggered** and both directions at once,
 and it never calls `epoll_ctl(MOD)` to toggle interest. It can do that safely because the runtime
-always drains to `EAGAIN` before parking a goroutine — the discipline described above is
+always drains to `EAGAIN` before parking a goroutine -- the discipline described above is
 implemented once, correctly, inside `internal/poll`, rather than by every application author.
 [The Netpoller](./go-netpoller) traces exactly how that parking and unparking works.
 
@@ -440,13 +413,13 @@ have to honour.
 
 **`pkg/network/` will never see `epoll` directly, and that is a decision, not an accident.**
 The transport layer will be written against `net.Listener` and `net.Conn` with one goroutine per
-peer connection, because the framing logic — read a length prefix, then read exactly that many
-bytes — is a state machine that is trivial on a goroutine stack and genuinely unpleasant as a
+peer connection, because the framing logic -- read a length prefix, then read exactly that many
+bytes -- is a state machine that is trivial on a goroutine stack and genuinely unpleasant as a
 heap-allocated callback struct. The C column above shows what we are choosing not to write.
 
-**`pkg/network/` will hold roughly `N × (N-1)` sockets across the swarm, plus listeners.**
+**`pkg/network/` will hold roughly `N x (N-1)` sockets across the swarm, plus listeners.**
 At the `N = 10` target of `deploy/docker-compose.yml`, each node holds fewer than twenty
-descriptors — far inside `FD_SETSIZE`, and a regime where `select()` would in fact be adequate.
+descriptors -- far inside `FD_SETSIZE`, and a regime where `select()` would in fact be adequate.
 We are not using `epoll` because we need `epoll` at `N = 10`; we get it for free from the runtime,
 and it means the design does not acquire a scaling cliff at `N = 1024` that nobody would have
 noticed until it fired.
@@ -460,7 +433,7 @@ extravagant and reading as correct.
 
 **`pkg/health/`'s latency probes depend on readiness semantics being honest.** A
 `LatencyHealthStrategy` measures round-trip time by writing a probe and timing the response. If a
-read ever stalled because a buffer was not drained — the edge-triggered bug above — the measured
+read ever stalled because a buffer was not drained -- the edge-triggered bug above -- the measured
 latency would be an artefact of our own I/O bug, and the affinity clustering in `pkg/cluster/`
 would route workers on the strength of a lie. We rely on `internal/poll` for that correctness; we
 do not re-implement it.
@@ -518,14 +491,14 @@ if err != nil {
 ```
 
 Getting this wrong in `pkg/cluster/` would mean a slow peer is treated identically to a dead one,
-and a transient latency spike — exactly what the chaos controls will inject — would trigger a
+and a transient latency spike -- exactly what the chaos controls will inject -- would trigger a
 spurious re-election.
 
 **Blocking the event loop in a callback.**
 *Symptom:* total server stall; every connection freezes simultaneously.
 *Cause:* in a single-threaded C event loop, one blocking `DNS lookup`, one `fsync`, or one long
 CPU loop inside a handler stops all `N` connections. This is the failure mode Go's model
-structurally prevents — a slow handler blocks its own goroutine, and the scheduler runs others —
+structurally prevents -- a slow handler blocks its own goroutine, and the scheduler runs others --
 but it returns in Go the instant you hold a global mutex across a network call. *Rule:* never hold
 a lock over an I/O operation in `pkg/cluster/`'s state machine.
 
@@ -536,7 +509,7 @@ keep working, so it looks half-alive rather than dead.
 for the connection count. *Detection:* `ls /proc/<pid>/fd | wc -l` against
 `cat /proc/<pid>/limits | grep files`. In a swarm this presents especially badly, because a node
 that cannot accept but can still send heartbeats appears healthy to its own leader while being
-unreachable to everyone else — a one-way partition.
+unreachable to everyone else -- a one-way partition.
 
 **Stale descriptor numbers after close.**
 *Symptom:* reads and writes land on the wrong connection; occasional data delivered to the wrong
@@ -545,14 +518,14 @@ to fd 7 may be dispatched after fd 7 has been closed and reassigned to a new con
 `epoll` handles this via `struct file*` identity in the red-black tree, and Go handles it via a
 generation counter in `internal/poll.FD`, but any application-level map keyed on the raw fd number
 has this bug. *Rule:* key peer tables on a stable node identity, never on a descriptor number or a
-resolved IP — see [Docker Bridge Networking](./docker-bridge-networking) for why the IP half of
+resolved IP -- see [Docker Bridge Networking](./docker-bridge-networking) for why the IP half of
 that rule bites hard under container restarts.
 
 **Level-triggered EPOLLOUT left armed.**
 *Symptom:* one core pinned at 100% with no traffic; `epoll_wait` returning immediately in a tight
 loop. *Cause:* a socket registered for `EPOLLOUT` level-triggered is writable essentially always,
 so `epoll_wait` never sleeps. *Fix:* arm `EPOLLOUT` only while you have buffered data to flush,
-and `epoll_ctl(MOD)` it away once the buffer drains — or use edge-triggered, which is what Go does.
+and `epoll_ctl(MOD)` it away once the buffer drains -- or use edge-triggered, which is what Go does.
 
 **Assuming readiness implies a full message.**
 *Symptom:* garbled or truncated frames; a JSON decoder failing on valid data.
@@ -564,9 +537,9 @@ it is the bug that a length-prefixed protocol plus `io.ReadFull` exists to make 
 
 ## Further Reading
 
-- [TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel) — what is behind the descriptor: the
+- [TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel) -- what is behind the descriptor: the
   socket buffers, the accept queues, and the state machine these events report on.
-- [The Netpoller](./go-netpoller) — how `epoll_wait` results become runnable goroutines.
-- [Stream Framing](./stream-framing) — why readiness notification alone never gives you messages.
-- [Docker Bridge Networking](./docker-bridge-networking) — where the packets that fire these
+- [The Netpoller](./go-netpoller) -- how `epoll_wait` results become runnable goroutines.
+- [Stream Framing](./stream-framing) -- why readiness notification alone never gives you messages.
+- [Docker Bridge Networking](./docker-bridge-networking) -- where the packets that fire these
   events actually come from in our deployment.

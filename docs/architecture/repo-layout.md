@@ -5,43 +5,27 @@ outline: deep
 
 # Repository Layout
 
-```
-swarm-net/
-├── CLAUDE.md                     # the operating charter for the agent team
-├── go.mod                        # module swarm-net
-├── package.json                  # VitePress toolchain only — the Go build needs no Node
-│
-├── .claude/
-│   └── agents/                   # subagent definitions (see below)
-│       ├── system-architect.md
-│       ├── doc-educator.md
-│       ├── go-engineer.md
-│       └── sim-engineer.md
-│
-├── cmd/
-│   ├── swarm-node/               # the node binary — identical for every node in the swarm
-│   └── control-center/           # coordinator + embedded HTTP/WebSocket server
-│
-├── pkg/
-│   ├── protocol/                 # wire schemas + framing codec. Imports nothing local.
-│   ├── network/                  # TCP listener, dialer, connection pool, read/write loops
-│   ├── health/                   # HealthStrategy interface + LatencyHealthStrategy
-│   ├── cluster/                  # membership, election math, heartbeats, failover, replication
-│   └── telemetry/                # node state snapshots destined for the dashboard
-│
-├── web/
-│   └── static/                   # vanilla HTML/CSS/JS dashboard, embedded into the CC binary
-│
-├── deploy/                       # Dockerfiles, docker-compose.yml, bridge network definition
-│
-└── docs/                         # VitePress site — the curriculum
-    ├── .vitepress/config.js      # sidebar; extended after every Concept Discovery pass
-    ├── index.md
-    ├── WORKLOG.md
-    ├── architecture/             # how THIS system works
-    ├── concepts/                 # transferable foundations it stands on
-    └── guides/                   # operational how-tos (running, scaling, chaos)
-```
+| Path | What it holds |
+|---|---|
+| `CLAUDE.md` | The operating charter for the agent team |
+| `go.mod` | `module swarm-net` |
+| `package.json` | VitePress toolchain only -- the Go build needs no Node |
+| `.claude/agents/` | Subagent definitions: `system-architect.md`, `doc-educator.md`, `go-engineer.md`, `sim-engineer.md` |
+| `cmd/swarm-node/` | The node binary -- identical for every node in the swarm |
+| `cmd/control-center/` | Coordinator plus embedded HTTP/WebSocket server |
+| `pkg/protocol/` | Wire schemas and framing codec. Imports nothing local. |
+| `pkg/network/` | TCP listener, dialer, connection pool, read/write loops |
+| `pkg/health/` | `HealthStrategy` interface and `LatencyHealthStrategy` |
+| `pkg/cluster/` | Membership, election math, heartbeats, failover, replication |
+| `pkg/telemetry/` | Node state snapshots destined for the dashboard |
+| `web/static/` | Vanilla HTML/CSS/JS dashboard, embedded into the Control Center binary |
+| `deploy/` | Dockerfiles, `docker-compose.yml`, bridge network definition |
+| `docs/` | The VitePress site -- the curriculum |
+| `docs/.vitepress/config.js` | Sidebar; extended after every Concept Discovery pass |
+| `docs/WORKLOG.md` | Append-only engineering log |
+| `docs/architecture/` | How THIS system works |
+| `docs/concepts/` | Transferable foundations it stands on |
+| `docs/guides/` | Operational how-tos (running, scaling, chaos) |
 
 ## Why `pkg/` splits this way
 
@@ -53,37 +37,50 @@ should not have to skip past byte-slice arithmetic.
 The boundaries are drawn so each package has exactly one reason to change:
 
 - **`protocol` changes** when the wire format changes. Nothing else should have to.
-- **`network` changes** when connection management changes — pooling, deadlines, backpressure. It
+- **`network` changes** when connection management changes -- pooling, deadlines, backpressure. It
   moves opaque frames and has no opinion about their contents.
 - **`health` changes** when a new metric is introduced. This is the extension point the brief calls
   out explicitly, so it gets its own package rather than a file inside `cluster`. A strategy living
   next to the code that consumes it is a strategy that will accidentally grow a dependency on it.
-- **`cluster` changes** when the distributed algorithm changes — thresholds, affinity rules,
+- **`cluster` changes** when the distributed algorithm changes -- thresholds, affinity rules,
   failover behaviour. This is where the genuinely hard reasoning lives, and it is kept free of I/O
   detail so it can be unit-tested without a socket.
 - **`telemetry` changes** when the dashboard needs to show something new. Keeping it separate stops
   display concerns from leaking into the state machine.
 
-The dependency graph is acyclic and points one way:
+The dependency graph is a DAG and points one way:
 
-```
-   cmd/swarm-node ─┐
-   cmd/control-center ─┤
-                       ├──▶ pkg/cluster ──┬──▶ pkg/health ──┐
-                       │                  │                 ├──▶ pkg/protocol
-                       └──▶ pkg/telemetry └──▶ pkg/network ─┘
+```mermaid
+flowchart TD
+    N["cmd/swarm-node"]
+    C["cmd/control-center"]
+    CL["pkg/cluster"]
+    T["pkg/telemetry"]
+    H["pkg/health"]
+    NW["pkg/network"]
+    P["pkg/protocol"]
+
+    N --> CL
+    N --> T
+    C --> CL
+    C --> T
+    CL --> H
+    CL --> NW
+    T --> NW
+    H --> P
+    NW --> P
 ```
 
-`pkg/protocol` is the root and imports nothing from this module. If a future change appears to
-require `protocol` to import `cluster`, the correct response is to hoist the shared type into
-`protocol` or to introduce an interface — never to merge the packages.
+`pkg/protocol` is the sink of the graph and imports nothing from this module. If a future change
+appears to require `protocol` to import `cluster`, the correct response is to hoist the shared type
+into `protocol` or to introduce an interface -- never to merge the packages.
 
 ## `cmd/` holds wiring, not logic
 
 Both binaries should read as configuration, construction, and lifecycle: parse flags and
 environment, build the dependency graph, install signal handlers, block, shut down cleanly. Any
-`if` statement in `cmd/` that expresses a distributed-systems rule belongs in `pkg/`. This keeps the
-interesting code testable without spawning processes.
+`if` statement in `cmd/` that expresses a distributed-systems rule belongs in `pkg/`. This keeps
+the interesting code testable without spawning processes.
 
 `cmd/swarm-node` is deliberately one binary for all roles. A node does not know at start-up whether
 it will be a leader; roles are states in a machine, not build targets. Two binaries would make the
@@ -98,10 +95,10 @@ identically on someone else's machine.
 
 ## `docs/` mirrors the two kinds of knowledge
 
-`architecture/` answers *"how does this system work?"* — it is allowed to be specific, opinionated,
-and obsolete the moment the code changes, which is why it cites code directly.
+`architecture/` answers *"how does this system work?"* -- it is allowed to be specific,
+opinionated, and obsolete the moment the code changes, which is why it cites code directly.
 
-`concepts/` answers *"what must I understand for that to make sense?"* — it is transferable. A
+`concepts/` answers *"what must I understand for that to make sense?"* -- it is transferable. A
 reader should be able to take the framing or netpoller page to an unrelated project and still get
 value. These pages reference this repository, but they are not *about* it.
 

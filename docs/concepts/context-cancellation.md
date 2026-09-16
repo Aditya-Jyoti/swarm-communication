@@ -14,7 +14,7 @@ than the heartbeat interval is worthless. A replication write to a dead peer mus
 the leader forever. A `SIGTERM` from `docker compose down` must drain connections and exit
 before Docker's grace period expires and sends `SIGKILL`. All three are the same mechanism.
 
-Prerequisite: [CSP, Channels & The Go Memory Model](./csp-channels-and-memory-model) —
+Prerequisite: [CSP, Channels & The Go Memory Model](./csp-channels-and-memory-model) --
 `Done()` is a closed channel used as a broadcast, and the happens-before edge from `close`
 is what makes cancellation observable. See also [The Netpoller](./go-netpoller) and
 [TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel) for why interrupting a read is not
@@ -27,7 +27,7 @@ involved.
 
 ### A tree, not a bag
 
-The single most common misreading is that `Context` is a request-scoped dictionary — a place
+The single most common misreading is that `Context` is a request-scoped dictionary -- a place
 to stash a database handle, a logger, a user ID. `WithValue` exists and has legitimate uses
 (request IDs, trace spans, deadlines a middleware injected), but that is a side feature.
 
@@ -52,7 +52,7 @@ A context is a **node in an immutable tree of cancellation signals**.
 ```
 
 Every `WithX` constructor returns a **new** context that is a child of the one you passed.
-The parent is never modified — contexts are immutable. Cancellation flows strictly downward.
+The parent is never modified -- contexts are immutable. Cancellation flows strictly downward.
 A timed-out peer probe cannot take down the cluster loop; cancelling the cluster loop takes
 down every probe beneath it.
 
@@ -67,7 +67,7 @@ type Context interface {
 }
 ```
 
-`Done()` returns a channel that is **closed** — never sent on — exactly once, when this
+`Done()` returns a channel that is **closed** -- never sent on -- exactly once, when this
 context is cancelled. Closure is the broadcast: every goroutine selecting on it wakes, and
 every future receive returns immediately. `Err()` returns `nil` before cancellation and,
 afterwards, either `context.Canceled` or `context.DeadlineExceeded`.
@@ -80,9 +80,9 @@ afterwards, either `context.Canceled` or `context.DeadlineExceeded`.
 | `context.TODO()` | Identical behaviour; a marker meaning "a context belongs here and I have not yet plumbed it". Distinguishable by static analysis. |
 | `context.WithCancel(parent)` | Child plus a `CancelFunc`. Call it to cancel the subtree. |
 | `context.WithCancelCause(parent)` | As above, but the cancel func takes an `error` retrievable via `context.Cause`. |
-| `context.WithTimeout(parent, d)` | Child cancelled after `d`, or when the parent is, or when you call cancel — whichever is first. |
+| `context.WithTimeout(parent, d)` | Child cancelled after `d`, or when the parent is, or when you call cancel -- whichever is first. |
 | `context.WithDeadline(parent, t)` | The absolute-time form. `WithTimeout` is `WithDeadline(parent, time.Now().Add(d))`. If the parent's deadline is earlier, the parent's wins. |
-| `context.WithoutCancel(parent)` | Keeps the parent's **values**, drops its cancellation and deadline. For work that must outlive the request that triggered it — flushing a final telemetry batch during shutdown, for example. |
+| `context.WithoutCancel(parent)` | Keeps the parent's **values**, drops its cancellation and deadline. For work that must outlive the request that triggered it -- flushing a final telemetry batch during shutdown, for example. |
 | `context.AfterFunc(ctx, f)` | Runs `f` in a new goroutine when `ctx` is done. Returns a `stop func() bool` that unregisters it. The clean way to hook cleanup onto a context without writing a goroutine that parks on `Done()`. |
 | `context.WithValue(parent, k, v)` | Attaches one immutable key/value. Keys must be an unexported named type, never a bare string. |
 
@@ -126,7 +126,7 @@ is a legitimate micro-optimisation.
 **Parent registration walks up to the nearest cancellable ancestor.** `propagateCancel`
 looks upward for a parent that is itself a `*cancelCtx` (or, via the `Done()` channel, any
 custom implementation). If the parent is already cancelled, the child is cancelled
-immediately at construction. If the parent is not cancellable at all — `Background()` — no
+immediately at construction. If the parent is not cancellable at all -- `Background()` -- no
 registration happens and no goroutine is spawned. If the parent is a *custom* `Context`
 implementation that the package cannot recognise, `context` falls back to spawning a
 goroutine that selects on the parent's `Done()`. That is one concrete reason to avoid
@@ -202,7 +202,7 @@ ctx, cancel := context.WithCancelCause(parent)
 cancel(fmt.Errorf("leader %s failed %d heartbeats", id, k))
 
 <-ctx.Done()
-ctx.Err()            // context.Canceled — the coarse reason
+ctx.Err()            // context.Canceled -- the coarse reason
 context.Cause(ctx)   // the specific error you supplied
 ```
 
@@ -228,7 +228,7 @@ That distinction is the single most important idea on this page, and it returns 
 ### Contexts cannot interrupt a syscall
 
 This is the part that surprises people. A context is a closed channel. A goroutine blocked
-in `read(2)` on a socket is not selecting on anything — it is parked by the netpoller
+in `read(2)` on a socket is not selecting on anything -- it is parked by the netpoller
 waiting for the kernel to report readability, or, worse, blocked in a syscall on an OS
 thread. Closing a channel does not reach it.
 
@@ -249,7 +249,7 @@ carries `rd`/`wd` deadline fields and an associated runtime timer. When the time
 `runtime.netpolldeadlineimpl` marks the fd's read (or write) side as timed out and calls
 `netpollgoready` on any goroutine parked there. The goroutine wakes and `Read` returns a
 `*net.OpError` wrapping `os.ErrDeadlineExceeded`, whose `Timeout() bool` reports true. The
-fd remains valid and usable — unlike closing it. See [The Netpoller](./go-netpoller).
+fd remains valid and usable -- unlike closing it. See [The Netpoller](./go-netpoller).
 
 Importantly, deadlines are **absolute times, not durations**, and they are sticky: once set,
 every subsequent `Read` is measured against the same instant until you set a new one. A
@@ -258,7 +258,7 @@ return immediately with a timeout.
 
 There are two correct ways to bridge a context onto a connection.
 
-**Method 1 — derive the deadline up front.** Simplest, and correct whenever the only
+**Method 1 -- derive the deadline up front.** Simplest, and correct whenever the only
 cancellation you care about is the deadline.
 
 ```go
@@ -292,7 +292,7 @@ func readFrame(ctx context.Context, c net.Conn, max uint32) ([]byte, error) {
 }
 ```
 
-**Method 2 — a watchdog via `context.AfterFunc`.** Reacts to explicit cancellation as well
+**Method 2 -- a watchdog via `context.AfterFunc`.** Reacts to explicit cancellation as well
 as to deadlines, and costs no goroutine when the context is never cancelled.
 
 ```go
@@ -338,7 +338,7 @@ Note `unregister()`'s return value: `true` means the function was removed before
 first case; in the second, another goroutine may be mid-`SetDeadline` and the connection is
 being torn down anyway.
 
-The third approach — closing the connection from another goroutine — also unblocks the read
+The third approach -- closing the connection from another goroutine -- also unblocks the read
 (the runtime marks the `pollDesc` closed and wakes waiters with `net.ErrClosed`), but it is
 destructive: the connection cannot be reused, and you must guard against double-close. Use
 it for teardown, not for per-operation timeouts.
@@ -352,14 +352,14 @@ so use it rather than `net.Dial` plus your own timer.
 
 No Go code exists yet; the following are commitments the implementation will have to honour.
 
-**`cmd/swarm-node/` and `cmd/control-center/` — the root of the tree.** `main` will build
+**`cmd/swarm-node/` and `cmd/control-center/` -- the root of the tree.** `main` will build
 its root context with `signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)`
 and pass it into every subsystem. Nothing below `main` will call `context.Background()`.
 Docker sends `SIGTERM` and waits ten seconds before `SIGKILL`, so the shutdown path has a
 hard budget; it will be given its own `WithTimeout` derived from `WithoutCancel(root)` so
 that draining is not itself cancelled by the very signal that started it.
 
-**`pkg/health/` — `HealthStrategy.EvaluateScore`.** The interface as specified in the project
+**`pkg/health/` -- `HealthStrategy.EvaluateScore`.** The interface as specified in the project
 brief takes only a `NodeAddress`. A latency probe that cannot be bounded is a liability, so
 implementations will either accept a context in an extended method or construct their own
 bounded one internally from a configured probe timeout; either way, every probe will carry a
@@ -368,31 +368,31 @@ deadline strictly shorter than the heartbeat interval, and every probe context w
 invariant: if probes can outlive their interval, probes accumulate and the node measures its
 own scheduling backlog rather than the network.
 
-**`pkg/network/` — the framing codec and connection pool.** Every read of a length-prefixed
+**`pkg/network/` -- the framing codec and connection pool.** Every read of a length-prefixed
 frame will set a read deadline derived from the caller's context before touching the socket,
 using the pattern above, and will refresh it per frame. Idle connections in the pool will
 carry a long read deadline as a dead-peer detector of last resort, since a silently dropped
 TCP connection on a Docker bridge may never produce a `RST`. See
 [TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel).
 
-**`pkg/cluster/` — heartbeats and failure detection.** This is where the distinction below
+**`pkg/cluster/` -- heartbeats and failure detection.** This is where the distinction below
 is load-bearing. The heartbeat loop will classify probe outcomes into three categories, and
 only one of them increments the K-missed-beats counter:
 
-- `errors.Is(err, context.DeadlineExceeded)` or a `net.Error` with `Timeout()` → the peer
+- `errors.Is(err, context.DeadlineExceeded)` or a `net.Error` with `Timeout()` -> the peer
   failed to respond in time. **Counts as a missed beat.**
-- `errors.Is(err, context.Canceled)` → *we* are shutting down or re-electing. **Does not
+- `errors.Is(err, context.Canceled)` -> *we* are shutting down or re-electing. **Does not
   count.** The peer told us nothing.
-- Any other error (connection refused, protocol error, decode failure) → evidence about the
+- Any other error (connection refused, protocol error, decode failure) -> evidence about the
   peer, counted, and logged distinctly.
 
-**`pkg/cluster/` — re-election.** When a leader is declared dead, the leader's per-cluster
+**`pkg/cluster/` -- re-election.** When a leader is declared dead, the leader's per-cluster
 context is cancelled with `WithCancelCause`, so that every replication stream, probe, and
 pending task under it unwinds with a cause explaining *which* leader failed and *why*. The
 cause will be surfaced to telemetry so the dashboard can show the reason for a failover
 rather than a bare state change.
 
-**`pkg/telemetry/` — the WebSocket fan-out.** Each subscriber will get a context derived from
+**`pkg/telemetry/` -- the WebSocket fan-out.** Each subscriber will get a context derived from
 the server's, cancelled when the socket closes, and write deadlines on every frame so that a
 paused browser tab cannot pin a goroutine indefinitely.
 
@@ -403,7 +403,7 @@ exception class noted below.
 
 ### Why contexts must not live in structs
 
-The convention is `func (s *Server) Do(ctx context.Context, …) error` — context as the first
+The convention is `func (s *Server) Do(ctx context.Context, ...) error` -- context as the first
 parameter, named `ctx`. The reasons are not stylistic:
 
 1. **A struct outlives a call.** A `ctx` captured at construction encodes the *constructor's*
@@ -418,7 +418,7 @@ parameter, named `ctx`. The reasons are not stylistic:
 The pragmatic exceptions, both of which are really "the struct *is* the operation":
 
 - **A long-running worker whose lifetime genuinely equals the struct's.** A
-  `heartbeatLoop{ctx}` created by `NewHeartbeatLoop(ctx, …)` and torn down with it is
+  `heartbeatLoop{ctx}` created by `NewHeartbeatLoop(ctx, ...)` and torn down with it is
   defensible, though a stored `stop func()` plus a `done chan struct{}` is clearer.
 - **Request-shaped structs.** `http.Request` holds a context and exposes
   `WithContext`/`Context()`. The struct represents exactly one in-flight operation, so its
@@ -429,8 +429,8 @@ The pragmatic exceptions, both of which are really "the struct *is* the operatio
 
 ## Graceful shutdown, composed from the stdlib
 
-The three concepts beginners fuse — **cancellation**, **shutdown**, and **failure
-detection** — are distinct:
+The three concepts beginners fuse -- **cancellation**, **shutdown**, and **failure
+detection** -- are distinct:
 
 ```
   Cancellation        "I no longer need this result."
@@ -509,7 +509,7 @@ func main() {
 Points to notice:
 
 - `errc` is buffered to the number of producers, so a subsystem returning after we have
-  stopped reading does not leak a goroutine on a blocked send — the failure mode described
+  stopped reading does not leak a goroutine on a blocked send -- the failure mode described
   in [CSP, Channels & The Go Memory Model](./csp-channels-and-memory-model).
 - The drain context is derived from `WithoutCancel(root)`, not `root`. Deriving from an
   already-cancelled context yields an already-cancelled context, and the drain would do
@@ -535,10 +535,10 @@ retaining megabytes; the parent context's `children` map grows without bound ove
 run. *Cause:* `ctx, _ := context.WithTimeout(...)` with the cancel discarded, or a `cancel`
 stored and never invoked. *Fix:* `defer cancel()` unconditionally; enable `go vet`'s
 `lostcancel` in CI. Note the `_` form does not even compile as a two-value assignment with a
-blank — but `ctx, cancel := ...; _ = cancel` does, and vet catches that one.
+blank -- but `ctx, cancel := ...; _ = cancel` does, and vet catches that one.
 
-**Cancelled probes counted as missed heartbeats.** *Symptom:* during any coordinated event —
-a deploy, a re-election, a config reload — nodes mass-demote healthy leaders, and the swarm
+**Cancelled probes counted as missed heartbeats.** *Symptom:* during any coordinated event --
+a deploy, a re-election, a config reload -- nodes mass-demote healthy leaders, and the swarm
 oscillates for several intervals before settling. *Cause:* treating every non-nil error from
 a probe as evidence about the peer. *Fix:* the three-way classification above, checked with
 `errors.Is`, not string matching.
@@ -558,7 +558,7 @@ set the deadline before **every** read and write, or explicitly clear it with
 
 **Comparing errors with `==`.** *Symptom:* a timeout branch that never executes, because the
 error arrived as `*net.OpError` wrapping `os.ErrDeadlineExceeded`, or because a package
-wrapped it with `fmt.Errorf("%w", …)`. *Fix:* `errors.Is` / `errors.As` throughout.
+wrapped it with `fmt.Errorf("%w", ...)`. *Fix:* `errors.Is` / `errors.As` throughout.
 
 **Deriving the drain context from the cancelled root.** *Symptom:* `srv.Shutdown(ctx)`
 returns instantly with `context.Canceled`, in-flight WebSocket clients are cut mid-frame,
@@ -568,7 +568,7 @@ and the dashboard shows a torn final state. *Fix:* `context.WithoutCancel` as sh
 be cancelled with `DeadlineExceeded` at 50 ms. *Symptom:* probe timeouts far shorter than
 configured, appearing only when the system is already under pressure. *Fix:* this is correct
 behaviour; the bug is expecting otherwise. If a probe genuinely must complete regardless,
-`WithoutCancel` plus its own timeout — and accept that it now cannot be cancelled by
+`WithoutCancel` plus its own timeout -- and accept that it now cannot be cancelled by
 shutdown.
 
 **Leaking the goroutine you spawned to watch `Done()`.** Writing
@@ -582,8 +582,8 @@ tree because a value was not set on some code path; unreadable call sites; no co
 safety. *Fix:* pass dependencies as parameters or struct fields. Reserve `WithValue` for
 genuinely cross-cutting, request-scoped data with unexported key types.
 
-**Calling `cancel` from the cancelled subtree.** Safe — `CancelFunc` is idempotent and
-concurrency-safe — but cancelling a context you did not create is a layering violation that
+**Calling `cancel` from the cancelled subtree.** Safe -- `CancelFunc` is idempotent and
+concurrency-safe -- but cancelling a context you did not create is a layering violation that
 makes shutdown order unanalysable. *Symptom:* subsystems dying in a different order on every
 run. *Fix:* only the code that created a context may cancel it.
 
