@@ -27,13 +27,6 @@ export default withMermaid(
           ]
         },
         {
-          text: 'Architecture',
-          items: [
-            { text: 'Overview', link: '/architecture/overview' },
-            { text: 'Repository Layout', link: '/architecture/repo-layout' }
-          ]
-        },
-        {
           text: 'Concepts',
           items: [
             { text: 'TCP Sockets & the Kernel', link: '/concepts/tcp-sockets-and-the-kernel' },
@@ -56,10 +49,14 @@ export default withMermaid(
     },
 
     themeConfig: {
-      logo: '/logo.svg',
       search: {
         provider: 'local'
-      }
+      },
+      nav: [
+        { text: 'Home', link: '/' },
+        { text: 'Architecture', link: '/architecture/overview' },
+        { text: 'Concepts', link: '/concepts/tcp-sockets-and-the-kernel' }
+      ]
     },
 
     vite: {
