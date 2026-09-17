@@ -1,6 +1,5 @@
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
-import mathjax3 from 'markdown-it-mathjax3'
 
 // GitHub Pages serves this repo as a *project* site under
 // https://<owner>.github.io/swarm-communication/, not at the domain root. VitePress
@@ -104,10 +103,12 @@ export default withMermaid(defineConfig({
   },
 
   // LaTeX: $inline$ and $$block$$, per CLAUDE.md 4.3.
+  // VitePress's built-in `math` switch drives markdown-it-mathjax3 (still a devDependency)
+  // AND registers the <mjx-*> tags as Vue custom elements. Calling md.use(mathjax3) by
+  // hand skips the latter, so Vue treats <mjx-container> as an unresolved component and
+  // every math page logs "Hydration completed but contains mismatches".
   markdown: {
-    config: (md) => {
-      md.use(mathjax3)
-    }
+    math: true
   },
 
   // Mermaid replaces ASCII art entirely, per CLAUDE.md 4.2.
