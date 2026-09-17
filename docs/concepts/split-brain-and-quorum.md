@@ -16,7 +16,7 @@ Two formulas appear in `pkg/cluster` that look similar and mean opposite things:
 | Formula | Where | What it answers |
 |---|---|---|
 | $Q(n) = \lfloor n/2 \rfloor + 1$ | `pkg/cluster/partition.go:22` | "Am I certain no other group can also be acting?" |
-| $L(N) = \max(1, \lceil N \cdot t \rceil)$ | `pkg/cluster/election.go:64` | "How many leaders should a group of this size staff?" |
+| $L(N) = \max(1, \lceil N \cdot t \rceil)$ | `pkg/cluster/election.go:69` | "How many leaders should a group of this size staff?" |
 
 The first is a statement about *exclusivity*. The second is a statement about *capacity*.
 Confusing them is how a reader concludes this swarm has election safety when it does not.
@@ -71,7 +71,7 @@ below.
 $$L(N) = \max\left(1, \left\lceil N \cdot t \right\rceil\right), \quad t = 0.3$$
 
 ```go
-// pkg/cluster/election.go:64
+// pkg/cluster/election.go:69
 func LeaderCount(n int, threshold float64) int {
 ```
 
@@ -92,7 +92,7 @@ valid answer, both act on it. The function has no way to know it was called twic
 For any $N \geq 1$ and $t > 0$ the ceiling is already at least 1, so `max(1, ...)` is a
 belt-and-braces floor that states the intent -- somebody is always in charge -- rather than
 relying on a reader to notice that `ceil` never yields zero here. The cap at $n$
-(`pkg/cluster/election.go:75`) covers thresholds above 1, which `withDefaults` already rejects.
+(`pkg/cluster/election.go:80`) covers thresholds above 1, which `withDefaults` already rejects.
 
 ### CAP, in practice
 
@@ -180,13 +180,34 @@ publish different leader sets the first thing to compare is whether they were si
 swarm. See [Gossip and Anti-Entropy](/concepts/gossip-and-anti-entropy) for why this window is
 bounded but never zero.
 
+The second thing to compare is the scores. Same $N$ with different reported scores also gives
+different leaders, and before `Seq` ordered them, that disagreement never healed. See
+[Convergence Debugging](/architecture/convergence-debugging).
+
+### Terms: a symptom detector, not a guard
+
+Raft stops a stale leader with terms: a node refuses anything from a lower term. This swarm has
+terms too, but they are weaker, and it is worth being exact about how:
+
+| | Raft term | swarm-net term |
+|---|---|---|
+| who bumps it | a candidate starting an election | each node, when **its own** leader set changes (`pkg/cluster/node.go:1717`) |
+| how it spreads | every RPC | only over leader-worker traffic (`pkg/cluster/heartbeat.go:92`) |
+| stale sender | rejected, and it steps down | a stale beat is not counted as liveness, but still acked (`pkg/cluster/heartbeat.go:88`) |
+| two partitions | at most one can win a majority for a term | each side keeps its own term history |
+
+So a term catches a leader that is behind **its own workers**. It cannot stop two partitions
+from each running a leader set. More on this kind of counter:
+[Logical Clocks](/concepts/logical-clocks).
+
 ---
 
 ## Why It Matters in This Swarm
 
 ### Where the formulas are consumed
 
-- `Elect` (`pkg/cluster/election.go:107`) calls `LeaderCount` on `len(view.Alive())`. It never
+- `Elect` (`pkg/cluster/election.go:126`) calls `LeaderCount` on the size of its electorate:
+  alive members plus suspect leaders (`pkg/cluster/election.go:134`). It never
   calls `Quorum`. Election and partition detection are independent by construction.
 - `Result.Want` (`pkg/cluster/election.go:55`) can exceed `len(Result.Leaders)` when too few
   nodes have a valid score. That gap means "the swarm could not staff its own leadership", which
