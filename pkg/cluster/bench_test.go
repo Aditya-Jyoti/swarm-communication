@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -173,4 +174,48 @@ func BenchmarkViewAccessors(b *testing.B) {
 			})
 		})
 	}
+}
+
+// Under anti-entropy every MEMBERSHIP_DELTA is a peer's whole view, so the
+// receive path runs over N records per message on the single event loop. This
+// is the steady state -- every record already known -- and it must stay linear
+// in N: any per-record Snapshot turns it into O(N^2 log N), which at n=1000 is
+// the difference between microseconds and a stalled loop.
+func BenchmarkHandleMembershipDelta(b *testing.B) {
+	benchEachSize(b, func(b *testing.B, n int) {
+		ms := benchMembers(n)
+		node, err := NewNode(NodeConfig{
+			Self:      "bench-self",
+			Advertise: "bench-self:7946",
+			Transport: newFakeTransport("bench-self"),
+			Health:    newFakeHealth(),
+			Logger:    quietLogger(),
+			// Production wires Connect; with it set, connect consults the
+			// dialed set, which the warm-up call below fills.
+			Connect: func(protocol.NodeAddress) {},
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, m := range ms {
+			node.table.Upsert(m)
+		}
+		payload := protocol.MembershipDeltaPayload{Members: make([]protocol.MemberRecord, 0, n)}
+		for _, m := range ms {
+			payload.Members = append(payload.Members, memberRecord(m))
+		}
+		from := ms[n-1].ID
+		ctx := context.Background()
+		node.handleMembershipDelta(ctx, from, payload) // warm the dialed set
+		version := node.table.Snapshot().Version
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			node.handleMembershipDelta(ctx, from, payload)
+		}
+		b.StopTimer()
+		if node.table.Snapshot().Version != version {
+			b.Fatal("a delta of current records changed the table")
+		}
+	})
 }

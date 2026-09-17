@@ -1,10 +1,12 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -795,6 +797,13 @@ func payloadOrPoison[T any](ctx context.Context, n *Node, f inboundFrame) (T, bo
 
 func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, p protocol.MembershipDeltaPayload) {
 	changed := false
+	// One snapshot for the whole delta, not one per record. Under anti-entropy
+	// every delta is a full view, and a per-record Snapshot (copy + sort of the
+	// table) made this O(N^2 log N) on the event loop: ~120ms per message at
+	// N=1000. The snapshot is used only for role lookup, and reading roles as
+	// they stood before the delta is the right semantics anyway: a record later
+	// in the same delta must not see a role an earlier record just relayed.
+	before := n.table.Snapshot()
 	for _, rec := range p.Members {
 		if rec.ID == "" {
 			continue
@@ -813,9 +822,14 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 		// that changed them; applying one would erase an incumbency on this
 		// node alone and split the election. A member's role therefore moves
 		// only when that member says so, and otherwise keeps what we hold.
+		//
+		// Looked up by binary search rather than View.Get, which scans: a scan
+		// per record would leave the loop O(N^2) even with the snapshot hoisted.
+		// before came from Snapshot, so it is sorted by ID; View.Get cannot
+		// assume that for an arbitrary View.
 		role := RoleWorker
-		if existing, ok := n.table.Snapshot().Get(rec.ID); ok {
-			role = existing.Role
+		if i, ok := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID); ok {
+			role = before.Members[i].Role
 		}
 		if rec.ID == from {
 			role = ParseRole(rec.Role)
@@ -840,6 +854,10 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 		n.membershipChanged(ctx)
 	}
 }
+
+// compareMemberID orders a Member against an ID, for binary search over a
+// Snapshot's ID-sorted Members.
+func compareMemberID(m Member, id protocol.NodeID) int { return cmp.Compare(m.ID, id) }
 
 // memberRecord is the wire form of m. Score is passed through as-is; the
 // record's MarshalJSON turns an invalid score into the unmeasured sentinel.
