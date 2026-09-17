@@ -643,3 +643,187 @@ repeated; these are new.
 | Monotonic merge rules and the incarnation number | Defect 2 in 4.3. Why a merge must apply the monotone field first, and why "state only worsens at equal incarnation" is the whole correctness argument for gossip in 3b. | Phase 3 |
 | At-least-once task delivery and idempotent re-issue | The replication choice in 4.2 re-issues pending tasks on promotion. What a worker must do to make a duplicate harmless. | Phase 4 |
 | Cooperative vs uncooperative failure injection | The `CHAOS` message can kill and delay but cannot wedge. What that leaves untested, and how a reader would test it outside Compose. | Phase 5 |
+
+---
+
+## 2026-09-17 -- Phase 3a close-out and Phase 3b -- Gossip & Anti-Entropy
+
+Two sessions of work recorded in one entry. The first hardened Phase 3a and audited it under a
+"no documentation writes" constraint, so `STATE.md` carried the record in the meantime. The second
+fixed the audit findings and built Phase 3b. Earlier entries are not edited; corrections to them
+are in section 5.5.
+
+### 5.1 Phase 3a complete, and the hardening pass
+
+**Agent:** `go-engineer`
+
+Phase 3a (socket mesh and clustering engine) merged as `d1d94cc`. The hardening commits that
+followed, merged as `05680c9`:
+
+| Commit | What | Why it matters |
+|---|---|---|
+| `7684686` | `ci.yml`: gofmt, vet, `go test -race -count=2` | The Go suite had no CI gate. `deploy.yml` only built the docs. |
+| `c1da135` | `FuzzDecodeFrame` | First fuzz target. The frame decoder is the one parser that reads bytes from untrusted peers. |
+| `fc63794`, `b52e2be` | Framing and membership merge benchmarks | First benchmarks. They set the baseline 3b was measured against. |
+| `6a6b523` | `Snapshot` 4 -> 1 allocs, `Leaders` 1.4-1.7x faster, `Size()` stops allocating | Anti-entropy calls these on every round. |
+| `f9e3b29` | HIGH-1 fix (section 5.2) | -- |
+| `cfece07`, `f0923d5` | `STATE.md` deleted, then restored | Deleted to make this worklog the only status record. Restored once the no-docs constraint froze the worklog: a stale single record is worse than two honest ones. |
+
+**Baseline worth remembering:** `Table.Upsert` is zero-allocation and flat at 85-99 ns/op from
+n=10 to n=1000. The steady-state anti-entropy merge is a mutex plus a map lookup.
+
+### 5.2 Read-only audit of Phase 3a
+
+**Agent:** `system-architect` (audit), `go-engineer` (fixes)
+
+| Finding | Severity | Status |
+|---|---|---|
+| Unmeasurable node reports the best score | HIGH-1 | Fixed `f9e3b29`, regression tests `7f5af55` |
+| A death loses the merge to a queued refutation | HIGH-2 | Fixed `2cc3060` |
+| Poisoned peer keeps its connection but stays dead | MEDIUM-1 | **Open**, deferred by the user |
+| `n.local` / `n.missed` never pruned | MEDIUM-2 | Fixed `610a210` |
+| Refutation incarnation can overflow | unfiled | Fixed `c9c7dd9` |
+
+**HIGH-1.** `selfScore` returned 0 when a node had peers but could measure none of them. Scores
+are lower-is-better, so a blind node claimed to be the healthiest in the swarm and could displace
+a healthy leader. `7f5af55` pins the two scenarios: a blind newcomer with the lowest ID must not
+displace the incumbent, and an all-blind swarm falls back to lowest alive ID with no node holding
+a score of 0.
+
+**HIGH-2.** `SetState` recorded a death at the member's *current* incarnation. A refutation
+already queued behind the crash carried a *higher* incarnation, so it won the merge and
+resurrected a dead node. Nothing then buried it: turning missed probes into a death is Phase 4.
+
+```mermaid
+sequenceDiagram
+    participant A as node-a
+    participant B as node-b
+    B->>A: MEMBERSHIP_DELTA "b alive at 7" (queued)
+    Note over B: b crashes
+    Note over A: select picks PeerDown(b) first
+    A->>A: before fix - "b dead at 6"
+    A->>A: queued frame "b alive at 7" wins, b resurrected
+    Note over A: after fix - death recorded as "b dead at 7"
+    A->>A: queued "b alive at 7" is equal incarnation, state only worsens, death holds
+```
+
+Under anti-entropy this would have been permanent: every node holding "alive at 7" re-asserts it
+each round and wins each time. That is why HIGH-2 blocked 3b.
+
+**Fix:** a transition to `StateDead` bumps the incarnation by one (`NextIncarnation`).
+
+**Accepted cost:** a peer that was partitioned but stayed alive reconnects at its old incarnation.
+That is now lower than its death record, so the handshake (`Table.Revive`) no longer revives it.
+It heals through refutation instead: the full view sent on `PeerUp` contains its death, it bumps
+past it and announces itself. One extra round trip, and the rule stays simple: only the node
+itself can overturn its own death.
+
+**MEDIUM-1.** A peer marked dead by `payloadOrPoison` keeps its TCP connection. A payload decode
+failure is a framing success, so no `PeerDown`/`PeerUp` pair follows, and `Revive` never runs. The
+peer stays invisible while a healthy connection to it is open. Reachable through version skew.
+Deferred by the user. **Expected mitigation from 3b:** the poisoned peer's own gossip carries its
+own record, and if it ever sees its death it refutes. This is untested and is not a fix.
+
+**MEDIUM-2.** Per-peer score maps were never pruned, so `selfScore` took a median over peers that
+had left, forever. `membershipChanged` now prunes both maps to the alive set, and
+`applyProbeRound` drops results for peers that died mid-round.
+
+**Incarnation overflow.** `refuteIfNeeded` set the node's incarnation to a peer-supplied value plus
+one. A record at `math.MaxInt64` wrapped it negative, after which the node lost every merge about
+itself. `NextIncarnation` now saturates. **Residual:** a death recorded at `MaxInt64` cannot be
+refuted, because nothing can outrank it. Needs a corrupt or hostile peer, and 3a has no
+authentication, so it is logged as debt (5.6), not fixed.
+
+### 5.3 Decisions locked with the user
+
+**Agent:** `system-architect`
+
+| Decision | Choice | Rejected | Reasoning |
+|---|---|---|---|
+| `LEAVE` handling | Record a death, not a delete. Implemented as `markLeft` (`edb713f`), also used for a clean-close `PeerDown` | `Table.Remove` | A deleted record has no incarnation left to defend. The next full view from any peer re-inserts the departed node as alive. `markLeft` bypasses `markDead` on purpose: a goodbye is a fact, so Phase 4 suspicion must not apply. |
+| Gossip peer selection | Shuffled round-robin, k=1, ~2s | One uniform random peer (4.2) | **Amends section 4.2.** A shuffled walk reaches every alive peer once per N rounds, so repair is bounded by $N \times T$. Uniform picks give only an expected bound, with a long tail where one peer is skipped for many rounds. |
+| 3b scope | Dissemination and repair only | Adding suspicion and indirect probing | Suspicion changes how deaths are created, which is Phase 4's failure-detector work. Mixing both means a convergence bug cannot be pinned to one layer (same argument as the 3a/3b split in 4.1). |
+| MEDIUM-1 | Deferred | Fix now | User's call. See 5.2. |
+
+With $N = 10$ and $T = 2$ s, every peer has heard every other peer's full view within 20 s, even
+if every push was dropped.
+
+### 5.4 Phase 3b build
+
+**Agent:** `go-engineer`
+
+```mermaid
+flowchart LR
+    Change["Local table change"] -->|"first-hand death or leave"| Push["pushRecord to all peers"]
+    Tick["Gossip tick, every T"] --> Pick["Next peer in shuffled order"]
+    Pick --> View["sendView full view"]
+    Push --> Merge["Receiver Table.Upsert"]
+    View --> Merge
+```
+
+| Commit | What | Key choice |
+|---|---|---|
+| `a983c1a` | Gossip ticker and `gossipRound` | Full view to one peer per tick, reusing `sendView`. The permutation is redrawn when exhausted, and early **only when the alive set changes**. The table version is the cheap trigger, but it moves on every score report, and redrawing on each one would keep resetting the cursor and break the N-round bound. `Shuffle` is an injectable seam. |
+| `c01ec88` | `pushRecord` for first-hand deaths and leaves | Local deaths were never broadcast before this. Relayed changes are **not** re-pushed: in a full mesh a broadcast already reached everyone, and push-on-receipt costs $N^2$ frames per change. Anti-entropy repairs whatever a push loses. |
+| `cd3e6e4` | Convergence tests over real nodes | Dropped death push repaired, HIGH-2 interleaving under gossip, lost self-announcement repaired, and two nodes that never talk converging through a third. |
+| `b048c37` | `SWARM_GOSSIP_INTERVAL` / `-gossip-interval` | Default 2s, validated like the other durations. The real-socket tests run gossip at 50ms over TCP. |
+| `4012bf2` | Linear delta handling | See below. |
+
+**Test harness race found.** The `quiesce` helper judged a node idle by queue length. That reads 0
+while a loop is still handling a frame it already dequeued. Gossip is the first thing that
+produces a frame *after* `FakeClock.Advance` returns, which exposed it. `quiesce` now repeats
+passes until one delivers no new frame.
+
+**Perf trap paid (`4012bf2`).** `handleMembershipDelta` took a fresh `Snapshot` per record. Under
+anti-entropy every delta is a full view, so the receive path was $O(N^2 \log N)$ on the single
+event loop. Hoisting the snapshot out of the loop was not enough on its own, because `View.Get`
+is a linear scan, which still leaves $O(N^2)$. The fix also looks roles up by binary search over the
+ID-sorted snapshot. `View.Get` stays linear, since it cannot assume an arbitrary `View` is sorted.
+
+| n | before | after |
+|---|---|---|
+| 1000 | 125 ms, 57 MB, 1000 allocs | 212 us, 57 KB, 1 alloc |
+
+Side effect: records in one delta now see roles as they stood before the delta. That is the more
+correct reading.
+
+**Open question from `STATE.md`, answered: does anti-entropy repair roles?** Partly.
+
+- **Repaired:** the sender's own role. A full view includes the sender's record about itself, and
+  receivers trust a role when `rec.ID == from`. A lost `announceSelf` is repaired by the sender's
+  next gossip round to that peer. Pinned in `cd3e6e4`.
+- **Not repaired:** relayed roles. A role about a third node is ignored by design, so if
+  node-c's announcement never reached node-a directly, gossip from node-b does not fix it. It is
+  fixed by node-c's own gossip round to node-a, within $N \times T$.
+
+### 5.5 Corrections to section 4.4
+
+**Agent:** `system-architect`
+
+The 4.4 debt table is stale in two rows. It is left as written; this is the correction.
+
+| 4.4 row | Stated | Actual |
+|---|---|---|
+| `architecture/why-not-consensus` | Not written | **Paid.** `docs/architecture/why-not-consensus.md` exists. |
+| `MeshProber` | Not yet written, `TCPConnectProber` is the default | **Paid.** `pkg/network/prober.go` defines it and `cmd/swarm-node/main.go` wires it in. |
+
+### 5.6 New debt and Phase 4 items
+
+**Agent:** `system-architect`
+
+| Item | Why it matters | Owner, phase |
+|---|---|---|
+| Death records (tombstones) are never garbage-collected | Every departed node stays in every full view forever. Each gossip round grows with churn, not with swarm size. GC must not reopen HIGH-2: drop a tombstone too early and a stale "alive" record resurrects the node. | `go-engineer`, Phase 4 |
+| MEDIUM-1 | See 5.2. Deferred by the user. | Phase 4, pending user decision |
+| Dead at `MaxInt64` cannot be refuted | See 5.2. Needs a bound on accepted incarnations, or authentication. | Phase 4 or later |
+| Concept pages cite stale line numbers and describe mechanisms we do not ship (`StateSuspect` is never assigned) | Misleads readers. | `doc-educator`, in progress |
+| `README.md` and `docs/index.md` said "Phase 1 of 5" | **Paid** alongside this entry. | -- |
+
+### 5.7 Syllabus additions
+
+**Agent:** `doc-educator` (authoring), nominated by `system-architect`
+
+| Nominated concept | Why | Needed by |
+|---|---|---|
+| Monotonic merge and the incarnation number | Already nominated in 4.5. HIGH-2 makes it concrete: why a death must bump the incarnation, and why only the node itself may overturn its death. **Being written now.** | Phase 3 |
+| Tombstones and garbage collection in gossip | 5.6. Why deleted records resurrect, how long a tombstone must live, and how that bound relates to $N \times T$. | Phase 4 |
