@@ -1805,19 +1805,21 @@ func quiesce(t *testing.T, ctx context.Context, nodes []*meshNode) {
 // would have n2 elect n3 (its closest peer) while n1 and n3 elect differently;
 // ranking on self-reported medians makes all three agree on n2, and the
 // affinity JOINs are accepted because the node they target believes it leads.
-func TestThreeRealNodesConvergeOnSelfReportedScores(t *testing.T) {
+// newMesh starts one real Node per id, all routed through one meshHub. local
+// gives each node's measured score per peer (absent means unreachable). Nodes
+// are registered with the hub only once all have started, so no frame reaches a
+// node that is not yet running. The mesh is torn down by t.Cleanup.
+func newMesh(t *testing.T, idList []protocol.NodeID, local map[protocol.NodeID]map[protocol.NodeID]float64, mutate func(*NodeConfig)) (context.Context, *meshHub, []*meshNode) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	hub := &meshHub{nodes: make(map[protocol.NodeID]*Node)}
-
-	local := map[protocol.NodeID]map[protocol.NodeID]float64{
-		"n1": {"n2": 10, "n3": 10}, // n1 reports 10
-		"n2": {"n1": 1, "n3": 2},   // n2 reports 1.5, but locally sees n1 as closest
-		"n3": {"n1": 1, "n2": 9},   // n3 reports 5, and locally sees n1 as closest
-	}
-	var nodes []*meshNode
-	for _, id := range []protocol.NodeID{"n1", "n2", "n3"} {
-		ep := &meshEndpoint{self: id, hub: hub, events: make(chan network.PeerEvent, 16)}
+	var (
+		nodes []*meshNode
+		wg    sync.WaitGroup
+	)
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	for _, id := range idList {
+		ep := &meshEndpoint{self: id, hub: hub, events: make(chan network.PeerEvent, 64)}
 		hs := newFakeHealth()
 		for peer, s := range local[id] {
 			hs.set(addrOf(peer), s)
@@ -1826,15 +1828,17 @@ func TestThreeRealNodesConvergeOnSelfReportedScores(t *testing.T) {
 		cfg := baseConfig(id, nil, hs, clock)
 		cfg.Transport = ep
 		cfg.Incarnation = 1 // must match what PeerUp reports, as a real HELLO would
+		if mutate != nil {
+			mutate(&cfg)
+		}
 		n, err := NewNode(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
 		m := &meshNode{id: id, node: n, ep: ep, hs: hs, clock: clock}
 		nodes = append(nodes, m)
-		done := make(chan struct{})
-		go func() { defer close(done); _ = n.Run(ctx) }()
-		t.Cleanup(func() { cancel(); <-done })
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = n.Run(ctx) }()
 		if err := n.settle(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -1844,16 +1848,53 @@ func TestThreeRealNodesConvergeOnSelfReportedScores(t *testing.T) {
 		hub.nodes[m.id] = m.node
 	}
 	hub.mu.Unlock()
+	return ctx, hub, nodes
+}
 
-	// Full mesh: every node sees every other come up.
-	for _, m := range nodes {
-		for _, peer := range nodes {
-			if peer.id != m.id {
-				m.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: peer.id, Advertise: addrOf(peer.id), Incarnation: 1}}
-			}
+// linkUp reports a handshaken connection between a and b to both ends.
+func linkUp(a, b *meshNode) {
+	a.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: b.id, Advertise: addrOf(b.id), Incarnation: 1}}
+	b.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: a.id, Advertise: addrOf(a.id), Incarnation: 1}}
+}
+
+// fullMesh links every pair and waits for the swarm to settle.
+func fullMesh(t *testing.T, ctx context.Context, nodes []*meshNode) {
+	t.Helper()
+	for i, a := range nodes {
+		for _, b := range nodes[i+1:] {
+			linkUp(a, b)
 		}
 	}
 	quiesce(t, ctx, nodes)
+}
+
+// advanceMesh moves every node's clock by d, one node at a time, and waits for
+// the swarm to settle after each.
+func advanceMesh(t *testing.T, ctx context.Context, nodes []*meshNode, d time.Duration) {
+	t.Helper()
+	for _, m := range nodes {
+		m.clock.Advance(d)
+		if err := m.node.settle(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		quiesce(t, ctx, nodes)
+	}
+}
+
+// Three real nodes with ASYMMETRIC local measurements. Ranking on local RTTs
+// would have n2 elect n3 (its closest peer) while n1 and n3 elect differently;
+// ranking on self-reported medians makes all three agree on n2, and the
+// affinity JOINs are accepted because the node they target believes it leads.
+func TestThreeRealNodesConvergeOnSelfReportedScores(t *testing.T) {
+	local := map[protocol.NodeID]map[protocol.NodeID]float64{
+		"n1": {"n2": 10, "n3": 10}, // n1 reports 10
+		"n2": {"n1": 1, "n3": 2},   // n2 reports 1.5, but locally sees n1 as closest
+		"n3": {"n1": 1, "n2": 9},   // n3 reports 5, and locally sees n1 as closest
+	}
+	ctx, _, nodes := newMesh(t, ids("n1", "n2", "n3"), local, nil)
+
+	// Full mesh: every node sees every other come up.
+	fullMesh(t, ctx, nodes)
 
 	// Every node booted alone and elected itself. Before any measurement all
 	// three report 0 and all three claim leadership; the claims are the
@@ -2005,5 +2046,84 @@ func TestRelayedRoleIsNotBelieved(t *testing.T) {
 	}}})
 	if m, _ := h.status().View.Get("node-d"); m.Role != RoleWorker {
 		t.Fatalf("relayed leader claim believed for a new member: %+v", m)
+	}
+}
+
+// ---- HIGH-1 regressions: an unmeasurable node must not claim the best score ----
+
+// A newcomer that can measure none of its peers joins a swarm with a healthy
+// incumbent. Before f9e3b29 it seeded and then reported 0 -- the best score --
+// and, being the lowest ID as well, displaced node-b on its first evaluate. It
+// must stay a worker, both before its first probe round and after it.
+func TestBlindNewcomerCannotDisplaceHealthyIncumbent(t *testing.T) {
+	h := newHarness(t, "node-a", nil) // no scores configured: every probe fails
+	h.peerUp("node-b", 1)
+	h.peerUp("node-c", 1)
+	h.reportRole("node-b", 1, 1.0, RoleLeader)
+	h.report("node-c", 1, 2.0)
+
+	check := func(when string) {
+		t.Helper()
+		st := h.status()
+		requireIDs(t, "Leaders "+when, st.Leaders, ids("node-b"))
+		if st.Role != RoleWorker {
+			t.Fatalf("%s: blind newcomer role = %s, want worker", when, st.Role)
+		}
+		if got := st.Reported["node-a"]; !math.IsNaN(got) {
+			t.Fatalf("%s: blind newcomer reports %v, want unmeasured", when, got)
+		}
+		// Nothing it said about itself may have carried a score.
+		for _, env := range h.tr.broadcastOf(protocol.TypeMembershipDelta) {
+			p, err := protocol.PayloadOf[protocol.MembershipDeltaPayload](env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, rec := range p.Members {
+				if rec.ID == "node-a" && rec.Measured() {
+					t.Fatalf("%s: node-a announced a measured score %v", when, rec.Score)
+				}
+			}
+		}
+	}
+	check("before any probe round")
+
+	h.probeRound()
+	st := h.status()
+	if st.Missed["node-b"] != 1 || st.Missed["node-c"] != 1 {
+		t.Fatalf("probes did not fail as arranged: Missed = %v", st.Missed)
+	}
+	check("after a failed probe round")
+}
+
+// Every node in the swarm is blind. Nobody is eligible, so Elect falls back to
+// the lowest alive ID, every node agrees on it, and no node -- despite having
+// peers -- reports the score 0 that would have made that agreement accidental.
+func TestAllUnmeasuredSwarmFallsBackToLowestID(t *testing.T) {
+	ctx, _, nodes := newMesh(t, ids("n1", "n2", "n3"), nil, nil)
+	fullMesh(t, ctx, nodes)
+	for round := 0; round < 2; round++ {
+		advanceMesh(t, ctx, nodes, probeEvery)
+	}
+
+	for _, m := range nodes {
+		st := m.node.Status()
+		requireIDs(t, string(m.id)+" Leaders", st.Leaders, ids("n1"))
+		requireIDs(t, string(m.id)+" View.Leaders", st.View.Leaders(), ids("n1"))
+		if st.View.Size() != 3 {
+			t.Fatalf("%s sees %d alive, want 3", m.id, st.View.Size())
+		}
+		for _, peer := range nodes {
+			if peer.id != m.id && st.Missed[peer.id] == 0 {
+				t.Fatalf("%s: probe of %s did not fail as arranged: %v", m.id, peer.id, st.Missed)
+			}
+		}
+		if got := st.Scores[m.id]; !math.IsNaN(got) {
+			t.Errorf("%s self score = %v with peers and no measurement, want NaN", m.id, got)
+		}
+		for _, mem := range st.View.Members {
+			if !math.IsNaN(mem.Score) {
+				t.Errorf("%s holds a score %v for %s in an all-blind swarm", m.id, mem.Score, mem.ID)
+			}
+		}
 	}
 }
