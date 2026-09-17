@@ -69,6 +69,15 @@ type Transport interface {
 	Events() <-chan PeerEvent
 }
 
+// RecipientBroadcaster is an optional extension of Transport: a broadcast that
+// reports which peers accepted the frame. It is a separate interface rather than
+// a change to Broadcast so that existing Transport implementations (and test
+// doubles) keep compiling; callers that care type-assert for it. *Pool
+// implements it.
+type RecipientBroadcaster interface {
+	BroadcastRecipients(ctx context.Context, env *protocol.Envelope) []protocol.NodeID
+}
+
 // ErrUnknownPeer is returned by Send when no connection to the peer exists. It is
 // not a transport failure: the caller asked for a node the mesh has not (or has
 // no longer) got, and the right response is to consult membership, not retry.

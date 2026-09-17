@@ -41,8 +41,10 @@ var ErrProberClosed = errors.New("network: prober closed")
 // # Synchronisation
 //
 // mu guards pending and closed. delay is atomic because SetDelay is called from
-// the chaos handler while HandleFrame reads it on reader goroutines. seq is
-// atomic for the same reason; it only needs to be unique per link, not ordered.
+// the chaos handler while reply goroutines read it. peerDelay is an atomic
+// pointer for the same reason: SetPeerDelay may run at any time, and every reply
+// reads it without a lock. seq is atomic too; it only needs to be unique per
+// link, not ordered.
 type MeshProber struct {
 	t       Transport
 	resolve func(protocol.NodeAddress) (protocol.NodeID, bool)
@@ -51,8 +53,9 @@ type MeshProber struct {
 	// d and a stop function. Tests inject one they control.
 	timer func(d time.Duration) (<-chan time.Time, func() bool)
 
-	delay atomic.Int64
-	seq   atomic.Uint64
+	delay     atomic.Int64
+	peerDelay atomic.Pointer[PeerDelayFunc]
+	seq       atomic.Uint64
 
 	// ctx is cancelled by Close; it bounds every delayed reply and every Send a
 	// reply makes, and is what Probe selects on to fail fast on Close.
@@ -104,6 +107,34 @@ func NewMeshProber(t Transport, resolve func(protocol.NodeAddress) (protocol.Nod
 // SetDelay sets an artificial delay applied before every PING is answered. It is
 // the CHAOS "delay" hook; zero clears it.
 func (m *MeshProber) SetDelay(d time.Duration) { m.delay.Store(int64(d)) }
+
+// PeerDelayFunc returns the emulated one-way delay to add before answering a
+// PING from peer. It is called on reply goroutines, concurrently, so it must be
+// safe for concurrent use. A result <= 0 means no delay.
+type PeerDelayFunc func(peer protocol.NodeID) time.Duration
+
+// SetPeerDelay installs the per-peer delay hook used by the drone simulation;
+// nil removes it. The hook is evaluated once per PONG, at reply time, so a
+// jittered model gets a fresh draw for every answer rather than one value
+// frozen at install time. Its result is added to the SetDelay (CHAOS) delay.
+func (m *MeshProber) SetPeerDelay(f PeerDelayFunc) {
+	if f == nil {
+		m.peerDelay.Store(nil)
+		return
+	}
+	m.peerDelay.Store(&f)
+}
+
+// replyDelay is the total wait before a PONG to peer: the CHAOS delay plus the
+// emulated per-peer delay. Negative parts count as zero, so a buggy hook can
+// only fail to add delay, never shorten a CHAOS delay.
+func (m *MeshProber) replyDelay(peer protocol.NodeID) time.Duration {
+	d := max(time.Duration(m.delay.Load()), 0)
+	if f := m.peerDelay.Load(); f != nil {
+		d += max((*f)(peer), 0)
+	}
+	return d
+}
 
 // Probe sends one PING to target and returns the round trip to its PONG. It
 // satisfies health.Prober: it honours ctx, returns promptly when ctx ends, and
@@ -202,13 +233,15 @@ func (m *MeshProber) answer(peer protocol.NodeID, ping *protocol.Envelope) {
 	go m.reply(peer, pong)
 }
 
-// reply sends one PONG after the configured delay, if any. The delay is a timer
+// reply sends one PONG after the configured delay, if any (see replyDelay). The
+// delay is computed here rather than in answer so the hook runs off the reader
+// goroutine and each PONG gets its own jitter draw. The wait is a timer
 // selected against the prober's context -- never a Sleep -- so Close cancels a
 // pending reply instead of waiting it out, and the Send itself is bounded by the
 // same context so Close is not held up by a full queue either.
 func (m *MeshProber) reply(peer protocol.NodeID, pong *protocol.Envelope) {
 	defer m.wg.Done()
-	if d := time.Duration(m.delay.Load()); d > 0 {
+	if d := m.replyDelay(peer); d > 0 {
 		fire, stop := m.timer(d)
 		select {
 		case <-fire:

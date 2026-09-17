@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -598,6 +599,21 @@ func TestSendAndBroadcast(t *testing.T) {
 		}
 	}
 
+	// BroadcastRecipients names the peers that accepted the frame.
+	var _ RecipientBroadcaster = h.pool
+	bc2 := mustEnv(t, protocol.TypeHeartbeat)
+	got := h.pool.BroadcastRecipients(context.Background(), bc2)
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if len(got) != 2 || got[0] != idB.ID || got[1] != idZ.ID {
+		t.Errorf("BroadcastRecipients = %v, want [node-b node-z]", got)
+	}
+	for _, c := range []net.Conn{peerB, peerZ} {
+		readFrame(t, c)
+	}
+	if got := h.pool.BroadcastRecipients(context.Background(), nil); len(got) != 0 {
+		t.Errorf("BroadcastRecipients(nil) = %v", got)
+	}
+
 	// Inbound frames reach the Handler with the peer already resolved.
 	in := mustEnv(t, protocol.TypePong)
 	if err := protocol.NewEncoder(peerB).WriteEnvelope(in); err != nil {
@@ -630,6 +646,9 @@ func TestBroadcastCountsOnlyQueuedPeers(t *testing.T) {
 	<-c.Done()
 	if n := h.pool.Broadcast(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); n != 0 {
 		t.Errorf("Broadcast to a closed conn = %d, want 0", n)
+	}
+	if got := h.pool.BroadcastRecipients(context.Background(), mustEnv(t, protocol.TypeHeartbeat)); len(got) != 0 {
+		t.Errorf("BroadcastRecipients to a closed conn = %v, want none", got)
 	}
 	h.event(PeerDown)
 }

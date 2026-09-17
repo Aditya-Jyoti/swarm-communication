@@ -7,7 +7,6 @@ import (
 	"net"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"swarm-net/pkg/protocol"
@@ -343,33 +342,49 @@ func (p *Pool) Send(ctx context.Context, to protocol.NodeID, env *protocol.Envel
 // short-lived and cannot leak: each ends when its Send returns, and Send is
 // bounded by ctx, by CtrlSendTimeout, and by the connection closing.
 func (p *Pool) Broadcast(ctx context.Context, env *protocol.Envelope) int {
+	return len(p.BroadcastRecipients(ctx, env))
+}
+
+// BroadcastRecipients is Broadcast, but reports WHICH peers accepted env, in
+// no particular order. It implements RecipientBroadcaster, so a wrapper such as
+// a flow counter can attribute a broadcast to its real recipients instead of
+// guessing from a Peers() snapshot taken at a different instant.
+func (p *Pool) BroadcastRecipients(ctx context.Context, env *protocol.Envelope) []protocol.NodeID {
 	if env == nil {
-		return 0
+		return nil
 	}
 	// Snapshot under the lock, send outside it: holding mu across the sends
 	// would freeze Admit and every other Send for the duration.
 	p.mu.Lock()
+	ids := make([]protocol.NodeID, 0, len(p.peers))
 	conns := make([]*Conn, 0, len(p.peers))
-	for _, e := range p.peers {
+	for id, e := range p.peers {
+		ids = append(ids, id)
 		conns = append(conns, e.conn)
 	}
 	p.mu.Unlock()
 
-	var (
-		wg sync.WaitGroup
-		n  atomic.Int64
-	)
-	for _, c := range conns {
+	// ok[i] is written only by goroutine i and read only after wg.Wait, so the
+	// slice needs no lock: each element has exactly one writer and no reader
+	// overlaps it.
+	ok := make([]bool, len(conns))
+	var wg sync.WaitGroup
+	for i, c := range conns {
 		wg.Add(1)
-		go func(c *Conn) {
+		go func(i int, c *Conn) {
 			defer wg.Done()
-			if c.Send(ctx, env) == nil {
-				n.Add(1)
-			}
-		}(c)
+			ok[i] = c.Send(ctx, env) == nil
+		}(i, c)
 	}
 	wg.Wait()
-	return int(n.Load())
+
+	out := ids[:0]
+	for i, id := range ids {
+		if ok[i] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // Close shuts everything down: every connection, every dial loop, every pending
