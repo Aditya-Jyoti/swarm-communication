@@ -103,7 +103,7 @@ worker that missed one catches up. There is no log, no gap detection and no retr
 ### The worker side
 
 ```go
-// pkg/cluster/replication.go:259 (logging trimmed)
+// pkg/cluster/replication.go:262 (logging trimmed)
 func (n *Node) handleStateSync(from protocol.NodeID, p protocol.StateSyncPayload) {
 	if n.isLeader() || from != n.leader || (p.Leader != "" && p.Leader != from) {
 		return // not from our leader
@@ -129,11 +129,11 @@ func (n *Node) handleStateSync(from protocol.NodeID, p protocol.StateSyncPayload
 ```
 
 `held` is reset whenever the worker attaches to a leader (`pkg/cluster/node.go:1435`) or changes
-role (`pkg/cluster/replication.go:296`). A different leader numbers its versions from its own
+role (`pkg/cluster/replication.go:299`). A different leader numbers its versions from its own
 counter, so the first snapshot of a new attachment is always taken.
 
 On promotion there is nothing to copy. The worker's copy **is** its ledger, and the version
-numbering continues from there (`roleChanged`, `pkg/cluster/replication.go:292`).
+numbering continues from there (`roleChanged`, `pkg/cluster/replication.go:295`).
 
 ### Task routing
 
@@ -239,7 +239,7 @@ owns them.
 | ledger size | 500 records | `pkg/cluster/node.go:60` | oldest done or failed evicted first. If all are pending, the oldest pending goes, with a warning (`pkg/cluster/replication.go:141`) |
 | body kept for re-issue | 1 KiB | `pkg/cluster/replication.go:110` | the task runs, but its record has no body and it cannot be re-issued (`pkg/cluster/replication.go:146`) |
 | result kept in the ledger | 512 bytes, UTF-8 safe | `pkg/cluster/replication.go:113` | truncated. The full output still reaches `OnTaskResult` |
-| snapshot size | frame limit minus 64 KiB, so 960 KiB | `pkg/cluster/replication.go:116` | the **sent copy** is trimmed: older half of the completed records per pass, or one record per pass when none are completed (`pkg/cluster/replication.go:243`). The ledger itself is untouched |
+| snapshot size | frame limit minus 64 KiB, so 960 KiB | `pkg/cluster/replication.go:116` | the **sent copy** is trimmed: older half of the completed records per pass, or the older half of everything when none are completed (`pkg/cluster/replication.go:243-246`). The ledger itself is untouched |
 | running tasks per node | 256 | `pkg/cluster/tasks.go:41` | extra tasks fail at once with `busy: too many running tasks` |
 | resend period | 2 s | `pkg/cluster/node.go:58` | a lost snapshot is repaired within one period |
 

@@ -525,8 +525,8 @@ minutes assuming a code bug.
 This one is *not* fixable by using a monotonic clock, because a log timestamp must be a
 wall-clock reading to be meaningful at all. The mitigations are: log a monotonic offset
 alongside the wall time when ordering matters; use a per-node sequence number (which the
-protocol already has for heartbeats, `HeartbeatPayload.Seq`, whose comment notes that a
-worker counts *gaps* in Seq rather than elapsed silence); and never correlate across nodes
+protocol already has for heartbeats, `HeartbeatPayload.Seq`, today diagnostic only: the
+worker counts beat-less ticks, see [Failure Detectors](/concepts/failure-detectors)); and never correlate across nodes
 by timestamp.
 
 ### The suspended node

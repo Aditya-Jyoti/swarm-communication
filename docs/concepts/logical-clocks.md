@@ -155,7 +155,7 @@ leader and their own term history. Terms are only reconciled where messages flow
 ### Snapshot order: (Term, Version)
 
 ```go
-// pkg/cluster/replication.go:284
+// pkg/cluster/replication.go:287
 func newerSnapshot(term, version, heldTerm, heldVersion uint64) bool {
 	if term != heldTerm {
 		return term > heldTerm

@@ -479,7 +479,7 @@ a peer's edge.
 ### 4.5 A field's meaning changed without a version bump
 
 **Symptom.** No decode error anywhere. Two builds coexist, each internally consistent, disagreeing
-about reality. If the field is `HeartbeatPayload.Term` (`message.go:290`), you get the textbook
+about reality. If the field is `HeartbeatPayload.Term` (`message.go:306`), you get the textbook
 split-brain: two nodes each believing they hold leadership, each beating at overlapping worker
 sets.
 

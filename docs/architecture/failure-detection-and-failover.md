@@ -248,7 +248,7 @@ higher term adopts it:
 |---|---|---|
 | `HEARTBEAT` (worker side) | `max(mine, beat.Term)` | `pkg/cluster/heartbeat.go:92` |
 | `HEARTBEAT_ACK` (leader side) | `max(mine, ack.Term)` | `pkg/cluster/heartbeat.go:134` |
-| `STATE_SYNC` (worker side) | `max(mine, sync.Term)` | `pkg/cluster/replication.go:264` |
+| `STATE_SYNC` (worker side) | `max(mine, sync.Term)` | `pkg/cluster/replication.go:267` |
 | `ELECTION_RESULT` | nothing, observability only | `pkg/cluster/node.go:1154` |
 
 A beat with a **lower** term than the worker's means the leader has not caught up with a leader
