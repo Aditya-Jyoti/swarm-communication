@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -16,14 +15,11 @@ import (
 // small JSON value; anything near this size is a mistake or an attack.
 const maxRequestBytes = 64 << 10
 
-// placeholderPage is served at / when the dashboard has not been built into
-// web/static. It keeps the binary usable (and testable) without the frontend.
-const placeholderPage = `<!doctype html>
-<html><head><meta charset="utf-8"><title>swarm-net control center</title></head>
-<body><h1>swarm-net control center</h1>
-<p>Dashboard not built: web/static/index.html is missing.</p>
-<p>The API is live: <a href="/api/state">/api/state</a>, <code>/ws</code>, <code>/healthz</code>.</p>
-</body></html>
+// rootText is served at GET /. The dashboard is a separate static site
+// (frontend/, served by nginx), so the CC only says where it is and which
+// routes it owns. Plain text keeps it readable with a bare curl.
+const rootText = `swarm-net control center API; dashboard is served by the frontend
+routes: GET /healthz, GET /api/state, POST /api/tasks, POST /api/chaos, GET /ws
 `
 
 // Handler returns the HTTP routes from the contract.
@@ -37,25 +33,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks", s.handleTasks)
 	mux.HandleFunc("POST /api/chaos", s.handleChaos)
 	mux.HandleFunc("GET /ws", s.handleWS)
-	mux.Handle("GET /", s.staticHandler())
+	mux.HandleFunc("GET /", handleRoot)
 	return mux
 }
 
-func (s *Server) staticHandler() http.Handler {
-	fsys := s.cfg.Static
-	if fsys != nil {
-		if _, err := fs.Stat(fsys, "index.html"); err == nil {
-			return http.FileServerFS(fsys)
-		}
+// handleRoot answers exactly "/" with rootText. Any other unmatched path is a
+// 404: the CC serves no files.
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, placeholderPage)
-	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, rootText)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -158,8 +148,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // (ping, close), which coder/websocket only handles while someone is reading.
 // The handler does not return until its reader has, so nothing outlives it.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	// Default AcceptOptions: same-origin only. The dashboard is served from
-	// this host, and a cross-origin page has no business injecting chaos.
+	// Default AcceptOptions: same-origin only, i.e. the Origin header's
+	// host[:port] must equal the request's Host. A cross-origin page has no
+	// business injecting chaos. The dashboard is served by the frontend's
+	// nginx, which proxies /ws here with the browser's Host header passed
+	// through unchanged ($http_host), so Origin and Host still match.
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		s.log.Warn("websocket accept failed", "remote", r.RemoteAddr, "err", err)

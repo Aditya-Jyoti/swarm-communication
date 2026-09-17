@@ -128,14 +128,15 @@ func TestRunEndToEnd(t *testing.T) {
 	if string(body) != "ok" {
 		t.Fatalf("/healthz = %q", body)
 	}
-	// "/" serves something whether or not the dashboard is built.
+	// "/" points at the frontend; the CC no longer serves the dashboard.
 	resp, err = http.Get(base + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
+	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/ = %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "served by the frontend") {
+		t.Fatalf("/ = %d %q", resp.StatusCode, body)
 	}
 
 	// A browser, then a node over a real TCP handshake.

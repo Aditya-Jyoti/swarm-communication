@@ -1,5 +1,6 @@
-# Go
+# Go (module lives in backend/)
 /bin/
+/backend/bin/
 *.exe
 *.test
 *.out
@@ -12,7 +13,10 @@ docs/.vitepress/cache/
 # Local
 .DS_Store
 *.log
+
+# Compose settings: .env is a local copy of .env.example and is never committed.
 .env
+!.env.example
 
 # Claude Code agent worktrees
 .claude/worktrees/

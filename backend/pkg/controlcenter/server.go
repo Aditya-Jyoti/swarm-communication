@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net"
 	"sync"
@@ -32,9 +31,6 @@ var ErrAlreadyRunning = errors.New("controlcenter: already running")
 type Config struct {
 	// NodeListen is the TCP bind address for node connections. Default ":7000".
 	NodeListen string
-	// Static serves GET /. Nil, or a tree without index.html, serves a small
-	// placeholder page instead.
-	Static fs.FS
 	// SnapshotInterval is how often every browser gets a snapshot. Default 1s.
 	SnapshotInterval time.Duration
 	// NodeExpiry is how long a disconnected node stays listed. Default 30s.

@@ -27,7 +27,7 @@ const (
 type Config struct {
 	// NodeListen is the TCP bind address nodes dial. SWARM_CC_LISTEN.
 	NodeListen string
-	// HTTPListen is the dashboard and API bind address. SWARM_CC_HTTP.
+	// HTTPListen is the API and WebSocket bind address. SWARM_CC_HTTP.
 	HTTPListen string
 	// LogLevel is the slog threshold. SWARM_LOG_LEVEL.
 	LogLevel slog.Level
@@ -41,7 +41,7 @@ type setting struct {
 
 var settings = []setting{
 	{"listen", "CC_LISTEN", defaultNodeListen, "TCP bind address for node connections"},
-	{"http", "CC_HTTP", defaultHTTPListen, "HTTP bind address for the dashboard and API"},
+	{"http", "CC_HTTP", defaultHTTPListen, "HTTP bind address for the API and WebSocket"},
 	{"log-level", "LOG_LEVEL", defaultLogLevel, "debug|info|warn|error"},
 }
 

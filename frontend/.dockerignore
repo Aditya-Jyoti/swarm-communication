@@ -1,0 +1,7 @@
+# Build context is frontend/. Only the static files and the nginx template
+# go into the image.
+*
+!index.html
+!app.js
+!style.css
+!nginx.conf.template

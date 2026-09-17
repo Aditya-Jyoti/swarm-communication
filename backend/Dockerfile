@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build for swarm-net.
+# Multi-stage build for the swarm-net backend. The build context is backend/.
 #
-#   docker build --target node           -t swarm-net/node .
-#   docker build --target control-center -t swarm-net/control-center .
+#   docker build --target node           -t swarm-net/node           backend
+#   docker build --target control-center -t swarm-net/control-center backend
+#
+# The dashboard is NOT in these images; it is served by frontend/Dockerfile.
 #
 # Two targets rather than one image with both binaries: each image carries only
 # the program it runs and has an unambiguous ENTRYPOINT, so `docker run
@@ -28,7 +30,6 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY cmd ./cmd
 COPY pkg ./pkg
-COPY web ./web
 
 ARG VERSION=dev
 # CGO_ENABLED=0 gives fully static binaries: no libc to match in the runtime
@@ -73,7 +74,7 @@ EXPOSE 7000
 ENTRYPOINT ["/usr/local/bin/node-entrypoint"]
 
 # ---------------------------------------------------------------------------
-# control-center: coordinator + dashboard (web/static is embedded in the binary).
+# control-center: coordinator + HTTP/WebSocket API (no dashboard assets).
 # ---------------------------------------------------------------------------
 FROM runtime AS control-center
 COPY --from=build /out/control-center /usr/local/bin/control-center
