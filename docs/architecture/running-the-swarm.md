@@ -59,11 +59,29 @@ local values stay local. Common ones:
 | `SWARM_IDLE_TIMEOUT` | silence before a link is declared dead. Must exceed 3 x the probe interval. |
 | `SWARM_ELECTION_FLOOR` | periodic re-election, on top of event-driven ones |
 | `SWARM_LOG_LEVEL` | `debug`, `info`, `warn` or `error` |
+| `SWARM_CC_API_TOKEN` | optional API token. Empty = no auth. See below. |
 | `CC_HTTP_PORT` | host port for the CC, only if you uncomment its `ports:` block |
 | `SWARM_IMAGE_TAG`, `SWARM_VERSION` | image tag and the version baked into the binaries |
 | `GO_VERSION`, `ALPINE_VERSION`, `NGINX_VERSION` | base image versions |
 
 See `.env.example` for the full list and defaults.
+
+### Protecting the API
+
+`/api/tasks` and `/api/chaos` can kill nodes, so keep `BIND_ADDR=127.0.0.1` unless the
+network is trusted. To also require a token:
+
+```sh
+echo "SWARM_CC_API_TOKEN=$(openssl rand -hex 32)" >> .env
+docker compose up -d
+```
+
+- The token must be at least 16 characters from `A-Z a-z 0-9 - . _ ~ + / =`, or the CC refuses
+  to start.
+- nginx adds the token to `/api/` and `/ws` requests itself, so the dashboard keeps working and
+  the browser never sees the token.
+- The token stops callers that bypass nginx (other containers, a published CC port). It does
+  not stop someone who can already open the dashboard.
 
 The binaries read flags first, then `SWARM_*` variables, then built-in defaults. The full flag
 list is in `backend/cmd/swarm-node/config.go` and `backend/cmd/control-center/config.go`. A

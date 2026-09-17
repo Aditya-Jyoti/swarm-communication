@@ -97,7 +97,8 @@ The pool hides this from the cluster code. A swap does not produce a fake `PeerD
 ## Redial with backoff
 
 A failed dial is retried with exponential backoff, plus or minus 25% jitter, capped at 10 s.
-A success resets the delay. Names are resolved again on every attempt, so a restarted container
+A success resets the delay. A node holds at most 128 handshakes in progress; extra sockets
+are closed at once and the peer simply redials. Names are resolved again on every attempt, so a restarted container
 with a new IP is found. See [Backoff and Connection Storms](/concepts/backoff-and-connection-storms).
 
 ## Measuring health: PING and PONG

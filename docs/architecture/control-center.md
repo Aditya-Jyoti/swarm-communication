@@ -93,7 +93,19 @@ sequenceDiagram
 | `POST /api/chaos` | inject a fault. Returns `{"ok":true}` |
 | `GET /healthz` | returns `ok` |
 
-Bodies are capped at 64 KiB. Errors are always JSON:
+Request rules:
+
+- POST bodies must be `Content-Type: application/json` (else 415), at most 64 KiB, with no
+  unknown fields or trailing data (else 400). Task `kind` is at most 64 bytes.
+- Cross-site browser requests (a foreign `Origin` or `Sec-Fetch-Site`) get 403. This blocks a
+  malicious web page from making your browser call `/api/chaos`.
+- If `SWARM_CC_API_TOKEN` is set, POSTs need `Authorization: Bearer <token>` (else 401), and a
+  WebSocket may only send commands if its upgrade carried the token. Reads stay open.
+- Task `output` is capped at 512 bytes and ends in `...[truncated]` when cut.
+- Slow clients are cut off: header and request deadlines, and at most 128 node handshakes in
+  progress at once.
+
+Errors are always JSON:
 
 ```json
 {"error": "bad request: task kind is required"}
@@ -101,8 +113,11 @@ Bodies are capped at 64 KiB. Errors are always JSON:
 
 | Status | When |
 |---|---|
-| 400 | bad JSON, missing `kind` or `node`, invalid chaos action or delay |
+| 400 | bad JSON, unknown field, missing `kind` or `node`, invalid chaos action or delay |
+| 401 | token required and missing or wrong |
+| 403 | cross-site browser request |
 | 404 | chaos target is not connected |
+| 415 | body is not JSON |
 | 503 | no connected leader, or the CC is shutting down |
 
 The WebSocket only accepts same-origin requests.

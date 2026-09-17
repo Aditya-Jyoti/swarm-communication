@@ -75,7 +75,8 @@ list is in [`.env.example`](.env.example).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BIND_ADDR` | `127.0.0.1` | Host address for the published port. The API has no auth. |
+| `BIND_ADDR` | `127.0.0.1` | Host address for the published port. Keep it local unless the network is trusted. |
+| `SWARM_CC_API_TOKEN` | empty | Optional API token (`openssl rand -hex 32`). nginx injects it, so the dashboard keeps working. |
 | `FRONTEND_PORT` | `8080` | Host port for the dashboard |
 | `CC_HTTP_PORT` | `18081` | Host port for the CC, only if its `ports:` block is uncommented |
 | `NODE_REPLICAS` | `5` | Nodes besides `seed` |
