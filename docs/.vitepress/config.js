@@ -85,7 +85,8 @@ export default withMermaid(defineConfig({
           { text: 'Context & Cancellation Propagation', link: '/concepts/context-cancellation' },
           { text: 'Interface Polymorphism', link: '/concepts/interface-polymorphism' },
           { text: 'Error Wrapping & Classification', link: '/concepts/error-wrapping-and-classification' },
-          { text: 'Monotonic vs Wall Clocks', link: '/concepts/monotonic-vs-wall-clocks' }
+          { text: 'Monotonic vs Wall Clocks', link: '/concepts/monotonic-vs-wall-clocks' },
+          { text: 'Heartbeat Intervals, Jitter & Timers', link: '/concepts/heartbeat-intervals-and-timers' }
         ]
       },
       {
