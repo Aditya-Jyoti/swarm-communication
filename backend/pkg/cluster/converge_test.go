@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +53,9 @@ type simNet struct {
 	sent map[protocol.MessageType]int
 	// drop, if set, loses matching frames at delivery time.
 	drop func(simFrame) bool
+	// trace, if non-nil, records every enqueued frame, for pinpointing where
+	// two runs of one seed part ways.
+	trace *[]string
 }
 
 func (s *simNet) setDrop(fn func(simFrame) bool) {
@@ -119,6 +124,9 @@ func (s *simNet) enqueueLocked(from, to protocol.NodeID, env *protocol.Envelope)
 		due = prev
 	}
 	s.last[link] = due
+	if s.trace != nil {
+		*s.trace = append(*s.trace, fmt.Sprintf("#%d t=%v %s->%s %s due=%v %s", s.seq, s.now, from, to, env.Type, due, env.Payload))
+	}
 	s.queue = append(s.queue, simFrame{due: due, seq: s.seq, from: from, to: to, env: env})
 }
 
@@ -171,6 +179,25 @@ type sim struct {
 	// strays are the (leader, worker) pairs the previous check found listed
 	// by a leader the worker is not attached to.
 	strays map[[2]protocol.NodeID]bool
+	// pointed are the (leader, worker) pairs where the worker named that
+	// leader as its own at some point since the previous check, sampled after
+	// every tick and every delivered frame. See check.
+	pointed map[[2]protocol.NodeID]bool
+}
+
+// observe records whom id currently names as its leader. Called only when
+// id's loop has just settled, so the published status is current.
+func (s *sim) observe(id protocol.NodeID, n *Node) {
+	n.statusMu.RLock()
+	l := n.status.Leader
+	n.statusMu.RUnlock()
+	if l == "" || l == id {
+		return
+	}
+	if s.pointed == nil {
+		s.pointed = make(map[[2]protocol.NodeID]bool)
+	}
+	s.pointed[[2]protocol.NodeID{l, id}] = true
 }
 
 // newSim starts one Node per id over a simNet with seeded per-link latencies
@@ -250,14 +277,20 @@ func newSim(t *testing.T, seed uint64, idList []protocol.NodeID, lo, hi float64,
 	}
 	s.net.mu.Unlock()
 	s.resample()
-	// Full mesh, in a deterministic order.
-	for i, a := range s.nodes {
-		for _, b := range s.nodes[i+1:] {
-			a.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: b.id, Advertise: addrOf(b.id), Incarnation: 1}}
-			b.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: a.id, Advertise: addrOf(a.id), Incarnation: 1}}
+	// Full mesh. One node at a time, settled before the next is told
+	// anything: pushing every node's events first and settling afterwards
+	// would let six loops react concurrently, and their sends would race for
+	// the shared PRNG and the frame order.
+	for _, a := range s.nodes {
+		for _, b := range s.nodes {
+			if a != b {
+				a.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: b.id, Advertise: addrOf(b.id), Incarnation: 1}}
+			}
+		}
+		if err := a.node.settle(ctx, nil); err != nil {
+			t.Fatal(err)
 		}
 	}
-	s.settleAll()
 	s.flush()
 	return s
 }
@@ -334,6 +367,7 @@ func (s *sim) flush() {
 		if err := target.settle(s.ctx, nil); err != nil {
 			s.t.Fatalf("settle %s: %v", f.to, err)
 		}
+		s.observe(f.to, target)
 	}
 }
 
@@ -357,10 +391,22 @@ func (s *sim) run(d time.Duration, each func()) {
 		s.net.now += simStep
 		s.net.mu.Unlock()
 		for _, sn := range s.live() {
-			sn.clock.Advance(simStep)
-			if err := sn.node.settle(s.ctx, nil); err != nil {
-				s.t.Fatalf("settle %s: %v", sn.id, err)
-			}
+			// Tick by tick, settling after each one, not one Advance and one
+			// settle: several of the node's tickers share this deadline, and
+			// with a single Advance the loop would choose at random between the
+			// next tick and the result of the probe round the previous tick
+			// started. That choice decides whether this instant's gossip and
+			// beats carry the new self-score, and in what order the shared
+			// PRNG is drawn, so the run would depend on the scheduler rather
+			// than the seed. See FakeClock.advanceStepwise.
+			// Advancing reaches the loop only through ticks, each settled
+			// here, so nothing is left to settle once it returns.
+			sn.clock.advanceStepwise(simStep, func() {
+				if err := sn.node.settle(s.ctx, nil); err != nil {
+					s.t.Fatalf("settle %s: %v", sn.id, err)
+				}
+				s.observe(sn.id, sn.node)
+			})
 		}
 		s.flush()
 		if each != nil {
@@ -395,8 +441,13 @@ func (s *sim) kill(id protocol.NodeID) {
 		}
 		sn.hs.fail(addrOf(id), fmt.Errorf("sim: %s is down", id))
 		sn.ep.events <- network.PeerEvent{Kind: network.PeerDown, Peer: network.PeerInfo{ID: id, Advertise: addrOf(id)}, Disposition: network.DispositionPeerDied}
+		// Settled before the next survivor hears of the crash, for the same
+		// reason newSim introduces the mesh one node at a time.
+		if err := sn.node.settle(s.ctx, nil); err != nil {
+			s.t.Fatalf("settle %s: %v", sn.id, err)
+		}
+		s.observe(sn.id, sn.node)
 	}
-	s.settleAll()
 	s.flush()
 }
 
@@ -431,7 +482,7 @@ func (s *sim) check() agreement {
 	first := sts[live[0].id]
 	a.leaders = first.Leaders
 	seen := make(map[[2]protocol.NodeID]bool)
-	defer func() { s.strays = seen }()
+	defer func() { s.strays, s.pointed = seen, nil }()
 	for _, sn := range live {
 		st := sts[sn.id]
 		if !equalIDs(st.Leaders, first.Leaders) {
@@ -454,14 +505,19 @@ func (s *sim) check() agreement {
 			}
 			// A leader may still list a worker that re-homed since its last
 			// beat; the next beat's ack drops it. It must not still list it
-			// one check (two beats) later.
+			// at the next check, one beat later -- unless the worker named
+			// this leader again in between (a fresh JOIN, abandoned within
+			// the same instant). Then the listing was true when that beat
+			// was acked, this is a new stale episode, and it gets its own
+			// beat. Without that distinction a worker bouncing A -> B -> A
+			// -> C across two instants reads as one listing never dropped.
 			for _, w := range st.Attached {
 				key := [2]protocol.NodeID{sn.id, w}
 				if sts[w].Leader == sn.id {
 					continue
 				}
 				seen[key] = true
-				if s.strays[key] {
+				if s.strays[key] && !s.pointed[key] {
 					a.problems = append(a.problems, fmt.Sprintf("leader %s still lists %s, which is attached to %q", sn.id, w, sts[w].Leader))
 				}
 			}
@@ -481,8 +537,128 @@ func (s *sim) check() agreement {
 	return a
 }
 
+// dump renders every node's view of the swarm, one block per node, for failure
+// messages. A flake in a seeded simulator is only actionable if the report says
+// which node believed what: its own scores, the Seq it holds for every member,
+// its leader set and who it thinks is attached to whom.
+func (s *sim) dump() string {
+	var b strings.Builder
+	s.net.mu.Lock()
+	fmt.Fprintf(&b, "sim t=%v net.now=%v queued=%d sent=%v\n", s.elapsed, s.net.now, len(s.net.queue), s.net.sent)
+	s.net.mu.Unlock()
+	for _, sn := range s.nodes {
+		if s.net.isDown(sn.id) {
+			fmt.Fprintf(&b, "  %s: down\n", sn.id)
+			continue
+		}
+		st := sn.node.Status()
+		fmt.Fprintf(&b, "  %s: role=%s term=%d leader=%q leaders=%v attached=%v view=v%d\n",
+			sn.id, st.Role, st.Term, st.Leader, st.Leaders, st.Attached, st.View.Version)
+		for _, m := range st.View.Members {
+			fmt.Fprintf(&b, "    %s role=%s state=%s inc=%d seq=%d score=%.4f local=%.4f claim=%+v\n",
+				m.ID, m.Role, m.State, m.Incarnation, m.Seq, m.Score, st.Scores[m.ID], st.Claims[m.ID])
+		}
+	}
+	return b.String()
+}
+
 func sixIDs() []protocol.NodeID {
 	return ids("node-1", "node-2", "node-3", "node-4", "node-5", "node-6")
+}
+
+// fingerprint is everything a run's outcome depends on: the final per-node
+// state, the frame counts, the simulated time and how many frames were sent.
+func (s *sim) fingerprint() string {
+	s.net.mu.Lock()
+	seq := s.net.seq
+	s.net.mu.Unlock()
+	return fmt.Sprintf("frames=%d\n%s", seq, s.dump())
+}
+
+// The simulator is only useful if a seed pins the run down. Two runs of one
+// seed must send the same frames, with the same delays, and end in the same
+// state, whatever the Go scheduler does.
+//
+// Two things used to break that, and under CPU load they made
+// TestSwarmAgreesAtEveryQuietMomentUnderReordering fail on seeds that passed
+// on an idle machine:
+//   - Several tickers firing at one instant let the loop choose at random
+//     between the next tick and a finished probe round (run now settles
+//     after every tick; see FakeClock.advanceStepwise).
+//   - newSim and kill queued PeerUp/PeerDown events on every node before
+//     settling any, so six loops reacted concurrently and raced for the
+//     shared PRNG (they are now introduced one node at a time).
+//
+// Run with -race and -cpu 1,2,4 to give the scheduler room to differ.
+func TestSimIsDeterministicPerSeed(t *testing.T) {
+	scenarios := []struct {
+		name string
+		play func(t *testing.T, seed uint64, trace *[]string) *sim
+	}{
+		{"reordering", func(t *testing.T, seed uint64, trace *[]string) *sim {
+			s := newSim(t, seed, sixIDs(), 0.2, 3, nil)
+			s.traceInto(trace)
+			s.jitter = 1
+			s.run(20*time.Second, nil)
+			return s
+		}},
+		{"leader crash with tasks", func(t *testing.T, seed uint64, trace *[]string) *sim {
+			var r results
+			s := newSim(t, seed, fiveIDs(), 0.2, 3, func(c *NodeConfig) { c.OnTaskResult = r.record })
+			s.traceInto(trace)
+			s.jitter = DefaultHysteresis / 5
+			s.run(15*time.Second, nil)
+			victim := s.check().leaders[0]
+			for i := 0; i < 6; i++ {
+				if err := s.node(victim).node.SubmitTask(s.ctx, echo(fmt.Sprintf("task-%d", i))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.settleAll()
+			s.flush()
+			s.kill(victim)
+			s.run(failoverBound+5*time.Second, nil)
+			return s
+		}},
+	}
+	const runs = 3
+	for _, sc := range scenarios {
+		for _, seed := range []uint64{8, 9} {
+			t.Run(fmt.Sprintf("%s/seed=%d", sc.name, seed), func(t *testing.T) {
+				var (
+					first      string
+					firstTrace []string
+				)
+				for i := 0; i < runs; i++ {
+					var trace []string
+					got := sc.play(t, seed, &trace).fingerprint()
+					if i == 0 {
+						first, firstTrace = got, trace
+						continue
+					}
+					if got == first && slices.Equal(trace, firstTrace) {
+						continue
+					}
+					at := 0
+					for at < len(trace) && at < len(firstTrace) && trace[at] == firstTrace[at] {
+						at++
+					}
+					window := func(tr []string) string {
+						return strings.Join(tr[min(len(tr), max(0, at-3)):min(len(tr), at+3)], "\n")
+					}
+					t.Fatalf("seed %d: run %d diverged from run 0 at frame %d\n--- run 0 frames:\n%s\n--- run %d frames:\n%s\n--- run 0:\n%s\n--- run %d:\n%s",
+						seed, i, at, window(firstTrace), i, window(trace), first, i, got)
+				}
+			})
+		}
+	}
+}
+
+// traceInto records every frame sent from now on into trace.
+func (s *sim) traceInto(trace *[]string) {
+	s.net.mu.Lock()
+	defer s.net.mu.Unlock()
+	s.net.trace = trace
 }
 
 // ---- the regression ----
@@ -507,13 +683,17 @@ func TestSwarmAgreesAtEveryQuietMomentUnderReordering(t *testing.T) {
 			s.jitter = 1
 			s.run(10*time.Second, nil) // warm-up: every node measured and announced
 			var bad []string
+			var first string
 			s.run(60*time.Second, func() {
 				if a := s.check(); len(a.problems) > 0 && len(bad) < 5 {
 					bad = append(bad, fmt.Sprintf("t=%v: %v", s.elapsed, a.problems))
+					if first == "" {
+						first = s.dump()
+					}
 				}
 			})
 			if len(bad) > 0 {
-				t.Fatalf("swarm disagreed at quiet moments:\n%v", bad)
+				t.Fatalf("seed %d: swarm disagreed at quiet moments:\n%v\nstate at the first one:\n%s", seed, bad, first)
 			}
 		})
 	}
@@ -532,7 +712,7 @@ func TestSwarmDoesNotThrashOnSubMarginJitter(t *testing.T) {
 			s.run(15*time.Second, nil)
 			a := s.check()
 			if len(a.problems) > 0 {
-				t.Fatalf("not converged after 15s: %v", a.problems)
+				t.Fatalf("seed %d: not converged after 15s: %v\n%s", seed, a.problems, s.dump())
 			}
 			if want := LeaderCount(6, DefaultThreshold); len(a.leaders) != want {
 				t.Fatalf("leaders = %v, want %d", a.leaders, want)
@@ -543,7 +723,7 @@ func TestSwarmDoesNotThrashOnSubMarginJitter(t *testing.T) {
 			results := s.net.sentCount(protocol.TypeElectionResult)
 			s.run(60*time.Second, func() {
 				if b := s.check(); len(b.problems) > 0 || !equalIDs(b.leaders, a.leaders) {
-					t.Fatalf("t=%v: leaders moved %v -> %v (%v)", s.elapsed, a.leaders, b.leaders, b.problems)
+					t.Fatalf("seed %d: t=%v: leaders moved %v -> %v (%v)\n%s", seed, s.elapsed, a.leaders, b.leaders, b.problems, s.dump())
 				}
 			})
 			if got := s.net.sentCount(protocol.TypeElectionResult); got != results {
@@ -729,6 +909,70 @@ func TestWorkerRejoinsLeaderThatSteppedDown(t *testing.T) {
 	}
 	if st := h.status(); st.Leader != "node-b" {
 		t.Fatalf("Leader = %q, want node-b", st.Leader)
+	}
+}
+
+// ackJoin delivers from's answer to one specific JOIN, the way a real leader
+// does: echoing that JOIN's envelope ID.
+func (h *harness) ackJoin(join *protocol.Envelope, p protocol.JoinAckPayload) {
+	h.t.Helper()
+	env, err := protocol.NewReply(join, protocol.TypeJoinAck, join.To, p)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.node.Handler()(join.To, env)
+	h.settle()
+}
+
+// Seed 501 of the reordering sweep, reduced. A worker JOINs node-b while
+// node-b is briefly not leading, then JOINs it again once it is. The answers
+// arrive in order: "rejected, not a leader" for the first JOIN, then
+// "accepted" for the second. The rejection answers a JOIN we are no longer
+// waiting on, so it must neither detach us nor spend the rejection budget, and
+// the acceptance must attach us. Before the fix the rejection, matched by
+// sender alone, detached the worker; with the budget spent it did not re-JOIN,
+// and the acceptance was then dropped as stale. node-b listed a worker that
+// believed it was detached until the next probe round.
+func TestRejectionOfAnEarlierJoinDoesNotVoidTheCurrentOne(t *testing.T) {
+	h := threeNodes(t, "node-z") // JOIN #1 to node-b outstanding
+	joins := h.tr.sentOf(protocol.TypeJoinCluster)
+	if len(joins) != 1 || joins[0].to != "node-b" {
+		t.Fatalf("setup: JOINs = %+v, want one to node-b", joins)
+	}
+	first := joins[0].env
+
+	// node-b claims the seat and then (by Seq) gives it up: the attachment is
+	// void and we JOIN it again.
+	h.deltaAbout("node-b", "node-b", RoleLeader, 1.0, 10)
+	h.deltaAbout("node-b", "node-b", RoleWorker, 1.0, 11)
+	joins = h.tr.sentOf(protocol.TypeJoinCluster)
+	if len(joins) != 2 || joins[1].to != "node-b" {
+		t.Fatalf("setup: JOINs = %+v, want a second one to node-b", joins)
+	}
+	second := joins[1].env
+	// This round's rejections are already spent, as they were in the sim: a
+	// detach now is not repaired until the next probe round.
+	if err := h.node.barrier(h.ctx, func() { h.node.rejections = maxRejectionsPerRound }); err != nil {
+		t.Fatal(err)
+	}
+
+	h.ackJoin(first, protocol.JoinAckPayload{Accepted: false, Reason: "not a leader", Leader: "node-c"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("a rejection of the earlier JOIN detached us: Leader = %q", st.Leader)
+	}
+	h.ackJoin(second, protocol.JoinAckPayload{Accepted: true, Leader: "node-b"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("the acceptance of the current JOIN was dropped: Leader = %q", st.Leader)
+	}
+	if got := len(h.tr.sentOf(protocol.TypeJoinCluster)); got != 2 {
+		t.Fatalf("%d JOINs, want 2: the stale answer caused a re-JOIN", got)
+	}
+
+	// Answers to a JOIN already answered change nothing either way.
+	h.ackJoin(second, protocol.JoinAckPayload{Accepted: false, Reason: "not a leader", Leader: "node-c"})
+	h.ackJoin(first, protocol.JoinAckPayload{Accepted: true, Leader: "node-b"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("a repeated answer moved us: Leader = %q", st.Leader)
 	}
 }
 
