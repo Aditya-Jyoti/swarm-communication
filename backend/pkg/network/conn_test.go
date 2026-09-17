@@ -97,12 +97,6 @@ func (g *gateConn) Close() error {
 	return nil
 }
 
-func (g *gateConn) writeCount() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.writes
-}
-
 func (g *gateConn) LocalAddr() net.Addr                { return fakeAddr{} }
 func (g *gateConn) RemoteAddr() net.Addr               { return fakeAddr{} }
 func (g *gateConn) SetDeadline(t time.Time) error      { return nil }

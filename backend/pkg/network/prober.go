@@ -115,7 +115,10 @@ func (m *MeshProber) Probe(ctx context.Context, target protocol.NodeAddress) (ti
 		return 0, fmt.Errorf("network: node %q: probe %s: no node id for address: %w", m.t.Self(), target, ErrUnknownPeer)
 	}
 
-	nonce := rand.Uint64()
+	// The nonce matches a PONG to its PING; it is not a secret. The peer that
+	// could guess it is the one answering the PING anyway, and it controls the
+	// latency we measure whether or not it can predict the nonce.
+	nonce := rand.Uint64() // #nosec G404 -- correlation value, not a credential
 	env, err := protocol.NewEnvelope(protocol.TypePing, m.t.Self(), id, protocol.PingPayload{
 		Nonce: nonce,
 		Seq:   m.seq.Add(1),
@@ -178,6 +181,9 @@ func (m *MeshProber) answer(peer protocol.NodeID, ping *protocol.Envelope) {
 	if err != nil {
 		return // a malformed PING is the peer's problem; there is nothing to echo
 	}
+	// Field by field on purpose: a conversion would tie PONG's layout to
+	// PING's, and a field later added to PING must not be echoed silently.
+	//lint:ignore S1016 see above
 	pong, err := protocol.NewReply(ping, protocol.TypePong, m.t.Self(), protocol.PongPayload{Nonce: req.Nonce, Seq: req.Seq})
 	if err != nil {
 		return

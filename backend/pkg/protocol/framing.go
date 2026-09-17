@@ -220,7 +220,8 @@ func (e *Encoder) WriteEnvelope(env *Envelope) error {
 		e.buf = make([]byte, need)
 	}
 	e.buf = e.buf[:need]
-	binary.BigEndian.PutUint32(e.buf[:headerSize], uint32(len(body)))
+	// len(body) <= MaxFrameSize (1MiB) was checked above, so it fits a uint32.
+	binary.BigEndian.PutUint32(e.buf[:headerSize], uint32(len(body))) // #nosec G115 -- bounded by MaxFrameSize above
 	copy(e.buf[headerSize:], body)
 
 	if _, err := e.w.Write(e.buf); err != nil {
