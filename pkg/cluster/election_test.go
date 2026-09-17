@@ -219,7 +219,8 @@ func TestWantRecordsTheShortfall(t *testing.T) {
 	}
 }
 
-// Dead and suspect members are not candidates and do not count toward N.
+// Dead members and suspect workers are not candidates and do not count toward
+// N. (A suspect leader does; see TestSuspectLeaderKeepsItsSeat.)
 func TestOnlyAliveMembersParticipate(t *testing.T) {
 	v := viewOf(
 		Member{ID: "node-1", Role: RoleWorker, State: StateAlive},
@@ -238,6 +239,70 @@ func TestOnlyAliveMembersParticipate(t *testing.T) {
 		if id == "node-2" || id == "node-3" {
 			t.Errorf("a non-alive member was elected: %v", got.Leaders)
 		}
+	}
+}
+
+// A suspect leader keeps its seat: suspicion is a doubt, and replacing a leader
+// on a doubt makes every transient blip a swarm-wide re-home. It still counts
+// toward N, so the leader count does not shrink under it either.
+func TestSuspectLeaderKeepsItsSeat(t *testing.T) {
+	v := viewOf(
+		Member{ID: "node-1", Role: RoleLeader, State: StateSuspect},
+		Member{ID: "node-2", Role: RoleWorker, State: StateAlive},
+		Member{ID: "node-3", Role: RoleWorker, State: StateAlive},
+	)
+	scores := map[protocol.NodeID]float64{"node-1": 1, "node-2": 2, "node-3": 3}
+
+	got := Elect(v, scores, Config{Threshold: 0.3, Hysteresis: 0.5})
+
+	if got.Size != 3 {
+		t.Errorf("Size = %d, want 3 (a suspect leader still counts)", got.Size)
+	}
+	if !reflect.DeepEqual(got.Leaders, []protocol.NodeID{"node-1"}) {
+		t.Errorf("Leaders = %v, want the suspect incumbent kept", got.Leaders)
+	}
+}
+
+// A suspect leader has no protection a live one lacks: a challenger beyond the
+// hysteresis margin still takes the seat.
+func TestSuspectLeaderCanStillBeOutscored(t *testing.T) {
+	v := viewOf(
+		Member{ID: "node-1", Role: RoleLeader, State: StateSuspect},
+		Member{ID: "node-2", Role: RoleWorker, State: StateAlive},
+	)
+	scores := map[protocol.NodeID]float64{"node-1": 5, "node-2": 1}
+
+	got := Elect(v, scores, Config{Threshold: 0.3, Hysteresis: 0.5})
+	if !reflect.DeepEqual(got.Leaders, []protocol.NodeID{"node-2"}) {
+		t.Errorf("Leaders = %v, want node-2", got.Leaders)
+	}
+}
+
+// Once the suspicion is confirmed the leader is gone at once: a dead incumbent
+// is never retained, whatever its last reported score.
+func TestDeadLeaderIsReplacedImmediately(t *testing.T) {
+	v := viewOf(
+		Member{ID: "node-1", Role: RoleLeader, State: StateDead},
+		Member{ID: "node-2", Role: RoleWorker, State: StateAlive},
+		Member{ID: "node-3", Role: RoleWorker, State: StateAlive},
+	)
+	scores := map[protocol.NodeID]float64{"node-1": 0, "node-2": 2, "node-3": 3}
+
+	got := Elect(v, scores, Config{Threshold: 0.3, Hysteresis: 0.5})
+	if got.Size != 2 || !reflect.DeepEqual(got.Leaders, []protocol.NodeID{"node-2"}) {
+		t.Errorf("got %+v, want node-2 of 2", got)
+	}
+}
+
+// The all-unmeasured fallback must not land on a suspect worker either.
+func TestFallbackSkipsSuspectWorkers(t *testing.T) {
+	v := viewOf(
+		Member{ID: "node-1", Role: RoleWorker, State: StateSuspect},
+		Member{ID: "node-2", Role: RoleWorker, State: StateAlive},
+	)
+	got := Elect(v, nil, Config{})
+	if !reflect.DeepEqual(got.Leaders, []protocol.NodeID{"node-2"}) {
+		t.Errorf("Leaders = %v, want node-2", got.Leaders)
 	}
 }
 
