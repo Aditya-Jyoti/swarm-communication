@@ -20,8 +20,10 @@ import (
 const (
 	DefaultProbeInterval = 1 * time.Second
 	DefaultElectionFloor = 30 * time.Second
-	DefaultProbeTimeout  = 2 * time.Second
-	DefaultQueueDepth    = 256
+	// DefaultProbeTimeout is twice the strategy's own per-probe budget. See
+	// NodeConfig.ProbeTimeout for why the node's budget must be the looser one.
+	DefaultProbeTimeout = 2 * health.DefaultProbeTimeout
+	DefaultQueueDepth   = 256
 	// leaveTimeout bounds the LEAVE broadcast on shutdown. It is a real-time bound,
 	// not a synchronisation: shutdown must not wait on a peer whose send queue is
 	// full, and a LEAVE that does not get out costs the peers one failure-detector
@@ -47,7 +49,10 @@ type NodeConfig struct {
 	Advertise   protocol.NodeAddress
 	Incarnation int64
 	Transport   network.Transport
-	Health      health.HealthStrategy
+	// Health scores peers. Its EvaluateScore MUST honour ctx: the node cancels
+	// every in-flight probe on shutdown and then joins the probe goroutines, so a
+	// strategy that ignores ctx blocks Run from returning.
+	Health health.HealthStrategy
 	// Clock defaults to RealClock.
 	Clock Clock
 	// Election parameterises Elect. The zero value takes election.go's defaults.
@@ -56,7 +61,18 @@ type NodeConfig struct {
 	ProbeInterval time.Duration
 	// ElectionFloor is the periodic re-election safety net (WORKLOG 2.4). Default 30s.
 	ElectionFloor time.Duration
-	// ProbeTimeout is the budget for one round of scoring every peer. Default 2s.
+	// ProbeTimeout is the budget for one round of scoring every peer. Default
+	// 2 * health.DefaultProbeTimeout. Must be > 0.
+	//
+	// INVARIANT: the round budget must strictly exceed the strategy's own
+	// per-probe timeout. LatencyHealthStrategy decides "cancelled" versus
+	// "unreachable" by asking whether the *caller's* context is done at the
+	// moment a probe fails. If the node's deadline fires first, every probe of a
+	// black-holed peer reports cancellation, the loop discards the sample as the
+	// contract requires, and the peer keeps its last good score forever. The
+	// node's budget exists to bound the round against a strategy that misbehaves,
+	// not to be the deadline that normally fires. Whoever assembles the two
+	// (cmd/swarm-node) must keep this ordering.
 	ProbeTimeout time.Duration
 	// Rehome is the hysteresis margin for ShouldRehome. Zero means
 	// DefaultHysteresis; a negative value means "no damping" (ShouldRehome treats
@@ -82,7 +98,7 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	if c.ElectionFloor <= 0 {
 		c.ElectionFloor = DefaultElectionFloor
 	}
-	if c.ProbeTimeout <= 0 {
+	if c.ProbeTimeout == 0 {
 		c.ProbeTimeout = DefaultProbeTimeout
 	}
 	if c.Rehome == 0 {
@@ -223,6 +239,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		return nil, errors.New("cluster: NodeConfig.Health is required")
 	}
 	cfg = cfg.withDefaults()
+	if cfg.ProbeTimeout <= 0 {
+		return nil, fmt.Errorf("cluster: NodeConfig.ProbeTimeout must be > 0, got %v", cfg.ProbeTimeout)
+	}
 
 	n := &Node{
 		cfg:           cfg,
@@ -406,6 +425,33 @@ func (n *Node) settle(ctx context.Context, fn func()) error {
 	done := make(chan struct{})
 	call := func() {
 		n.drain(ctx)
+		if fn != nil {
+			fn()
+		}
+		close(done)
+	}
+	select {
+	case n.calls <- call:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopped:
+		return ErrAlreadyRunning
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// barrier runs fn on the loop goroutine as soon as the loop is between events,
+// without draining or waiting for probes. It is the lighter test seam: "the loop
+// has finished handling whatever it was handling", which is enough to know that
+// a tick's side effects (a registered timer, a started round) are in place.
+func (n *Node) barrier(ctx context.Context, fn func()) error {
+	done := make(chan struct{})
+	call := func() {
 		if fn != nil {
 			fn()
 		}
@@ -729,7 +775,23 @@ func (n *Node) startProbeRound(ctx context.Context) {
 	// One derived context bounds the whole round. Cancelling it on shutdown makes
 	// every in-flight probe return ErrProbeCanceled, which the WORKLOG 3.4 call
 	// shape discards, so shutdown never manufactures a burst of missed beats.
-	rctx, cancel := context.WithTimeout(ctx, n.cfg.ProbeTimeout)
+	//
+	// The round deadline comes from the Clock, not from context.WithTimeout, so
+	// that a test can fire it deterministically. The timer goroutine below is the
+	// only thing that turns the tick into a cancel; it ends when the round ends.
+	rctx, cancel := context.WithCancel(ctx)
+	roundDone := make(chan struct{})
+	deadline := n.cfg.Clock.After(n.cfg.ProbeTimeout)
+	n.probeWG.Add(1)
+	go func() {
+		defer n.probeWG.Done()
+		select {
+		case <-deadline:
+			n.log.Warn("probe round exceeded its budget; cancelling", "budget", n.cfg.ProbeTimeout)
+			cancel()
+		case <-roundDone:
+		}
+	}()
 
 	var (
 		mu      sync.Mutex
@@ -757,6 +819,7 @@ func (n *Node) startProbeRound(ctx context.Context) {
 		defer n.probeWG.Done()
 		defer cancel()
 		wg.Wait()
+		close(roundDone)
 		select {
 		case n.probeCh <- probeRound{results: results}:
 		case <-ctx.Done():

@@ -258,6 +258,16 @@ func (h *harness) settle() {
 
 // stop cancels the node and waits for Run to return. Idempotent, because tests
 // that stop explicitly are also stopped by Cleanup.
+// barrier waits for the loop to finish its current event without waiting for
+// probes. Use it after Advance when the next step depends on a timer the tick
+// registered.
+func (h *harness) barrier() {
+	h.t.Helper()
+	if err := h.node.barrier(h.ctx, nil); err != nil {
+		h.t.Fatalf("barrier: %v", err)
+	}
+}
+
 func (h *harness) stop() {
 	h.once.Do(func() {
 		h.cancel()
@@ -354,6 +364,7 @@ func TestNewNodeValidation(t *testing.T) {
 		c := n.cfg
 		if c.ProbeInterval != DefaultProbeInterval || c.ElectionFloor != DefaultElectionFloor ||
 			c.ProbeTimeout != DefaultProbeTimeout || c.Rehome != DefaultHysteresis ||
+			c.ProbeTimeout <= health.DefaultProbeTimeout ||
 			c.QueueDepth != DefaultQueueDepth || c.Logger == nil {
 			t.Fatalf("defaults not applied: %+v", c)
 		}
@@ -373,6 +384,14 @@ func TestNewNodeValidation(t *testing.T) {
 		st := n.Status()
 		if st.Self != "node-a" || st.Role != RoleWorker || st.Term != 0 {
 			t.Fatalf("initial status = %s", st)
+		}
+	})
+
+	t.Run("negative probe timeout rejected", func(t *testing.T) {
+		cfg := full
+		cfg.ProbeTimeout = -time.Second
+		if _, err := NewNode(cfg); err == nil || !contains1(err.Error(), "ProbeTimeout") {
+			t.Fatalf("NewNode = %v, want ProbeTimeout error", err)
 		}
 	})
 
@@ -1140,17 +1159,88 @@ func TestShutdownBroadcastsLeaveAndJoinsProbes(t *testing.T) {
 	}
 }
 
-func TestProbeRoundTimesOutSlowPeer(t *testing.T) {
-	// A stalled strategy is bounded by ProbeTimeout even though the parent
-	// context is live. The fake reports cancellation for a timed-out ctx, which
-	// is the conservative reading; a real strategy would classify it as
-	// unreachable. Either way the loop must not hang waiting for the round.
-	h := newHarness(t, "node-a", func(c *NodeConfig) { c.ProbeTimeout = 10 * time.Millisecond })
+func TestProbeRoundBudgetFiresFromTheClock(t *testing.T) {
+	// A strategy that never returns is bounded by the node's round budget, which
+	// is a Clock timer, so the test fires it. The strategy reports cancellation
+	// for that (it is the caller's deadline), which the loop correctly discards:
+	// the node's budget is a backstop against a broken strategy, not the signal.
+	h := newHarness(t, "node-a", nil)
 	h.hs.stall(addrOf("node-b"))
 	h.peerUp("node-b", 1)
-	h.probeRound() // settle waits for the round, which the real-time budget ends
-	if st := h.status(); st.Missed["node-b"] != 0 {
+	h.clock.Advance(probeEvery)
+	h.barrier() // the round, and its deadline timer, are registered
+	h.clock.Advance(h.node.cfg.ProbeTimeout)
+	h.settle() // waits for the cancelled round to be applied
+	st := h.status()
+	if st.Missed["node-b"] != 0 {
 		t.Fatalf("Missed = %d, want 0", st.Missed["node-b"])
+	}
+	if h.node.probing {
+		t.Fatal("round still marked in flight after its budget fired")
+	}
+	// The loop is free again: the next tick starts a new round.
+	h.hs.set(addrOf("node-b"), 1.0)
+	h.hs.mu.Lock()
+	delete(h.hs.block, addrOf("node-b"))
+	h.hs.mu.Unlock()
+	h.probeRound()
+	if got := h.status().Scores["node-b"]; got != 1.0 {
+		t.Fatalf("score after recovery = %v, want 1.0", got)
+	}
+}
+
+// The real strategy against a black-holed peer. The strategy's own timeout is
+// the tighter one, so it -- not the node's round budget -- fires, the parent
+// context is still live, and the failure is classified as unreachable.
+func TestRealLatencyStrategyTimesOutBlackHoledPeer(t *testing.T) {
+	const strategyTimeout = 20 * time.Millisecond
+	stalling := func(ctx context.Context, _ protocol.NodeAddress) (time.Duration, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	strategy := health.NewLatencyHealthStrategy(health.Config{Probe: stalling, ProbeTimeout: strategyTimeout})
+	h := newHarness(t, "node-a", func(c *NodeConfig) {
+		c.Health = strategy
+		c.ProbeTimeout = 10 * strategyTimeout // strictly looser than the strategy's
+	})
+	h.peerUp("node-b", 1)
+	h.probeRound() // settle waits out the strategy's real-time timeout
+
+	st := h.status()
+	if st.Missed["node-b"] != 1 {
+		t.Fatalf("Missed = %d, want 1", st.Missed["node-b"])
+	}
+	if !math.IsNaN(st.Scores["node-b"]) {
+		t.Fatalf("score = %v, want NaN", st.Scores["node-b"])
+	}
+	requireIDs(t, "Leaders", st.Leaders, ids("node-a"))
+	h.probeRound()
+	if got := h.status().Missed["node-b"]; got != 2 {
+		t.Fatalf("Missed = %d after second round, want 2", got)
+	}
+}
+
+// The failure mode this guards against: with the node's budget at or below the
+// strategy's, the node cancels first and the black-holed peer is never marked
+// missed. Pinned so the invariant cannot be quietly lost.
+func TestRoundBudgetTighterThanStrategyHidesFailures(t *testing.T) {
+	const strategyTimeout = 200 * time.Millisecond
+	stalling := func(ctx context.Context, _ protocol.NodeAddress) (time.Duration, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	strategy := health.NewLatencyHealthStrategy(health.Config{Probe: stalling, ProbeTimeout: strategyTimeout})
+	h := newHarness(t, "node-a", func(c *NodeConfig) {
+		c.Health = strategy
+		c.ProbeTimeout = strategyTimeout / 2 // misconfigured: tighter than the strategy
+	})
+	h.peerUp("node-b", 1)
+	h.clock.Advance(probeEvery)
+	h.barrier()
+	h.clock.Advance(h.node.cfg.ProbeTimeout) // the node's budget fires first
+	h.settle()
+	if got := h.status().Missed["node-b"]; got != 0 {
+		t.Fatalf("Missed = %d; expected the misconfiguration to hide the failure", got)
 	}
 }
 
