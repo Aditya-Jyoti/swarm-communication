@@ -1355,7 +1355,10 @@
           }
           var sel = selectedId === a || selectedId === b;
           attr(P.line, "class", "peerlink" + (sel ? " hl" : ""));
-          P.showLabel = sel;
+          // The worker-leader link already carries a label for this pair.
+          var na = model.byId.get(a), nb = model.byId.get(b);
+          var leaderPair = (na && na.leader === b && links3.has(a)) || (nb && nb.leader === a && links3.has(b));
+          P.showLabel = sel && !leaderPair;
           if (sel) {
             var me = model.byId.get(selectedId);
             var other = model.byId.get(selectedId === a ? b : a);
@@ -1416,8 +1419,10 @@
     return true;
   }
 
+  // Labels on links shorter than this on screen would only overlap the drones.
+  var LABEL_MIN_PX = 70;
   function placeLabel(L, p, q, visible) {
-    if (!visible || !p || !q) { show(L.label, false); return; }
+    if (!visible || !p || !q || Math.hypot(q.x - p.x, q.y - p.y) < LABEL_MIN_PX) { show(L.label, false); return; }
     show(L.label, true);
     var mx = ((p.x + q.x) / 2).toFixed(1), my = ((p.y + q.y) / 2 - 6).toFixed(1);
     attr(L.label, "x", mx); attr(L.label, "y", my);
@@ -1487,7 +1492,9 @@
       var p = w && w.p, q = l && l.p;
       setLine(L.line, p, q);
       setLine(L.hit, p, q);
-      placeLabel(L, p, q, showLabels);
+      // With a selection, only the selected drone's links keep their labels.
+      var mine = !selectedId || selectedId === wid || selectedId === L.leader;
+      placeLabel(L, p, q, showLabels && mine);
     });
     peers3.forEach(function (P) {
       var a = drones3.get(P.a), b = drones3.get(P.b);
@@ -1992,12 +1999,22 @@
       return;
     }
     // Fall back to a CSS "maximized" panel where the Fullscreen API is
-    // missing or refused (iOS Safari, iframes).
-    var fallback = function () { panel.classList.add("maximized"); syncFullButton(); };
+    // missing, refused (iOS Safari, iframes), or never answers (some
+    // headless and embedded browsers leave the promise pending).
+    var settled = false;
+    var fallback = function () {
+      if (settled) return;
+      settled = true;
+      panel.classList.add("maximized");
+      syncFullButton();
+    };
     if (panel.requestFullscreen) {
       var pr = null;
       try { pr = panel.requestFullscreen(); } catch (e) { fallback(); return; }
-      if (pr && pr.catch) pr.catch(fallback);
+      if (pr && pr.then) pr.then(function () { settled = true; }, fallback);
+      setTimeout(function () {
+        if (!document.fullscreenElement) fallback();
+      }, 700);
     } else {
       fallback();
     }
@@ -2229,7 +2246,7 @@
   function initSimPanel() {
     var box = $("sim-sliders");
     SIM_FIELDS.forEach(function (f) {
-      makeSlider(box, f.key, f.label + " (" + f.key + ")", f.min, f.max, f.step, function (v) {
+      makeSlider(box, f.key, f.label === f.key ? f.key : f.label + " (" + f.key + ")", f.min, f.max, f.step, function (v) {
         setText(sliders[f.key].out, v + (f.unit ? " " + f.unit : ""));
         var patch = {};
         patch[f.key] = v;
