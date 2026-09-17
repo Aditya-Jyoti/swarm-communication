@@ -1,6 +1,7 @@
 package controlcenter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,8 +31,8 @@ func (s *Server) Handler() http.Handler {
 		_, _ = io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("GET /api/state", s.handleState)
-	mux.HandleFunc("POST /api/tasks", s.handleTasks)
-	mux.HandleFunc("POST /api/chaos", s.handleChaos)
+	mux.HandleFunc("POST /api/tasks", s.guardMutation(s.handleTasks))
+	mux.HandleFunc("POST /api/chaos", s.guardMutation(s.handleChaos))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("GET /", handleRoot)
 	return mux
@@ -107,16 +108,32 @@ func (s *Server) chaos(ctx context.Context, m ClientMessage) error {
 // decodeClientMessage reads a POST body. The "type" field is optional for the
 // REST routes (the path already says what it is) but must match if present.
 func decodeClientMessage(w http.ResponseWriter, r *http.Request, want string) (ClientMessage, error) {
-	var m ClientMessage
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
-	if err := dec.Decode(&m); err != nil {
-		return m, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	m, err := decodeStrict(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	if err != nil {
+		return m, err
 	}
 	if m.Type == "" {
 		m.Type = want
 	}
 	if m.Type != want {
 		return m, fmt.Errorf("%w: type %q, want %q", ErrBadRequest, m.Type, want)
+	}
+	return m, nil
+}
+
+// decodeStrict reads exactly one ClientMessage: unknown fields and anything
+// after the value other than whitespace are errors. A typo such as
+// "delay-ms" would otherwise be silently ignored and the request would run
+// with a zero value, which for chaos is a different action than was meant.
+func decodeStrict(r io.Reader) (ClientMessage, error) {
+	var m ClientMessage
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		return m, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return m, fmt.Errorf("%w: unexpected data after the JSON value", ErrBadRequest)
 	}
 	return m, nil
 }
@@ -159,6 +176,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.SetReadLimit(maxRequestBytes)
+	// Decided once, at the upgrade: the browser API cannot set headers on a
+	// WebSocket, so the token (when configured) arrives from nginx on the
+	// upgrade request or not at all. Without it the socket is read-only.
+	canCommand := s.authorized(r)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -184,7 +205,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(readerDone)
 		defer cancel()
-		s.readWS(context.WithoutCancel(ctx), c)
+		s.readWS(context.WithoutCancel(ctx), c, canCommand)
 	}()
 
 	status, reason := s.writeWS(ctx, c, cl)
@@ -223,8 +244,10 @@ func (s *Server) writeWS(ctx context.Context, c *websocket.Conn, cl *wsClient) (
 	}
 }
 
-// readWS handles browser messages until the connection ends.
-func (s *Server) readWS(ctx context.Context, c *websocket.Conn) {
+// readWS handles browser messages until the connection ends. A reader runs
+// even when canCommand is false: it is what processes ping and close frames.
+func (s *Server) readWS(ctx context.Context, c *websocket.Conn, canCommand bool) {
+	warned := false
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {
@@ -233,8 +256,15 @@ func (s *Server) readWS(ctx context.Context, c *websocket.Conn) {
 		if typ != websocket.MessageText {
 			continue
 		}
-		var m ClientMessage
-		if err := json.Unmarshal(data, &m); err != nil {
+		if !canCommand {
+			if !warned {
+				s.log.Warn("ignoring commands from a dashboard socket without the API token")
+				warned = true
+			}
+			continue
+		}
+		m, err := decodeStrict(bytes.NewReader(data))
+		if err != nil {
 			s.log.Debug("ignoring malformed dashboard message", "err", err)
 			continue
 		}

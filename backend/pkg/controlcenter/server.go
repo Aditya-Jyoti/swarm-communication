@@ -2,6 +2,7 @@ package controlcenter
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,7 +22,14 @@ const (
 	DefaultHandshakeTimeout = 3 * time.Second
 	DefaultClientBuffer     = 64
 	DefaultWSWriteTimeout   = 5 * time.Second
-	opsDepth                = 256
+	DefaultRequestTimeout   = 10 * time.Second
+	// DefaultMaxPendingHandshakes bounds node sockets that have connected but
+	// not finished HELLO. Each holds a goroutine and possibly a frame buffer
+	// of up to protocol.MaxFrameSize for HandshakeTimeout; a real swarm has a
+	// handful in flight at once, even when every node restarts together
+	// (refused ones redial with backoff).
+	DefaultMaxPendingHandshakes = 128
+	opsDepth                    = 256
 )
 
 // ErrAlreadyRunning is returned by a second call to Run.
@@ -49,6 +57,15 @@ type Config struct {
 	ClientBuffer int
 	// WSWriteTimeout bounds one WebSocket write. Default 5s.
 	WSWriteTimeout time.Duration
+	// RequestTimeout bounds reading and answering one POST. Default 10s.
+	RequestTimeout time.Duration
+	// MaxPendingHandshakes caps concurrent unfinished node handshakes; a
+	// socket beyond it is closed at once. Default 128.
+	MaxPendingHandshakes int
+	// APIToken, if set, is required as "Authorization: Bearer <token>" on
+	// mutating requests and on WebSockets that send commands. Empty disables
+	// the check. Must pass CheckAPIToken. See auth.go for the threat model.
+	APIToken string
 	// Now is the clock. Default time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -76,6 +93,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.WSWriteTimeout <= 0 {
 		c.WSWriteTimeout = DefaultWSWriteTimeout
+	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = DefaultRequestTimeout
+	}
+	if c.MaxPendingHandshakes <= 0 {
+		c.MaxPendingHandshakes = DefaultMaxPendingHandshakes
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -118,6 +141,13 @@ type Server struct {
 
 	wg sync.WaitGroup
 
+	// tokenSum is sha256(cfg.APIToken), fixed at New. Read-only afterwards.
+	tokenSum [sha256.Size]byte
+	// handshakes is a semaphore of MaxPendingHandshakes slots. The accept
+	// loop takes a slot without blocking; serveNode returns it when the
+	// handshake ends either way.
+	handshakes chan struct{}
+
 	// mu guards socks and closing. socks holds every node socket from accept
 	// until serveNode returns, so shutdown can close sockets that are still
 	// mid-handshake as well as established ones.
@@ -129,17 +159,24 @@ type Server struct {
 // New binds the node listener. Nothing is accepted until Run.
 func New(cfg Config) (*Server, error) {
 	cfg = cfg.withDefaults()
+	if cfg.APIToken != "" {
+		if err := CheckAPIToken(cfg.APIToken); err != nil {
+			return nil, err
+		}
+	}
 	ln, err := net.Listen("tcp", cfg.NodeListen)
 	if err != nil {
 		return nil, fmt.Errorf("controlcenter: listen for nodes on %s: %w", cfg.NodeListen, err)
 	}
 	return &Server{
-		cfg:     cfg,
-		log:     cfg.Logger.With("node", NodeID),
-		ln:      ln,
-		ops:     make(chan func(*hub), opsDepth),
-		hubDone: make(chan struct{}),
-		socks:   make(map[net.Conn]struct{}),
+		cfg:        cfg,
+		log:        cfg.Logger.With("node", NodeID),
+		ln:         ln,
+		ops:        make(chan func(*hub), opsDepth),
+		hubDone:    make(chan struct{}),
+		tokenSum:   sha256.Sum256([]byte(cfg.APIToken)),
+		handshakes: make(chan struct{}, cfg.MaxPendingHandshakes),
+		socks:      make(map[net.Conn]struct{}),
 	}, nil
 }
 
