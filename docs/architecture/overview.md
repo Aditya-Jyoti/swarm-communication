@@ -196,7 +196,8 @@ has failed and the fix is a new interface, not an import cycle break.
 
 - **No consensus algorithm.** This is not Raft. Leaders are elected from health scores, and the
   system accepts that two partitions may each elect leaders. The comparison to Raft/Paxos, and an
-  honest account of what guarantees we are giving up, is a Phase 3 documentation deliverable.
+  honest account of what guarantees we are giving up, is in
+  [Why Not Consensus](/architecture/why-not-consensus).
 - **No persistence.** State lives in memory and is replicated leader-to-worker. A total swarm
   shutdown loses it. That is a legitimate choice for this system's purpose and an illegitimate one
   for a database; the docs will say which is which.

@@ -35,7 +35,8 @@ export default withMermaid(defineConfig({
         collapsed: false,
         items: [
           { text: 'System Overview', link: '/architecture/overview' },
-          { text: 'Repository Layout', link: '/architecture/repo-layout' }
+          { text: 'Repository Layout', link: '/architecture/repo-layout' },
+          { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' }
         ]
       },
       {
@@ -67,7 +68,11 @@ export default withMermaid(defineConfig({
         text: 'Concepts -- Distributed Systems Theory',
         collapsed: false,
         items: [
-          { text: 'Latency as a Statistic', link: '/concepts/latency-as-a-statistic' }
+          { text: 'Latency as a Statistic', link: '/concepts/latency-as-a-statistic' },
+          { text: 'Failure Detectors', link: '/concepts/failure-detectors' },
+          { text: 'Gossip & Anti-Entropy', link: '/concepts/gossip-and-anti-entropy' },
+          { text: 'Split-Brain & Quorum', link: '/concepts/split-brain-and-quorum' },
+          { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' }
         ]
       }
     ],
