@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -107,7 +108,7 @@ func TestGossipRedrawsOnlyWhenAlivePeersChange(t *testing.T) {
 	// redrawn over the new set, so node-d is reached and node-b is not.
 	h.gossipTick() // wraps: node-c
 	h.peerUp("node-d", 1)
-	h.peerDown("node-b", network.DispositionPeerDied)
+	h.peerDead("node-b")
 	mark := len(h.tr.sentOf(protocol.TypeMembershipDelta)) // PeerUp welcome to node-d
 	h.gossipTick()
 	h.gossipTick()
@@ -121,13 +122,27 @@ func TestGossipWithNoPeersSendsNothing(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.gossipTick()
 	h.peerUp("node-b", 1)
-	h.peerDown("node-b", network.DispositionPeerDied)
+	h.peerDead("node-b")
 	base := len(h.tr.sentOf(protocol.TypeMembershipDelta))
 	h.gossipTick()
 	h.gossipTick()
 	if got := viewSends(h, base); len(got) != 0 {
 		t.Fatalf("gossip went to %v with no alive peers", got)
 	}
+}
+
+// A suspect peer is still gossiped to: our view is how it learns it is
+// suspected, and it can only refute what it hears.
+func TestGossipReachesSuspectPeers(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.peerUp("node-b", 1)
+	h.peerDown("node-b", network.DispositionPeerDied)
+	if m, _ := h.status().View.Get("node-b"); m.State != StateSuspect {
+		t.Fatalf("node-b = %+v, want suspect", m)
+	}
+	base := len(h.tr.sentOf(protocol.TypeMembershipDelta))
+	h.gossipTick()
+	requireIDs(t, "gossip targets", viewSends(h, base), ids("node-b"))
 }
 
 // A send to a member we have no connection to is expected (gossip learns
@@ -159,14 +174,21 @@ func deltaRecords(t *testing.T, env *protocol.Envelope) []protocol.MemberRecord 
 	return p.Members
 }
 
+// Every first-hand change of liveness is pushed, suspicion included: the suspect
+// is among the receivers, and hearing the rumour is how it refutes.
 func TestFirstHandDeathIsPushed(t *testing.T) {
+	type push struct {
+		state       string
+		incarnation int64
+	}
 	for _, tt := range []struct {
 		name string
 		kill func(h *harness)
+		want []push
 	}{
-		{"link lost", func(h *harness) { h.peerDown("node-b", network.DispositionPeerDied) }},
-		{"clean close", func(h *harness) { h.peerDown("node-b", network.DispositionCleanClose) }},
-		{"LEAVE", func(h *harness) { h.frame("node-b", protocol.TypeLeave, protocol.LeavePayload{}) }},
+		{"link lost, then confirmed", func(h *harness) { h.peerDead("node-b") }, []push{{"suspect", 1}, {"dead", 2}}},
+		{"clean close", func(h *harness) { h.peerDown("node-b", network.DispositionCleanClose) }, []push{{"dead", 2}}},
+		{"LEAVE", func(h *harness) { h.frame("node-b", protocol.TypeLeave, protocol.LeavePayload{}) }, []push{{"dead", 2}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t, "node-a", nil)
@@ -176,18 +198,24 @@ func TestFirstHandDeathIsPushed(t *testing.T) {
 
 			tt.kill(h)
 			pushed := h.tr.broadcastOf(protocol.TypeMembershipDelta)[base:]
-			if len(pushed) != 1 {
-				t.Fatalf("delta broadcasts after the death = %d, want 1", len(pushed))
+			if len(pushed) != len(tt.want) {
+				t.Fatalf("delta broadcasts after the death = %d, want %d", len(pushed), len(tt.want))
 			}
-			recs := deltaRecords(t, pushed[0])
-			if len(recs) != 1 || recs[0].ID != "node-b" || recs[0].State != "dead" || recs[0].Incarnation != 2 {
-				t.Fatalf("pushed %+v, want node-b dead at 2", recs)
+			for i, w := range tt.want {
+				recs := deltaRecords(t, pushed[i])
+				if len(recs) != 1 || recs[0].ID != "node-b" || recs[0].State != w.state || recs[0].Incarnation != w.incarnation {
+					t.Fatalf("push %d = %+v, want node-b %s at %d", i, recs, w.state, w.incarnation)
+				}
 			}
 
-			// A repeat of the same death changes nothing and pushes nothing.
+			// A repeat of the same death changes nothing and pushes nothing: a
+			// lost link cannot make a dead member merely suspect.
 			h.peerDown("node-b", network.DispositionPeerDied)
-			if n := len(h.tr.broadcastOf(protocol.TypeMembershipDelta)); n != base+1 {
+			if n := len(h.tr.broadcastOf(protocol.TypeMembershipDelta)); n != base+len(tt.want) {
 				t.Fatalf("a no-op death was pushed: %d broadcasts", n-base)
+			}
+			if m, _ := h.status().View.Get("node-b"); m.State != StateDead {
+				t.Fatalf("node-b = %+v after a repeat link loss, want dead", m)
 			}
 		})
 	}
@@ -222,8 +250,14 @@ func phantomUp(nodes []*meshNode, id protocol.NodeID, incarnation int64) {
 	}
 }
 
-func phantomDown(m *meshNode, id protocol.NodeID) {
+// phantomDead reports a lost link to id at m and confirms the suspicion, so m
+// holds a first-hand death.
+func phantomDead(t *testing.T, ctx context.Context, m *meshNode, id protocol.NodeID) {
+	t.Helper()
 	m.ep.events <- network.PeerEvent{Kind: network.PeerDown, Peer: network.PeerInfo{ID: id, Advertise: addrOf(id)}, Disposition: network.DispositionPeerDied}
+	if err := confirmSuspicions(ctx, m.node); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func memberOf(t *testing.T, m *meshNode, id protocol.NodeID) Member {
@@ -251,7 +285,7 @@ func TestDroppedPushIsRepairedByAntiEntropy(t *testing.T) {
 	quiesce(t, ctx, nodes)
 
 	hub.setDrop(dropDeltaBroadcasts("n1", "n2"))
-	phantomDown(n1, "n3")
+	phantomDead(t, ctx, n1, "n3")
 	quiesce(t, ctx, nodes)
 	if m := memberOf(t, n1, "n3"); m.State != StateDead || m.Incarnation != 2 {
 		t.Fatalf("n1: n3 = %+v, want dead at 2", m)
@@ -291,7 +325,7 @@ func TestDeadRecordConvergesAndStaysDead(t *testing.T) {
 	quiesce(t, ctx, nodes)
 
 	hub.setDrop(dropDeltaBroadcasts("n1", "n2"))
-	phantomDown(n1, "n3")
+	phantomDead(t, ctx, n1, "n3")
 	quiesce(t, ctx, nodes) // death processed first...
 	n1.node.Handler()("n3", refutation)
 	quiesce(t, ctx, nodes) // ...then the queued refutation
