@@ -49,6 +49,7 @@ export default withMermaid(defineConfig({
           { text: 'Failure Detection & Failover', link: '/architecture/failure-detection-and-failover' },
           { text: 'Replication & Tasks', link: '/architecture/replication-and-tasks' },
           { text: 'The Control Center', link: '/architecture/control-center' },
+          { text: 'Drone Simulation', link: '/architecture/drone-simulation' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' }
         ]
@@ -63,6 +64,7 @@ export default withMermaid(defineConfig({
           { text: 'Wire Protocol Design', link: '/concepts/wire-protocol-design' },
           { text: 'epoll, select & Non-Blocking I/O', link: '/concepts/nonblocking-io-and-epoll' },
           { text: 'Docker Bridge Networking', link: '/concepts/docker-bridge-networking' },
+          { text: 'Network Emulation: Geometry to Latency', link: '/concepts/network-emulation' },
           { text: 'TCP Teardown & Half-Open Sockets', link: '/concepts/tcp-teardown-and-half-open-sockets' },
           { text: 'Deadlines & I/O Timeouts', link: '/concepts/deadlines-and-io-timeouts' },
           { text: 'Backpressure & Bounded Queues', link: '/concepts/backpressure-and-bounded-queues' },
@@ -99,6 +101,14 @@ export default withMermaid(defineConfig({
           { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' },
           { text: 'At-Least-Once Delivery & Idempotent Re-issue', link: '/concepts/at-least-once-delivery' },
           { text: 'Cooperative vs Uncooperative Failure Injection', link: '/concepts/cooperative-vs-uncooperative-failure-injection' }
+        ]
+      },
+      {
+        text: 'Concepts -- Visualisation & Algorithms',
+        collapsed: false,
+        items: [
+          { text: '3D Perspective Projection & Depth Sorting', link: '/concepts/3d-perspective-projection-and-depth-sorting' },
+          { text: 'Hash Mixing: Why FNV Needs a Finalizer', link: '/concepts/hash-mixing-and-finalizers' }
         ]
       }
     ],
