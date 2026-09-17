@@ -1758,6 +1758,12 @@ func (n *Node) evaluate(ctx context.Context) {
 		// suspect was the only leader.
 		if n.leader != "" && !contains(usable, n.leader) {
 			n.log.Info("detaching from unusable leader", "leader", n.leader)
+			// Leaving because the leader failed or left, not because it lost
+			// its seat: its outstanding tasks go with us.
+			m, known := view.Get(n.leader)
+			if _, doubted := n.suspects[n.leader]; doubted || !known || m.State == StateDead {
+				n.adoptOrphans()
+			}
 			n.leader = ""
 		}
 		best, ok := ChooseLeader(n.local, usable)

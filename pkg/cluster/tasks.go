@@ -343,6 +343,26 @@ func (n *Node) tasksRoleChanged(leading bool) {
 	n.tasks.handoff = n.pendingTasks(func(protocol.TaskRecord) bool { return true })
 }
 
+// adoptOrphans is called when a worker leaves its leader because that leader
+// failed (a first-hand suspicion, or silence). The replica's pending tasks are
+// the only surviving copy of that leader's outstanding work unless the node
+// promoted in its place happens to be one of its workers, which election does
+// not promise: it promotes the healthiest node, from any cluster. So every
+// orphaned worker carries the tasks to its next leader, which keeps the first
+// copy of each ID and ignores the rest.
+//
+// Not called on an ordinary re-home: a leader that is alive still owns its
+// tasks, and handing them over would only run them twice for nothing.
+func (n *Node) adoptOrphans() {
+	if !n.repl.held {
+		return // no replica from the leader we are leaving
+	}
+	n.tasks.handoff = n.pendingTasks(func(protocol.TaskRecord) bool { return true })
+	if len(n.tasks.handoff) > 0 {
+		n.log.Info("carrying a failed leader's pending tasks", "count", len(n.tasks.handoff))
+	}
+}
+
 // reissueIfDue re-issues every pending task once after a promotion.
 func (n *Node) reissueIfDue(ctx context.Context) {
 	if !n.tasks.reissueDue {

@@ -70,6 +70,7 @@ func (n *Node) checkLeaderSilence(ctx context.Context) {
 	leader := n.leader
 	n.log.Warn("leader silent; failing over", "leader", leader, "ticks", n.sinceBeat)
 	n.sinceBeat = 0
+	n.adoptOrphans()
 	n.markSilent(ctx, leader)
 	// Detach whether or not the table changed: the leader may already be a
 	// relayed suspect, and we still have first-hand reason to leave it.

@@ -510,6 +510,75 @@ func TestDemotedLeaderHandsOffPendingTasks(t *testing.T) {
 	}
 }
 
+// A worker whose leader fails carries that leader's pending tasks to its next
+// leader; one that merely re-homes away from a live leader does not.
+func TestOrphanedWorkerCarriesPendingTasks(t *testing.T) {
+	// Threshold 0.3: two leaders among four nodes, one among three, so node-z
+	// stays a worker whichever way node-b goes.
+	attachedWorker := func(t *testing.T) *harness {
+		return attachedWorkerWith(t, func(c *NodeConfig) { c.Election.Threshold = 0.3 })
+	}
+	syncPending := func(h *harness) {
+		t.Helper()
+		p := echo("p")
+		h.syncFrom("node-b", protocol.StateSyncPayload{Term: h.status().Term, Version: 1, Ledger: []protocol.TaskRecord{
+			{TaskID: "p", State: taskPending, AssignedTo: "node-d", Kind: p.Kind, Body: p.Body},
+			rec("d", taskDone),
+		}})
+	}
+	acceptedByC := func(h *harness) []string {
+		t.Helper()
+		st := h.status()
+		if st.Leader != "node-c" {
+			t.Fatalf("not re-homed to node-c: %s", st)
+		}
+		h.frame("node-c", protocol.TypeJoinAck, protocol.JoinAckPayload{Accepted: true, Leader: "node-c"})
+		return h.tasksTo("node-c")
+	}
+	t.Run("leader left", func(t *testing.T) {
+		h := attachedWorker(t)
+		syncPending(h)
+		h.frame("node-b", protocol.TypeLeave, nil)
+		if got := acceptedByC(h); strings.Join(got, ",") != "p" {
+			t.Fatalf("TASKs to node-c = %v", got)
+		}
+	})
+	t.Run("link lost", func(t *testing.T) {
+		h := attachedWorker(t)
+		syncPending(h)
+		h.peerDown("node-b", network.DispositionPeerDied)
+		if got := acceptedByC(h); strings.Join(got, ",") != "p" {
+			t.Fatalf("TASKs to node-c = %v", got)
+		}
+	})
+	t.Run("silence", func(t *testing.T) {
+		h := attachedWorker(t)
+		syncPending(h)
+		h.step(time.Duration(DefaultHeartbeatMisses) * hbEvery)
+		if got := acceptedByC(h); strings.Join(got, ",") != "p" {
+			t.Fatalf("TASKs to node-c = %v", got)
+		}
+	})
+	t.Run("plain re-home", func(t *testing.T) {
+		h := attachedWorker(t)
+		syncPending(h)
+		// node-b loses its seat to node-d (claims worker, reports badly); it
+		// is alive.
+		h.deltaAbout("node-d", "node-d", RoleWorker, 1.2, 9)
+		h.deltaAbout("node-b", "node-b", RoleWorker, 50, 9)
+		if got := acceptedByC(h); len(got) != 0 {
+			t.Fatalf("tasks of a live leader were handed over: %v", got)
+		}
+	})
+	t.Run("no replica", func(t *testing.T) {
+		h := attachedWorker(t)
+		h.frame("node-b", protocol.TypeLeave, nil)
+		if got := acceptedByC(h); len(got) != 0 {
+			t.Fatalf("TASKs to node-c = %v", got)
+		}
+	})
+}
+
 // A handoff that cannot be sent is logged and dropped.
 func TestFailedHandoffIsDropped(t *testing.T) {
 	h := leaderWith(t, "node-b")
