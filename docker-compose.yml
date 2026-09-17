@@ -27,7 +27,7 @@
 # every other node needs a fixed address to dial first.
 #
 # Security: the published port binds to ${BIND_ADDR:-127.0.0.1}. The HTTP API
-# (tasks, chaos) needs no credentials by default. SWARM_CC_API_TOKEN turns on a
+# (tasks, chaos, sim) needs no credentials by default. SWARM_CC_API_TOKEN turns on a
 # bearer token at the control center; the frontend's nginx adds it to /api/
 # and /ws server-side, so the dashboard keeps working and the browser never
 # sees it. That shuts out callers that bypass nginx (any other container on
@@ -71,12 +71,13 @@ x-node: &node
   image: "swarm-net/node:${SWARM_IMAGE_TAG:-dev}"
   networks: [swarmnet]
   read_only: true
-  # A CHAOS "kill" makes the node exit(1); `unless-stopped` brings it back as a
-  # new incarnation, so the dashboard shows death -> failover -> rejoin. It
-  # deliberately does NOT restart a container the operator stopped (`docker
-  # stop` / `docker kill` from the e2e script), so a manual kill stays dead and
-  # the failover is observable rather than papered over by an instant restart.
-  restart: unless-stopped
+  # on-failure, on purpose: a CHAOS "kill" makes the node exit with code 0,
+  # so the killed drone stays dead and the failover stays visible on the
+  # dashboard (shown as "killed"), while a real crash (non-zero exit) is
+  # still restarted. Docker never restarts a container the operator stopped
+  # (`docker stop` / `docker kill`), under any policy. To bring killed drones
+  # back, run `docker compose up -d` again.
+  restart: on-failure
   # SIGTERM triggers a graceful LEAVE; 3s is plenty and keeps `down` fast.
   stop_grace_period: 3s
   depends_on:
@@ -97,6 +98,14 @@ services:
       SWARM_LOG_LEVEL: "${SWARM_LOG_LEVEL:-info}"
       # Empty = no auth. See the Security note at the top of this file.
       SWARM_CC_API_TOKEN: "${SWARM_CC_API_TOKEN:-}"
+      # Drone simulation: emulated latency from 3D distance
+      # (docs/architecture/drone-simulation.md). Start-up values only; the
+      # dashboard's advanced panel changes them at run time.
+      #   delay = base + distance * per_unit + jitter * U[0,1)
+      SWARM_SIM_ENABLED: "${SWARM_SIM_ENABLED:-true}"
+      SWARM_SIM_BASE_MS: "${SWARM_SIM_BASE_MS:-1}"
+      SWARM_SIM_PER_UNIT_MS: "${SWARM_SIM_PER_UNIT_MS:-2}"
+      SWARM_SIM_JITTER_MS: "${SWARM_SIM_JITTER_MS:-0.5}"
     # Not published by default: the dashboard and API are reached through
     # `frontend`. To expose the CC directly (e.g. to bypass nginx while
     # debugging), uncomment these two lines and set CC_HTTP_PORT in .env:
