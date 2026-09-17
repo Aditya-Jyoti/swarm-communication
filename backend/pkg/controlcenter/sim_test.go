@@ -87,7 +87,6 @@ func TestSimAPIDefaultsValidationAndClamping(t *testing.T) {
 	}
 
 	for _, body := range []string{
-		`{"threshold":0}`,
 		`{"threshold":1.5}`,
 		`{"threshold":-0.1}`,
 		`{"threshold":0.5,"base_ms":1e400}`,
@@ -112,6 +111,55 @@ func TestSimAPIDefaultsValidationAndClamping(t *testing.T) {
 	// Task and chaos routes refuse sim fields.
 	if code, _ := post(t, cc, "/api/chaos", `{"node":"n","action":"kill","randomize":true}`); code != http.StatusBadRequest {
 		t.Errorf("chaos with sim field = %d", code)
+	}
+}
+
+func TestSimThresholdZeroClearsOverride(t *testing.T) {
+	cc := startCC(t, nil)
+	b := dialWS(t, cc)
+	n := dialNode(t, cc, "node-1")
+	n.simConfig()
+
+	// No override set: clearing is a no-op, with no bump and no broadcast.
+	before := getSim(t, cc)
+	if code, v := postSim(t, cc, `{"threshold":0}`); code != 200 || v != before {
+		t.Fatalf("clear without override = %d %+v, want %+v", code, v, before)
+	}
+
+	if code, v := postSim(t, cc, `{"threshold":0.4}`); code != 200 || v.Threshold != 0.4 {
+		t.Fatalf("set = %d %+v", code, v)
+	}
+	b.event(EventSim, "")
+	set := getSim(t, cc).Version
+
+	code, v := postSim(t, cc, `{"threshold":0}`)
+	if code != 200 || v.Threshold != 0 || v.Version <= set {
+		t.Fatalf("clear = %d %+v", code, v)
+	}
+	if e := b.event(EventSim, ""); e.Detail != "threshold 0.4 -> 0" {
+		t.Fatalf("clear event = %+v", e)
+	}
+	// Nodes get the cleared override pushed to them.
+	for {
+		p := n.simConfig()
+		if p.Version == v.Version {
+			if p.Threshold != 0 {
+				t.Fatalf("node got threshold %v", p.Threshold)
+			}
+			break
+		}
+	}
+
+	// The same through the WebSocket.
+	b.write(map[string]any{"type": "sim", "threshold": 0.7})
+	b.event(EventSim, "")
+	b.write(map[string]any{"type": "sim", "threshold": -0.5}) // still dropped
+	b.write(map[string]any{"type": "sim", "threshold": 0})
+	if e := b.event(EventSim, ""); e.Detail != "threshold 0.7 -> 0" {
+		t.Fatalf("ws clear event = %+v", e)
+	}
+	if got := getSim(t, cc); got.Threshold != 0 {
+		t.Fatalf("after ws clear = %+v", got)
 	}
 }
 

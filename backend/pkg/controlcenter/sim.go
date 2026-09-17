@@ -186,8 +186,11 @@ func (h *hub) makeRoom(extra int) bool {
 // randomize run before explicit positions, so "randomize, but pin node-3
 // here" does what it says.
 func (h *hub) updateSim(m ClientMessage) (SimView, error) {
-	if m.Threshold != nil && !(*m.Threshold > 0 && *m.Threshold <= 1) {
-		return SimView{}, fmt.Errorf("%w: threshold %v must be in (0,1]", ErrBadRequest, *m.Threshold)
+	// 0 is the wire's "no override", so asking for 0 clears the override;
+	// it is not a request for zero leaders. The negated range test also
+	// rejects NaN.
+	if m.Threshold != nil && !(*m.Threshold >= 0 && *m.Threshold <= 1) {
+		return SimView{}, fmt.Errorf("%w: threshold %v must be 0 (clear) or in (0,1]", ErrBadRequest, *m.Threshold)
 	}
 	newIDs := 0
 	for id := range m.Positions {
