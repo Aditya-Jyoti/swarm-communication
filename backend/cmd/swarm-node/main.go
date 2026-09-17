@@ -36,7 +36,34 @@ const (
 	exitOK      = 0
 	exitRuntime = 1
 	exitConfig  = 2
+	// exitKilled is the status for CHAOS kill. It is 0 on purpose: node
+	// containers run with `restart: on-failure`, which restarts a real crash
+	// (non-zero) but leaves a success alone, so a drone the operator killed
+	// stays dead instead of coming straight back as a new incarnation.
+	exitKilled = 0
 )
+
+// electionPair is an effective (threshold, hysteresis) setting: both values
+// are always concrete, never SIM_CONFIG's "keep own" encodings.
+type electionPair struct {
+	threshold, hysteresis float64
+}
+
+// effective resolves a SIM_CONFIG override against the node's own settings.
+// threshold 0 and a negative hysteresis mean "the node's own value", which is
+// how the Control Center clears an override; resolving here (rather than
+// forwarding the raw encodings, which SetElectionParams reads as "unchanged")
+// is what makes a clear actually revert the node.
+func (own electionPair) effective(threshold, hysteresis float64) electionPair {
+	out := own
+	if threshold > 0 {
+		out.threshold = threshold
+	}
+	if hysteresis >= 0 {
+		out.hysteresis = hysteresis
+	}
+	return out
+}
 
 func main() {
 	cfg, err := Load(os.Args[1:], os.Getenv, os.Hostname)
@@ -108,6 +135,22 @@ type app struct {
 	// setDelays applies a CHAOS delay (0 clears it) to both reply paths: the
 	// prober's PONGs and the node's HEARTBEAT_ACKs. A seam for the same reason.
 	setDelays func(d time.Duration)
+
+	// emu holds the last applied SIM_CONFIG; the prober reads its per-peer
+	// delay. flows counts mesh frames for telemetry; nil without a Control
+	// Center, since nobody would drain it.
+	emu   *telemetry.Emulation
+	flows *telemetry.FlowRecorder
+	// setElection passes a SIM_CONFIG election override to the node. A seam so
+	// a test can observe exactly which overrides are forwarded.
+	setElection func(threshold, hysteresis float64)
+	// ownElection is the node's own election settings as resolved at start-up
+	// (configured threshold, default hysteresis). Immutable after newApp.
+	ownElection electionPair
+	// lastElection is the effective pair last forwarded, initially
+	// ownElection. Owned by the client's Run goroutine, the only caller of
+	// applySim, so it needs no lock.
+	lastElection electionPair
 }
 
 // uplinkIdleFloor is the smallest read deadline the Control Center link may
@@ -138,8 +181,12 @@ func uplinkIdleTimeout(mesh time.Duration) time.Duration {
 // cycles are broken with late-bound closures over a *cluster.Node that is nil
 // until the node exists, and over an *app that is filled in as we go.
 //
-// The order is therefore: pool, prober, client (closures only), node, and the
-// listener last.
+// The order is therefore: pool, the flow recorder in front of it (only with a
+// Control Center), the emulation state, prober (sending through the recorder,
+// delaying PONGs by the emulation), client (closures only), node (also sending
+// through the recorder), and the listener last. The CC client has its own
+// private pool and is deliberately not behind the recorder: flows count mesh
+// frames only.
 //
 // This is safe without a lock because of ordering, not luck: the closures are
 // only ever invoked from goroutines the pool starts (connection readers, dial
@@ -177,15 +224,32 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		},
 	})
 
-	prober := network.NewMeshProber(pool, func(addr protocol.NodeAddress) (protocol.NodeID, bool) {
+	// mesh is what the node and the prober send through. With a Control Center
+	// it is the flow recorder, so heartbeats, gossip, PINGs and PONGs are all
+	// counted for the dashboard; without one there is nobody to drain the
+	// counts, so the pool is used directly.
+	var mesh network.Transport = pool
+	if cfg.ControlCenter != "" {
+		a.flows = telemetry.NewFlowRecorder(pool)
+		mesh = a.flows
+	}
+
+	a.emu = telemetry.NewEmulation(cfg.NodeID, nil)
+
+	prober := network.NewMeshProber(mesh, func(addr protocol.NodeAddress) (protocol.NodeID, bool) {
 		return node.Resolve(addr)
 	}, nil)
+	// Nothing applied yet means no delay, so this is safe before any SIM_CONFIG.
+	prober.SetPeerDelay(a.emu.PeerDelay)
 
 	strategy := health.NewLatencyHealthStrategy(health.Config{Probe: prober.Probe})
 
 	a.setDelays = func(d time.Duration) {
 		prober.SetDelay(d)
 		node.SetChaosDelay(d)
+	}
+	a.setElection = func(threshold, hysteresis float64) {
+		node.SetElectionParams(threshold, hysteresis)
 	}
 
 	var (
@@ -198,11 +262,18 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 			Self:     network.Identity{ID: cfg.NodeID, Advertise: cfg.Advertise},
 			Addr:     cfg.ControlCenter,
 			Interval: cfg.TelemetryInterval,
-			Snapshot: func() protocol.TelemetryPayload { return telemetry.FromStatus(node.Status()) },
+			// The client is the only drainer of the flow counts, so each
+			// sample carries exactly the frames sent since the previous one.
+			Snapshot: telemetry.SnapshotFunc(
+				func() cluster.Status { return node.Status() },
+				a.emu.Version,
+				a.flows.Drain,
+			),
 			SubmitTask: func(ctx context.Context, t protocol.TaskPayload) error {
 				return node.SubmitTask(ctx, t)
 			},
 			OnChaos: a.applyChaos,
+			OnSim:   a.applySim,
 			Conn:    network.ConnConfig{IdleTimeout: uplinkIdleTimeout(cfg.IdleTimeout)},
 			Logger:  base,
 		})
@@ -220,7 +291,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		Self:           cfg.NodeID,
 		Advertise:      cfg.Advertise,
 		Incarnation:    time.Now().Unix(),
-		Transport:      pool,
+		Transport:      mesh,
 		Health:         strategy,
 		Election:       cluster.Config{Threshold: cfg.Threshold},
 		ProbeInterval:  cfg.ProbeInterval,
@@ -249,6 +320,12 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		return nil, fmt.Errorf("swarm-node %q: %w", cfg.NodeID, err)
 	}
 	log.Info("listening", "addr", ln.Addr(), "advertise", cfg.Advertise, "version", version)
+	// The node's own settings are read from the Status NewNode published, so
+	// the hysteresis is the node's resolved default rather than a copy of that
+	// rule here. No override can have been applied yet: nothing runs.
+	st := node.Status()
+	a.ownElection = electionPair{threshold: st.Threshold, hysteresis: st.Hysteresis}
+	a.lastElection = a.ownElection
 	a.pool, a.prober, a.node, a.ln, a.client = pool, prober, node, ln, client
 	return a, nil
 }
@@ -258,14 +335,38 @@ func (a *app) applyChaos(c telemetry.Chaos) {
 	switch c.Action {
 	case telemetry.ChaosKill:
 		// Deliberately abrupt: no LEAVE, no deferred cleanup. The point of
-		// kill is to look like a crash to the swarm; Compose restarts the
-		// container as a new incarnation.
+		// kill is to look like a crash to the swarm. The exit status is
+		// exitKilled (0) so Compose's on-failure policy leaves it dead.
 		a.log.Error("chaos kill received: exiting")
-		a.exit(exitRuntime)
+		a.exit(exitKilled)
 	default: // delay and clear; Delay is 0 for clear
 		a.log.Warn("chaos delay applied", "delay", c.Delay)
 		a.setDelays(c.Delay)
 	}
+}
+
+// applySim acts on a sanitized SIM_CONFIG, on the client's goroutine.
+//
+// A stale version changes nothing. A newer one replaces the emulation state
+// (which the prober reads for every PONG). Its election override is resolved
+// against the node's own settings (so a cleared override reverts them) and the
+// resulting pair is passed to the node only when it differs from the last one
+// passed on: every slider
+// move and every reconnect resends the whole snapshot, and re-applying the
+// same override would only log and re-run the election for nothing.
+func (a *app) applySim(p protocol.SimConfigPayload) {
+	if !a.emu.Apply(p) {
+		a.log.Debug("stale sim config ignored", "version", p.Version, "held", a.emu.Version())
+		return
+	}
+	a.log.Info("sim config applied", "version", p.Version, "enabled", p.Enabled,
+		"positions", len(p.Positions), "threshold", p.Threshold, "hysteresis", p.Hysteresis)
+	e := a.ownElection.effective(p.Threshold, p.Hysteresis)
+	if e == a.lastElection {
+		return
+	}
+	a.lastElection = e
+	a.setElection(e.threshold, e.hysteresis)
 }
 
 // run builds the app, reports the bound address through onListening (nil is

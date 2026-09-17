@@ -105,7 +105,12 @@ type NodeConfig struct {
 	// "no damping", and before this rule a caller that set only the threshold
 	// (cmd/swarm-node does) ran the swarm with no damping at all: every score
 	// wobble was re-announced and could move the leader set. A node that
-	// really wants no damping passes a tiny positive margin.
+	// really wants no damping passes a tiny positive margin, or calls
+	// SetElectionParams with 0 once the node is built (that path bypasses
+	// this rule; see tuning.go).
+	//
+	// Election and Rehome are owned by the loop goroutine once Run starts:
+	// SetElectionParams rewrites them there.
 	Election Config
 	// ProbeInterval is how often every alive peer is scored. Default 1s.
 	ProbeInterval time.Duration
@@ -293,6 +298,10 @@ type Status struct {
 	Claims map[protocol.NodeID]protocol.ElectionResultPayload
 	// Dropped counts data-plane frames shed at the inbound queue.
 	Dropped uint64
+	// Threshold is the leader fraction the election uses, and Hysteresis its
+	// margin, after defaults and any SetElectionParams override.
+	Threshold  float64
+	Hysteresis float64
 	// ControlStatus carries the replicated ledger and chaos state (control.go).
 	ControlStatus
 }
@@ -347,6 +356,13 @@ type Node struct {
 	submits  chan submitReq
 	taskDone chan taskOutcome
 	taskWG   sync.WaitGroup
+	// tuneMu guards tunePending, the runtime election override written by
+	// SetElectionParams on any goroutine. tuneCh (capacity 1) wakes the loop to
+	// apply it; see tuning.go. Once applied, the values live in cfg.Election and
+	// cfg.Rehome, which are loop-owned.
+	tuneMu      sync.Mutex
+	tunePending electionTuning
+	tuneCh      chan struct{}
 
 	// running flips once, when Run starts. stopped is closed when Run returns;
 	// Handler selects on it so a control-plane send cannot outlive the loop.
@@ -472,6 +488,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		probeCh:       make(chan probeRound),
 		calls:         make(chan func()),
 		submits:       make(chan submitReq),
+		tuneCh:        make(chan struct{}, 1),
 		taskDone:      make(chan taskOutcome, maxInflightTasks),
 		stopped:       make(chan struct{}),
 		incarnation:   cfg.Incarnation,
@@ -630,6 +647,11 @@ func (n *Node) Run(ctx context.Context) error {
 	syncT := n.cfg.Clock.NewTicker(n.cfg.StateSyncInterval)
 	defer syncT.Stop()
 
+	// An override set before Run is folded in first, so the very first
+	// election already uses it. applyTuning evaluates only on a change, hence
+	// the unconditional evaluate below (evaluate is idempotent). The wake-up
+	// left in tuneCh finds nothing pending later, which is harmless.
+	n.applyTuning(ctx)
 	// A single node must lead itself without waiting for a peer or a tick.
 	n.evaluate(ctx)
 
@@ -679,6 +701,8 @@ func (n *Node) Run(ctx context.Context) error {
 			req.reply <- n.submit(ctx, req.task)
 		case fn := <-n.calls:
 			fn()
+		case <-n.tuneCh:
+			n.applyTuning(ctx)
 		}
 		// Replication is flushed once per event, after it: several changes made
 		// while handling one event (a death that detaches a worker and
@@ -782,6 +806,9 @@ func (n *Node) drain(ctx context.Context) {
 			continue
 		case req := <-n.submits:
 			req.reply <- n.submit(ctx, req.task)
+			continue
+		case <-n.tuneCh:
+			n.applyTuning(ctx)
 			continue
 		default:
 		}
@@ -1865,6 +1892,8 @@ func (n *Node) publish() {
 		Attached:    make([]protocol.NodeID, 0, len(n.attached)),
 		Claims:      make(map[protocol.NodeID]protocol.ElectionResultPayload, len(n.claims)),
 		Dropped:     n.dropped.Load(),
+		Threshold:   n.effectiveThreshold(),
+		Hysteresis:  n.cfg.Election.Hysteresis,
 	}
 	for id, v := range n.local {
 		s.Scores[id] = v
