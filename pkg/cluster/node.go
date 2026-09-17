@@ -107,6 +107,13 @@ type NodeConfig struct {
 	// Pool.Connect, which is how the mesh grows from a single seed. It must not
 	// block. Optional.
 	Connect func(protocol.NodeAddress)
+	// Executor runs tasks assigned to this node. Default: the built-in task
+	// kinds (Phase 4). See control.go.
+	Executor TaskExecutor
+	// OnTaskResult is called, on the loop goroutine, when a task this node
+	// leads completes (its own or an attached worker's). cmd wires it to the
+	// Control Center uplink. It must not block. Optional.
+	OnTaskResult func(protocol.TaskResultPayload)
 }
 
 func (c NodeConfig) withDefaults() NodeConfig {
@@ -177,6 +184,8 @@ type Status struct {
 	Claims map[protocol.NodeID]protocol.ElectionResultPayload
 	// Dropped counts data-plane frames shed at the inbound queue.
 	Dropped uint64
+	// ControlStatus carries the replicated ledger and chaos state (control.go).
+	ControlStatus
 }
 
 // Node is the state machine that wires membership, election, affinity and the
