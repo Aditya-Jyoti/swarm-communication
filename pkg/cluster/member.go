@@ -1,7 +1,8 @@
 package cluster
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	"swarm-net/pkg/health"
@@ -133,8 +134,24 @@ func (v View) Scores() map[protocol.NodeID]float64 {
 }
 
 // Leaders returns the IDs currently marked as leaders, in sorted order.
+//
+// Counted first, then filled. Leaders are a small fraction of the swarm, so
+// sizing the slice to len(Members) would over-allocate badly, while growing it
+// by append costs a fresh allocation and copy at every doubling. One extra
+// no-allocation scan buys exactly one right-sized allocation. The nil return
+// for "no leaders" is preserved deliberately: callers compare the result
+// against nil.
 func (v View) Leaders() []protocol.NodeID {
-	var out []protocol.NodeID
+	n := 0
+	for _, m := range v.Members {
+		if m.Role == RoleLeader && m.State == StateAlive {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]protocol.NodeID, 0, n)
 	for _, m := range v.Members {
 		if m.Role == RoleLeader && m.State == StateAlive {
 			out = append(out, m.ID)
@@ -144,7 +161,19 @@ func (v View) Leaders() []protocol.NodeID {
 }
 
 // Size is the number of members believed alive -- the N in the leader-count formula.
-func (v View) Size() int { return len(v.Alive()) }
+//
+// Counted in place rather than as len(v.Alive()): the count is read on every
+// election round and on every status snapshot, and materialising the whole
+// alive slice just to measure it allocates the entire membership for a number.
+func (v View) Size() int {
+	n := 0
+	for _, m := range v.Members {
+		if m.State == StateAlive {
+			n++
+		}
+	}
+	return n
+}
 
 // Table is the mutable membership store.
 //
@@ -328,7 +357,13 @@ func (t *Table) Snapshot() View {
 	for _, m := range t.members {
 		out = append(out, m)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	// slices.SortFunc, not sort.Slice. sort.Slice swaps through reflect.Swapper,
+	// so every swap of a Member -- a struct wider than 56 bytes carrying two
+	// string headers -- is a reflective memmove, and the less function is an
+	// indirect closure call the compiler cannot inline. The generic version
+	// swaps and compares directly. Same order, same allocations, far cheaper per
+	// element, which matters because Elect takes a fresh Snapshot every round.
+	slices.SortFunc(out, func(a, b Member) int { return cmp.Compare(a.ID, b.ID) })
 
 	return View{Members: out, Version: t.version}
 }
