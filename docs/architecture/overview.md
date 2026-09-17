@@ -184,13 +184,32 @@ that trade detection latency against false positives.
 | `pkg/network` | TCP listener, dialer, connection pool, read/write loops | Message *meaning* |
 | `pkg/health` | `HealthStrategy` + `LatencyHealthStrategy` | Election rules, membership |
 | `pkg/cluster` | Membership table, election math, heartbeats, failover, replication | Byte-level framing, socket details |
-| `pkg/telemetry` | Node state snapshots for the dashboard | How they are transported |
+| `pkg/telemetry` | The node's CC uplink: status to `TELEMETRY`, `TASK`/`CHAOS` dispatch | Election internals, the dashboard |
+| `pkg/controlcenter` | Hub, node server, task routing, HTTP API, WebSocket | Election internals, mesh membership |
+| `web` | Embedded dashboard assets | Everything in Go beyond `embed` |
 | `cmd/swarm-node` | Wiring, config, lifecycle, signal handling | -- |
-| `cmd/control-center` | Task broadcast, telemetry aggregation, HTTP/WS, chaos surface | Election internals |
+| `cmd/control-center` | Wiring, config, signals, `http.Server` | -- |
 
-The dependency direction is strictly downward: `cmd` -> `cluster` -> {`health`, `network`} ->
-`protocol`. `pkg/protocol` imports nothing from this repo. If that ever inverts, the abstraction
-has failed and the fix is a new interface, not an import cycle break.
+The dependency direction is strictly downward: `cmd` -> {`controlcenter`, `telemetry`} ->
+`cluster` -> {`health`, `network`} -> `protocol`. `pkg/protocol` imports nothing from this repo.
+If that ever inverts, the abstraction has failed and the fix is a new interface, not an import
+cycle break. The full graph is in [Repository Layout](./repo-layout).
+
+## Deployment
+
+```mermaid
+flowchart LR
+    DF["Dockerfile: one build stage"] --> IN["image swarm-net/node"]
+    DF --> IC["image swarm-net/control-center"]
+    IN --> SEED["service seed"]
+    IN --> NODE["service node, --scale N"]
+    IC --> CCS["service control-center, port 8080"]
+    EP["deploy/node-entrypoint.sh"] --> IN
+```
+
+`docker compose up --build` starts the CC, `seed`, and 5 replicas of `node`. Each replica derives
+a readable ID from Docker DNS. Details: [Running the Swarm](./running-the-swarm) and
+[Container Images & PID 1](/concepts/container-images-and-pid-1).
 
 ## What is deliberately not here
 
@@ -203,11 +222,15 @@ has failed and the fix is a new interface, not an import cycle break.
   for a database; the docs will say which is which.
 - **No authentication or encryption on the mesh.** The mesh is trusted because it is a private
   bridge network. Publishing any mesh port to the host would invalidate that assumption, which is
-  why `deploy/` will publish only the Control Center's HTTP port.
+  why `docker-compose.yml` publishes only the Control Center's HTTP port. The dashboard API has
+  no authentication either; it relies on the WebSocket same-origin check and on binding to a
+  trusted host.
 
 ## Where to go next
 
 - [Repository Layout](./repo-layout) -- what lives where, and why the boundaries fall there.
+- [The Control Center](./control-center) -- how telemetry, tasks and chaos flow.
+- [Running the Swarm](./running-the-swarm) -- start, scale, break, and test it.
 - [TCP Sockets & The Kernel](/concepts/tcp-sockets-and-the-kernel) -- the substrate everything
   above is built on.
 - [Stream Framing](/concepts/stream-framing) -- why "send a message" is not an operation TCP
