@@ -482,3 +482,164 @@ becomes blocking rather than merely desirable.
 | OOM as a protocol failure mode | cgroup v2 memory limits, the OOM killer, and why a process killed by the kernel cannot log the reason it died. | Phase 5 |
 
 **Anti-nomination retained:** no page on recovering a desynchronised length-prefixed stream. See section 3.3.
+
+---
+
+## 2026-09-17 -- Phase 3 Planning -- Decisions locked, debt acknowledged
+
+This entry is late. The Phase 3a build session was scoped to Go and forbidden from touching
+`docs/`, so the decisions below were taken, acted on, and left unrecorded until now. The gap is
+itself listed as debt in section 4.4. Nothing here is new to the code; it is the record catching
+up with it.
+
+### 4.1 Decisions locked with the user at the Phase 3 gate
+
+**Agent:** `system-architect`
+
+**Phase 3 split into 3a and 3b.** 3a is the socket mesh and the clustering engine; 3b is gossip
+and anti-entropy. **Rejected:** building both in one pass. Debugging gossip on an unproven
+transport means never knowing which layer is lying -- a lost delta could be a framing bug, a
+dropped queue, a dead writer goroutine, or a merge-rule error, and with both layers unverified
+there is no way to bisect. **Accepted cost:** 3a ships a mesh that only discovers peers via the
+seed list, so a live scale-up is not exercised until 3b.
+
+**Mesh topology: full mesh.** Every node holds one connection to every other node, `N^2/2`
+connections swarm-wide. This is fine for tens of nodes, which is the design envelope; nobody is
+proposing this for thousands. The property it buys is that any node can probe any node, which the
+affinity rule in the brief requires: a worker must measure RTT to *every* leader to pick the
+closest. **Rejected:** leader-only star (workers connect only to leaders, so a worker cannot
+measure affinity across leaders it is not connected to, and a leader death severs the worker from
+the swarm entirely); gossip-overlay partial mesh (each node keeps a random subset, which needs
+routing so a probe can reach a non-neighbour -- an extra subsystem in a teaching system, bought
+for a scale we do not target).
+
+**Write model: per-connection writer goroutine draining two bounded queues.** One goroutine owns
+the socket write side. It drains the control queue first and the data queue only when control is
+empty. Control sends (`HEARTBEAT`, `PING`, `PONG`, election traffic) block briefly and then report
+queue-full to the caller; data sends (`TASK`, `TELEMETRY`) are dropped on a full queue and a
+counter is incremented. **Rejected:** one unbounded channel per connection (a stalled peer turns
+the channel into an OOM primitive, per the backpressure nomination in section 1.6); direct
+synchronous writes from the caller (a stalled peer's kernel send buffer fills, `Write` blocks, and
+the blocked goroutine is whichever one called `Send` -- which is the election loop). The invariant
+this preserves: **a dead peer cannot stall the election loop.** **Accepted cost:** a caller that
+gets queue-full on a control frame has to decide what that means, and the answer differs by
+message -- a dropped `PONG` costs the peer one RTT sample, a dropped election result costs a
+round. That policy lives in `pkg/cluster`, not in `pkg/network`, and is owed as part of the
+backpressure page.
+
+**Split-brain policy: AP.** Any partition elects leaders. A node that can see fewer than a
+majority of its last-known swarm size marks itself *degraded* and says so in telemetry, but it
+keeps serving and keeps electing. There is no consensus algorithm. **Rejected:** minority
+partition halts (CP behaviour -- correct for a database, wrong for a drone swarm where a
+partitioned group of nodes with no leader is a group of nodes that has stopped coordinating);
+Raft-style term-and-log agreement (heavyweight, and this system does not replicate a log that
+needs linearisable agreement; it replicates a roster and a task ledger where the losing side of a
+merge can be re-issued). **Stated plainly:** this is not Raft. Two partitions will each hold
+leaders with overlapping worker rosters, and on heal the incarnation rule in `Table.Upsert`
+decides whose view wins per node, not whose view was "right". The documentation must say exactly
+what is given up. A page `architecture/why-not-consensus` is owed and is tracked in section 4.4.
+
+**Simultaneous-dial tie-break: lower `NodeID` wins.** When two nodes dial each other in the same
+instant, both end up with two connections to the same peer. The connection *initiated by* the
+lower `NodeID` is kept; the other is closed by whichever side notices. Deterministic from
+information both sides already hold after `HELLO`, so it needs no extra round trip and no
+coordinator. **Rejected:** keep-the-first-established (racy -- "first" differs per side, so both
+sides may keep different connections and both get closed); random (non-deterministic, unrepeatable
+in tests).
+
+```mermaid
+sequenceDiagram
+    participant A as node-a (lower NodeID)
+    participant B as node-b (higher NodeID)
+    A->>B: dial + HELLO(a)
+    B->>A: dial + HELLO(b)
+    Note over A: inbound from b, a < b so my own outbound wins
+    Note over B: inbound from a, a < b so the inbound wins
+    A-->>B: HELLO_ACK on a's outbound
+    A->>A: close inbound from b
+    B->>B: close own outbound to a
+    Note over A,B: one connection survives, initiated by a
+```
+
+**`TCPConnectProber` replaced by `MeshProber`.** The Phase 2 placeholder measured the kernel
+three-way handshake, which completes from the listen backlog with zero application involvement.
+A node in a GC pause, or with a starved scheduler, still answers a `SYN` in microseconds and would
+be elected leader while comatose. `MeshProber` sends `PING` over the established mesh connection
+and times the `PONG`, so the measurement includes the peer's reader goroutine, its scheduler, and
+its writer queue -- the things a leader actually needs to be fast at. **Rejected:** keeping the
+handshake prober with a heavier weighting on missed heartbeats (still elects the comatose node
+first, and only corrects after $K$ misses). The `Prober` seam in `pkg/health` was designed for
+exactly this swap, so `pkg/cluster` is untouched by it.
+
+### 4.2 Decisions locked with the user for Phases 4 and 5
+
+**Agent:** `system-architect`
+
+Taken on 2026-09-17, ahead of their phases, because each one shapes a Phase 3 contract.
+
+| Decision | Choice | Rejected | Accepted cost |
+|---|---|---|---|
+| WebSocket library | `github.com/coder/websocket` (formerly `nhooyr.io/websocket`) | `golang.org/x/net/websocket` (unmaintained API, no context support); hand-rolled RFC 6455 | One external dependency, against the stdlib-first rule. A hand-rolled server is ~250 lines of masking and close-handshake code that teaches nothing this curriculum needs. |
+| Chaos controls | In-process, via a `CHAOS` control message from the Control Center: `kill` exits the process so Compose restarts it as a new incarnation, `delay` adds artificial latency to `PONG` and `HEARTBEAT` replies, `clear` removes it | Mounting the Docker socket into the Control Center | `kill` is cooperative, so it cannot simulate a node that is wedged and ignoring messages. The Docker-socket route was rejected because it is a privileged mount, Docker-only, and breaks the plain `go run` path. |
+| Replication content | Leaders replicate term + attached-worker roster + a bounded task ledger to workers via a `STATE_SYNC` full snapshot. On promotion, the worker's last snapshot becomes the new leader's ledger and pending tasks are re-issued once | Roster-only | In-flight task bookkeeping survives failover at the cost of at-least-once task delivery: a task completed between the last snapshot and the failover will be re-issued. Roster-only was rejected because it loses that bookkeeping outright. |
+| Gossip design (3b) | Push `MEMBERSHIP_DELTA` to all connected peers on every local table change, plus periodic anti-entropy: the full view sent as a delta to one random peer per interval. Merge is the existing incarnation rule in `Table.Upsert`, so a full view is just a large delta | A CRDT beyond incarnation numbers; SWIM-style piggybacking on heartbeats | Convergence is eventual, not bounded. Push-on-change gives fast propagation in the common case; anti-entropy repairs the case where a push was dropped by the data queue. No new merge machinery. |
+| Control Center topology | Every node dials the Control Center (`SWARM_CONTROL_CENTER` env), completes `HELLO`, then sends periodic `TELEMETRY`. Tasks flow CC -> leaders -> attached workers; results flow back up the same path | CC dials nodes (needs CC to know addresses, which is the gossip problem again); CC as a mesh member (couples the coordinator to election) | The CC is a hub for telemetry and a single point of task ingress. Its loss stops new tasks but not the swarm: election and heartbeats never traverse it. |
+
+### 4.3 Two defects found by tests during the 3a partial build
+
+**Agent:** `go-engineer` * **Verification:** both pinned by named tests, `go test -race` clean.
+
+Both were found by tests, not by review, and in both cases that was not luck: the defect was in
+a branch that reads correctly and only misbehaves under scheduling the reader cannot see.
+
+**1. `Conn.Send` accepted frames after `Close`.** `Send` offered the frame to its queue inside a
+`select` that also watched the done channel. Go's `select` picks *at random* among ready cases,
+so once done was closed and the queue had space, the send case won roughly half the time and a
+closed connection reported success for bytes that could never be written. Review passes over
+this because the `select` looks like the textbook shutdown idiom, and it is -- the idiom just
+does not promise priority. **Fix:** an explicit closed-check before the frame is offered to any
+queue, so a definitely-closed connection rejects deterministically with `ErrConnClosed`.
+**Pinned by** `TestCloseIsIdempotentAndUnblocksEverything` in `pkg/network/conn_test.go`, which
+asserts `ErrConnClosed` after `Close`. A single run would pass half the time; the test caught it
+because it ran under `-race` and `-count` in the hardening pass and flaked.
+
+**2. A role change could resurrect a dead node.** In `Table.Upsert`, a record arriving at *equal*
+incarnation with a different role took the "apply the whole record" branch, and the whole record
+carried the sender's stale `alive` state. A late `MEMBERSHIP_DELTA` saying "node-x is now a
+leader" from a peer that had not yet heard node-x was dead would flip node-x back to alive at the
+same incarnation, violating the rule that state at equal incarnation only worsens. Review misses
+this because the role-change branch is about roles and nobody reads it as touching liveness.
+**Fix:** clamp state first, then compare role and address, so the state monotonicity rule is
+applied before any other field is considered. **Pinned by**
+`TestRoleChangeCannotResurrectADeadNode` and `TestAtEqualIncarnationStateOnlyWorsens` in
+`pkg/cluster/member_test.go`; the test exists because the invariant was written down as a
+sentence in the plan and the engineer turned every sentence into a test.
+
+**Recorded because it is the argument for the test-coverage rule.** Neither defect would have
+produced a wrong answer often enough to be noticed in a demo. Both would have surfaced in
+production as an unexplained election of a dead node.
+
+### 4.4 Documentation debt acknowledged
+
+Carried from `STATE.md` so it is in the decision record, not only in a handover note.
+
+| Debt | Status | Owed by |
+|---|---|---|
+| No Phase 3 worklog entry | **Paid** by this entry. Sections 4.1 and 4.2 record the decisions, 4.3 the defects. | -- |
+| `architecture/why-not-consensus` -- the honest Raft/Paxos comparison promised by `docs/architecture/overview.md`, stating exactly what the AP policy in 4.1 gives up | Not written | `doc-educator`, before the Phase 3 review gate |
+| Concept pages written before `pkg/network` and `pkg/cluster` existed still state forward commitments rather than `file.go:NN` citations | Not promoted. The standing constraint from section 1.6 holds: every citation is verified with `grep -n` at the moment it is written. | `doc-educator`, after 3a lands and the files stop moving |
+| `TCPConnectProber` is still the default prober, and it measures the wrong thing (see 4.1) | `MeshProber` not yet written. Until it lands, any election is driven by kernel handshake time rather than application responsiveness. | `go-engineer`, 3a |
+
+### 4.5 Syllabus additions triggered by these decisions
+
+Nominated for `doc-educator`. Rows already in the backlog (sections 1.6, 2.5, 3.6) are not
+repeated; these are new.
+
+| Nominated concept | Why | Needed by |
+|---|---|---|
+| CAP in practice: what an AP membership service actually promises | The split-brain policy in 4.1 is an AP choice made deliberately. The page must explain availability under partition, degraded mode, and why "both sides elect" is the intended behaviour and not a bug. Pairs with `why-not-consensus`. | Phase 3 |
+| Symmetry breaking in distributed protocols | The lower-`NodeID` tie-break is one instance of a general pattern: resolving a symmetric race using information both sides already hold. Also underlies leader ranking ties. | Phase 3 |
+| `select` fairness and shutdown ordering | Defect 1 in 4.3. Random case selection is documented behaviour, and the idiom that looks like it gives priority to a done channel does not. | Phase 3 |
+| Monotonic merge rules and the incarnation number | Defect 2 in 4.3. Why a merge must apply the monotone field first, and why "state only worsens at equal incarnation" is the whole correctness argument for gossip in 3b. | Phase 3 |
+| At-least-once task delivery and idempotent re-issue | The replication choice in 4.2 re-issues pending tasks on promotion. What a worker must do to make a duplicate harmless. | Phase 4 |
+| Cooperative vs uncooperative failure injection | The `CHAOS` message can kill and delay but cannot wedge. What that leaves untested, and how a reader would test it outside Compose. | Phase 5 |

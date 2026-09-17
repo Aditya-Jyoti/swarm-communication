@@ -57,10 +57,15 @@ type Result struct {
 
 // LeaderCount implements LeaderCount = max(1, ceil(N * threshold)).
 //
-// The max(1, ...) is what guarantees a swarm of any size has someone in charge: with
-// threshold 0.3, a 2-node swarm would otherwise round down to zero leaders and stall
-// permanently. The result is also capped at n, because electing more leaders than
-// there are nodes is not a thing.
+// The ceiling is what guarantees a swarm of any size has someone in charge: for any
+// n >= 1 and threshold > 0, ceil(n * threshold) is already at least 1 (a 2-node swarm
+// at 0.3 gives ceil(0.6) = 1, not 0). The max(1, ...) floor is therefore belt and
+// braces: it only bites when the product is exactly zero, and the guards above
+// (n <= 0 returns early, an out-of-range threshold falls back to the default) make
+// that unreachable. It stays because the formula is stated in the brief with the
+// floor, and because a future change to the guards must not be able to produce a
+// leaderless swarm. The result is also capped at n, because electing more leaders
+// than there are nodes is not a thing.
 func LeaderCount(n int, threshold float64) int {
 	if n <= 0 {
 		return 0

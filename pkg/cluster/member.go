@@ -4,6 +4,7 @@ import (
 	"sort"
 	"sync"
 
+	"swarm-net/pkg/health"
 	"swarm-net/pkg/protocol"
 )
 
@@ -79,6 +80,11 @@ type Member struct {
 	// node's own claim about itself defeat a stale rumour that it is dead, which is
 	// what stops membership oscillating between "alive" and "dead" forever.
 	Incarnation int64
+	// Score is the member's SELF-REPORTED health cost, learned from gossip, and
+	// the input election ranks on. NaN means no report yet. It is not this node's
+	// measurement of the member: a measured round trip is observer-relative and
+	// feeding it to Elect gives every node a different answer. See node.go.
+	Score float64
 }
 
 // View is an immutable snapshot of membership.
@@ -113,6 +119,17 @@ func (v View) Get(id protocol.NodeID) (Member, bool) {
 		}
 	}
 	return Member{}, false
+}
+
+// Scores returns each member's self-reported score keyed by ID, which is the map
+// Elect consumes. Members with no report are present as NaN so that "unreported"
+// and "absent" are the same thing to the ranking: ineligible.
+func (v View) Scores() map[protocol.NodeID]float64 {
+	out := make(map[protocol.NodeID]float64, len(v.Members))
+	for _, m := range v.Members {
+		out[m.ID] = m.Score
+	}
+	return out
 }
 
 // Leaders returns the IDs currently marked as leaders, in sorted order.
@@ -187,7 +204,13 @@ func (t *Table) Upsert(m Member) bool {
 		if m.State < existing.State {
 			m.State = existing.State
 		}
-		if m.State == existing.State && m.Role == existing.Role && m.Addr == existing.Addr {
+		// A record with no score is silent about the score, not a claim that
+		// it is unknown: a relayed rumour from a peer that has not heard the
+		// member's report must not erase the report we already hold.
+		if !health.IsValidScore(m.Score) {
+			m.Score = existing.Score
+		}
+		if m.State == existing.State && m.Role == existing.Role && m.Addr == existing.Addr && sameScore(m.Score, existing.Score) {
 			return false
 		}
 	}
@@ -195,6 +218,31 @@ func (t *Table) Upsert(m Member) bool {
 	t.members[m.ID] = m
 	t.version++
 	return true
+}
+
+// SetScore records a member's self-reported score without touching liveness,
+// role or incarnation. Used for this node's own record after each probe round.
+func (t *Table) SetScore(id protocol.NodeID, score float64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	m, ok := t.members[id]
+	if !ok || sameScore(m.Score, score) {
+		return false
+	}
+	m.Score = score
+	t.members[id] = m
+	t.version++
+	return true
+}
+
+// sameScore is equality that treats two invalid scores as equal, so a NaN
+// re-applied over a NaN is a no-op rather than a version bump every round.
+func sameScore(a, b float64) bool {
+	if !health.IsValidScore(a) && !health.IsValidScore(b) {
+		return true
+	}
+	return a == b
 }
 
 // SetRole records a role change without touching liveness or incarnation.
@@ -222,6 +270,36 @@ func (t *Table) SetState(id protocol.NodeID, s State) bool {
 		return false
 	}
 	m.State = s
+	t.members[id] = m
+	t.version++
+	return true
+}
+
+// Revive records first-hand evidence that a member is alive: a completed
+// handshake with it, at the given incarnation. It reports whether anything
+// changed.
+//
+// Upsert alone cannot do this. Its equal-incarnation rule says liveness only
+// worsens, which is right for rumours -- a peer that has not heard the news must
+// not talk a dead node back to life -- but a handshake is not a rumour. A node
+// that dropped (SIGKILL, partition) and came back at the same incarnation would
+// otherwise stay dead in every table forever, and self-healing would be a
+// one-way door. The guard is that the evidence must be at least as new as what
+// the table holds: a stale PeerUp (an old socket registering late) cannot
+// resurrect a node that has since died at a higher incarnation.
+func (t *Table) Revive(id protocol.NodeID, incarnation int64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	m, ok := t.members[id]
+	if !ok || incarnation < m.Incarnation {
+		return false
+	}
+	if m.State == StateAlive && m.Incarnation == incarnation {
+		return false
+	}
+	m.State = StateAlive
+	m.Incarnation = incarnation
 	t.members[id] = m
 	t.version++
 	return true

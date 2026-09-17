@@ -417,8 +417,8 @@ capability without the node image doing so.
 
 ## Why It Matters in This Swarm
 
-No Go code exists yet; what follows are commitments that `pkg/network/`, `pkg/cluster/` and
-`deploy/` will have to honour.
+`pkg/network` now exists and its commitments below are cited to the code. Those for
+`pkg/cluster/`, `cmd/` and `deploy/` remain commitments.
 
 **`deploy/docker-compose.yml` will declare one explicit user-defined bridge, never the default.**
 The entire peer-discovery design rests on DNS-by-container-name. Falling back to `docker0` removes
@@ -432,9 +432,11 @@ reachable through DNAT. Every `cmd/swarm-node/` instance will use `expose`-style
 only. The reasoning is in "Published ports vs the container port" above: publishing the mesh port
 would add a `docker-proxy` hop into exactly the path `pkg/health/` is trying to measure.
 
-**`pkg/network/` will store peers as `name:port` strings and resolve at dial time -- never cache a
-resolved `net.IP`.** This is the most important commitment on the page and it follows directly from
-the chaos requirement. The sequence that breaks a caching implementation:
+**`pkg/network/` stores peers as `name:port` strings and resolves at dial time -- never a cached
+`net.IP`.** `NodeAddress` is a string, and `dialOnce` passes it to `DialContext` on every attempt
+(`pkg/network/dial.go:108`); the rationale is stated in the code at `pkg/network/dial.go:105`.
+This is the most important commitment on the page and it follows directly from the chaos
+requirement. The sequence that breaks a caching implementation:
 
 ```
   t0   swarm-node-3 is at 172.28.0.5. Peer table caches net.IPv4(172,28,0,5).
@@ -455,11 +457,12 @@ the chaos requirement. The sequence that breaks a caching implementation:
 Note the asymmetry with the failure it is *not*: a dial to a live host with nothing listening gets
 `ECONNREFUSED` in microseconds. A dial to a dead IP on a bridge gets silence and a two-minute
 timeout. So the concrete commitments are: `pkg/network/` dials by name on every attempt, and every
-dial uses `net.Dialer{Timeout: ...}` or a `DialContext` with a deadline far shorter than the kernel
-default.
+dial uses a `DialContext` bounded by `HandshakeTimeout`, 3 s by default
+(`pkg/network/dial.go:107`), far shorter than the kernel default.
 
 ```go
-// pkg/network -- the shape the dialer will take.
+// The shape of the dialer. The shipped call is pkg/network/dial.go:108, where the
+// timeout comes from context.WithTimeout rather than net.Dialer.Timeout.
 // Name, not address: DNS is re-consulted on every attempt, so a peer that
 // has been killed and restarted with a fresh IP is found immediately.
 func dialPeer(ctx context.Context, name string, port int) (net.Conn, error) {
@@ -528,8 +531,10 @@ This is not merely a Docker quirk -- it is exactly what namespace isolation mean
 *Symptom:* `ECONNREFUSED` immediately, not a timeout. *Cause:* the container exists and its IP is
 right, but the process inside has not yet bound its listener. This is *startup ordering*, and
 `depends_on` does not fix it -- `depends_on` waits for the container to start, not for the service
-inside it to be ready. *Fix:* dial with retry and backoff in `pkg/network/`, and treat
-`ECONNREFUSED` during startup as normal rather than as a health signal. Distinguish it in code:
+inside it to be ready. *Fix:* the jittered exponential redial in `pkg/network/`
+(`pkg/network/dial.go:23`, explained in
+[Backoff & Connection Storms](./backoff-and-connection-storms)), and treating `ECONNREFUSED`
+during startup as normal rather than as a health signal. Distinguish it in code:
 
 ```go
 var sysErr *os.SyscallError

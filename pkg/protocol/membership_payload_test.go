@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 )
@@ -22,8 +24,8 @@ func TestMembershipPayloadsRoundTripThroughFraming(t *testing.T) {
 			payload: MembershipDeltaPayload{
 				ViewVersion: 42,
 				Members: []MemberRecord{
-					{ID: "node-1", Advertise: "node-1:7946", Incarnation: 3, Role: "leader", State: "alive"},
-					{ID: "node-2", Advertise: "node-2:7946", Incarnation: 1, Role: "worker", State: "suspect"},
+					{ID: "node-1", Advertise: "node-1:7946", Incarnation: 3, Role: "leader", State: "alive", Score: 1.25},
+					{ID: "node-2", Advertise: "node-2:7946", Incarnation: 1, Role: "worker", State: "suspect", Score: UnmeasuredScore},
 				},
 			},
 			decode: func(e *Envelope) (any, error) { return PayloadOf[MembershipDeltaPayload](e) },
@@ -108,5 +110,59 @@ func TestMembershipDeltaWithNoMembersIsLegal(t *testing.T) {
 	}
 	if got.ViewVersion != 1 {
 		t.Errorf("ViewVersion = %d, want 1", got.ViewVersion)
+	}
+}
+
+// A self-reported score that is NaN or Inf cannot be carried by JSON; the
+// sanitiser must turn it into the unmeasured sentinel rather than fail the
+// encode, and a receiver must read it back as unmeasured.
+func TestMemberRecordScoreSanitisedOnTheWire(t *testing.T) {
+	tests := []struct {
+		name     string
+		score    float64
+		wantWire float64
+		measured bool
+	}{
+		{"finite", 2.5, 2.5, true},
+		{"zero", 0, 0, true},
+		{"NaN", math.NaN(), UnmeasuredScore, false},
+		{"+Inf", math.Inf(1), UnmeasuredScore, false},
+		{"-Inf", math.Inf(-1), UnmeasuredScore, false},
+		{"negative", -7, UnmeasuredScore, false},
+		{"sentinel", UnmeasuredScore, UnmeasuredScore, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := mustEnvelope(t, TypeMembershipDelta, "node-1", "", MembershipDeltaPayload{
+				Members: []MemberRecord{{ID: "node-1", Score: tt.score}},
+			})
+			var buf bytes.Buffer
+			if err := NewEncoder(&buf).WriteEnvelope(env); err != nil {
+				t.Fatalf("WriteEnvelope: %v", err)
+			}
+			got, err := NewDecoder(&buf).ReadFrame()
+			if err != nil {
+				t.Fatalf("ReadFrame: %v", err)
+			}
+			p, err := PayloadOf[MembershipDeltaPayload](got)
+			if err != nil {
+				t.Fatalf("PayloadOf: %v", err)
+			}
+			if p.Members[0].Score != tt.wantWire {
+				t.Errorf("wire score = %v, want %v", p.Members[0].Score, tt.wantWire)
+			}
+			if p.Members[0].Measured() != tt.measured {
+				t.Errorf("Measured = %v, want %v", p.Members[0].Measured(), tt.measured)
+			}
+		})
+	}
+
+	// Measured on a value that never touched the wire still rejects NaN/Inf.
+	if (MemberRecord{Score: math.NaN()}).Measured() || (MemberRecord{Score: math.Inf(1)}).Measured() {
+		t.Error("Measured accepted NaN or Inf")
+	}
+	// The sanitiser also protects the larger payloads that embed MemberRecord.
+	if _, err := json.Marshal(TelemetryPayload{Peers: []MemberRecord{{ID: "x", Score: math.NaN()}}}); err != nil {
+		t.Errorf("TelemetryPayload with a NaN member score failed to marshal: %v", err)
 	}
 }

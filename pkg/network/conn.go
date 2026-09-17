@@ -175,6 +175,10 @@ type Conn struct {
 	// to close cannot double-close it.
 	done      chan struct{}
 	closeOnce sync.Once
+	// writerDone is closed by writeLoop on exit. done alone does not prove the
+	// writer has stopped touching the queues: it can dequeue a frame after done
+	// closes and lose it on the closed socket. drainUnsent waits on this.
+	writerDone chan struct{}
 
 	// dropped counts shed data-plane frames. Atomic because it is written by
 	// senders on arbitrary goroutines and read by telemetry.
@@ -208,6 +212,8 @@ func NewConn(peer protocol.NodeID, raw net.Conn, h Handler, cfg ConnConfig) *Con
 		ctrl: make(chan *protocol.Envelope, cfg.CtrlDepth),
 		data: make(chan *protocol.Envelope, cfg.DataDepth),
 		done: make(chan struct{}),
+
+		writerDone: make(chan struct{}),
 	}
 	go c.readLoop(h)
 	go c.writeLoop()
@@ -301,6 +307,38 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// drainUnsent returns every frame that was queued but never handed to the socket,
+// control frames first. It blocks until the writer goroutine has exited: only then
+// is nothing else receiving from the queues, so the non-blocking receives below
+// see exactly what was left. Waiting on done would not be enough -- the writer can
+// dequeue one more frame after done closes and fail to write it.
+//
+// The pool uses this when it replaces a connection with a better one to the same
+// peer, so a caller's frame is not silently lost in the swap. A frame the writer
+// had already dequeued (whether or not the write then failed) is not recoverable
+// and is not returned.
+func (c *Conn) drainUnsent() []*protocol.Envelope {
+	<-c.writerDone
+	var out []*protocol.Envelope
+	for drained := false; !drained; {
+		select {
+		case env := <-c.ctrl:
+			out = append(out, env)
+		default:
+			drained = true
+		}
+	}
+	for drained := false; !drained; {
+		select {
+		case env := <-c.data:
+			out = append(out, env)
+		default:
+			drained = true
+		}
+	}
+	return out
+}
+
 // closeWith records why the connection ended, then closes it. Only the reader
 // goroutine calls this, so the unsynchronised writes to disposition and closeErr
 // happen before close(done) and are safely published by it.
@@ -350,6 +388,7 @@ func (c *Conn) readLoop(h Handler) {
 // priority: the outer non-blocking attempt on ctrl runs first, and only when ctrl is
 // empty does the inner select allow a data frame through.
 func (c *Conn) writeLoop() {
+	defer close(c.writerDone)
 	for {
 		select {
 		case <-c.done:
