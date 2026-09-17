@@ -486,11 +486,17 @@ func TestTasksRoundRobinAndFirstResultWins(t *testing.T) {
 	a.send(protocol.TypeTaskResult, protocol.TaskResultPayload{TaskID: "t-1", Worker: "node-w", OK: false, Output: "dup"})
 	a.send(protocol.TypeTaskResult, protocol.TaskResultPayload{TaskID: "t-99", OK: true})
 	z.send(protocol.TypeTaskResult, protocol.TaskResultPayload{TaskID: "t-2", OK: false, Output: "boom"})
-	if e := b.event(EventTaskDone, "node-w"); e.Detail != "t-1 ok" {
-		t.Fatalf("task_done = %+v", e)
-	}
-	if e := b.event(EventTaskDone, "node-z"); e.Detail != "t-2 failed" {
-		t.Fatalf("task_done = %+v", e)
+	// The two nodes' frames arrive on different reader goroutines, so their
+	// events may be emitted in either order.
+	done := map[protocol.NodeID]string{}
+	b.until("both task_done events", func(m wsMsg, _ []byte) bool {
+		if m.Type == TypeEvent && m.Kind == EventTaskDone {
+			done[m.Node] = m.Detail
+		}
+		return len(done) == 2
+	})
+	if done["node-w"] != "t-1 ok" || done["node-z"] != "t-2 failed" {
+		t.Fatalf("task_done events = %v", done)
 	}
 
 	s := getState(t, cc)
