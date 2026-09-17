@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"sync"
 
@@ -289,7 +290,29 @@ func (t *Table) SetRole(id protocol.NodeID, r Role) bool {
 	return true
 }
 
-// SetState records a liveness change at the member's current incarnation.
+// SetState records a liveness change. A transition to StateDead also advances
+// the member's incarnation by one; every other transition keeps it.
+//
+// # Why a death bumps the incarnation
+//
+// Recorded at the member's current incarnation, "B dead at 6" is the strongest
+// thing an observer can say, and it loses to "B alive at 7" -- a refutation B
+// sent just before it was killed, still sitting in our inbound queue behind the
+// PeerDown that reported the kill. Upsert's higher-incarnation rule applies the
+// refutation, B is resurrected, and under anti-entropy every node holding
+// "alive at 7" re-asserts it forever. Recording "dead at 7" instead makes the
+// queued refutation an equal-incarnation record, where state only worsens, so
+// the death wins.
+//
+// The cost is paid by a peer that really is alive (a partition, not a crash):
+// its own handshake at the old incarnation no longer revives it (see Revive).
+// That is the intended shape, not a regression: the view we send it on
+// reconnect carries "dead at 7", it refutes at 8, and its announcement wins
+// everywhere. Self-healing still happens, through the one path -- the node
+// speaking about itself -- that cannot be confused with a stale rumour.
+//
+// Only the dead transition bumps. Suspect (Phase 4) is a doubt, not a verdict,
+// and must stay refutable by the member at the incarnation it already holds.
 func (t *Table) SetState(id protocol.NodeID, s State) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -299,9 +322,28 @@ func (t *Table) SetState(id protocol.NodeID, s State) bool {
 		return false
 	}
 	m.State = s
+	if s == StateDead {
+		m.Incarnation = NextIncarnation(m.Incarnation)
+	}
 	t.members[id] = m
 	t.version++
 	return true
+}
+
+// NextIncarnation returns inc+1, saturating at math.MaxInt64.
+//
+// Incarnations arrive from peers and Phase 3a has no authentication, so a
+// corrupt or hostile record can carry math.MaxInt64. A plain +1 would wrap to
+// math.MinInt64, and a negative incarnation loses every merge it takes part in:
+// a node's refutation would be ignored by the whole swarm. Saturating keeps the
+// order monotonic. At the ceiling a dead record can no longer be out-bumped,
+// which leaves that one member stuck until it restarts under a new ID or
+// incarnation source; that is a far smaller failure than an ordering that wraps.
+func NextIncarnation(inc int64) int64 {
+	if inc == math.MaxInt64 {
+		return inc
+	}
+	return inc + 1
 }
 
 // Revive records first-hand evidence that a member is alive: a completed
@@ -316,6 +358,13 @@ func (t *Table) SetState(id protocol.NodeID, s State) bool {
 // one-way door. The guard is that the evidence must be at least as new as what
 // the table holds: a stale PeerUp (an old socket registering late) cannot
 // resurrect a node that has since died at a higher incarnation.
+//
+// Since SetState records a death one incarnation past the member's own, a
+// handshake at the incarnation the member had when it died is exactly such
+// stale evidence and is refused. That case heals through refutation instead:
+// the full view sent on PeerUp carries the death, the member bumps past it and
+// announces. Revive still covers a handshake at a newer incarnation, and a
+// suspect (Phase 4) record, which is held at the member's own incarnation.
 func (t *Table) Revive(id protocol.NodeID, incarnation int64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -708,30 +708,42 @@ func TestPeerDownFailureTriggersReelection(t *testing.T) {
 	}
 }
 
-func TestPeerReconnectAtSameIncarnationRevives(t *testing.T) {
-	h := threeNodes(t, "node-a")
-	requireIDs(t, "Leaders", h.status().Leaders, ids("node-b"))
+// A peer that dropped and reconnected at its old incarnation (a partition, not a
+// restart) is NOT revived by its handshake: the death was recorded one
+// incarnation past it (HIGH-2). It heals through the refutation path instead --
+// the view we send on reconnect tells it "you are dead at 2", it bumps to 3 and
+// announces, and that first-hand record wins. The peer here is a real Node, so
+// the refutation is the production refuteIfNeeded, not a hand-built frame.
+func TestPeerReconnectAtOldIncarnationHealsByRefutation(t *testing.T) {
+	a := threeNodes(t, "node-a")
+	requireIDs(t, "Leaders", a.status().Leaders, ids("node-b"))
 
-	h.peerDown("node-b", network.DispositionPeerDied)
-	st := h.status()
-	if m, _ := st.View.Get("node-b"); m.State != StateDead {
-		t.Fatalf("node-b = %+v, want dead", m)
+	b := newHarness(t, "node-b", func(c *NodeConfig) { c.Incarnation = 1 })
+	b.hs.set(addrOf("node-a"), 1.0)
+	b.peerUp("node-a", 1)
+	b.probeRound() // node-b now reports 1.0 about itself
+
+	a.peerDown("node-b", network.DispositionPeerDied)
+	st := a.status()
+	if m, _ := st.View.Get("node-b"); m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("node-b = %+v, want dead at 2", m)
 	}
 	requireIDs(t, "Leaders after death", st.Leaders, ids("node-a"))
 
-	// Same incarnation: the container was partitioned, not restarted.
-	h.peerUp("node-b", 1)
-	st = h.status()
-	m, _ := st.View.Get("node-b")
-	if m.State != StateAlive || m.Incarnation != 1 {
-		t.Fatalf("node-b after reconnect = %+v, want alive at 1", m)
+	// Same incarnation: the container was partitioned, not restarted. The
+	// handshake is older than the death, so it does not revive.
+	a.peerUp("node-b", 1)
+	if m, _ := a.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("node-b after stale handshake = %+v, want still dead at 2", m)
 	}
-	// The newcomer is handed our full view so it can refute anything stale.
-	views := h.tr.sentOf(protocol.TypeMembershipDelta)
+
+	// The reconnecting peer is handed our full view, which carries its death.
+	views := a.tr.sentOf(protocol.TypeMembershipDelta)
 	if len(views) == 0 || views[len(views)-1].to != "node-b" {
 		t.Fatalf("no view sent to the reconnecting peer: %+v", views)
 	}
-	p, err := protocol.PayloadOf[protocol.MembershipDeltaPayload](views[len(views)-1].env)
+	welcome := views[len(views)-1].env
+	p, err := protocol.PayloadOf[protocol.MembershipDeltaPayload](welcome)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -739,9 +751,29 @@ func TestPeerReconnectAtSameIncarnationRevives(t *testing.T) {
 		t.Fatalf("view carried %d members, want 3", len(p.Members))
 	}
 
+	// node-b hears it is dead at 2, refutes at 3, and announces.
+	before := len(b.tr.broadcastOf(protocol.TypeMembershipDelta))
+	b.node.Handler()("node-a", welcome)
+	b.settle()
+	if got := b.status().Incarnation; got != 3 {
+		t.Fatalf("node-b incarnation = %d after refuting, want 3", got)
+	}
+	anns := b.tr.broadcastOf(protocol.TypeMembershipDelta)
+	if len(anns) != before+1 {
+		t.Fatalf("node-b announcements = %d, want %d", len(anns), before+1)
+	}
+
+	// The refutation reaches node-a and wins.
+	a.node.Handler()("node-b", anns[len(anns)-1])
+	a.settle()
+	m, _ := a.status().View.Get("node-b")
+	if m.State != StateAlive || m.Incarnation != 3 {
+		t.Fatalf("node-b after refutation = %+v, want alive at 3", m)
+	}
+
 	// Probed and electable again.
-	h.probeRound()
-	st = h.status()
+	a.probeRound()
+	st = a.status()
 	if got := st.Scores["node-b"]; got != 1.0 {
 		t.Fatalf("node-b not probed after revive: score=%v", got)
 	}
@@ -751,13 +783,38 @@ func TestPeerReconnectAtSameIncarnationRevives(t *testing.T) {
 	}
 }
 
+// HIGH-2, the STATE.md interleaving at node level: node-b's refutation ("alive
+// at 7") is queued behind the PeerDown that reports its death. Whichever order
+// the loop takes them in, node-b ends dead -- before the fix, death-first
+// recorded "dead at 6" and the refutation resurrected it.
+func TestQueuedRefutationCannotResurrectAfterDeath(t *testing.T) {
+	t.Run("death processed first", func(t *testing.T) {
+		h := newHarness(t, "node-a", nil)
+		h.peerUp("node-b", 6)
+		h.peerDown("node-b", network.DispositionPeerDied)
+		h.report("node-b", 7, 1.0)
+		if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 7 {
+			t.Fatalf("node-b = %+v, want dead at 7", m)
+		}
+	})
+	t.Run("refutation processed first", func(t *testing.T) {
+		h := newHarness(t, "node-a", nil)
+		h.peerUp("node-b", 6)
+		h.report("node-b", 7, 1.0)
+		h.peerDown("node-b", network.DispositionPeerDied)
+		if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 8 {
+			t.Fatalf("node-b = %+v, want dead at 8", m)
+		}
+	})
+}
+
 func TestStalePeerUpCannotResurrectNewerDeath(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 5)
-	h.peerDown("node-b", network.DispositionTimeout)
-	h.peerUp("node-b", 3) // an old socket registering late
-	if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 5 {
-		t.Fatalf("node-b = %+v, want still dead at 5", m)
+	h.peerDown("node-b", network.DispositionTimeout) // dead at 6
+	h.peerUp("node-b", 3)                            // an old socket registering late
+	if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 6 {
+		t.Fatalf("node-b = %+v, want still dead at 6", m)
 	}
 }
 

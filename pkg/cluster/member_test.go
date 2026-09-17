@@ -175,6 +175,89 @@ func TestSetRoleAndSetState(t *testing.T) {
 	}
 }
 
+// HIGH-2: a death is recorded one incarnation past what the member last said
+// about itself, so it outranks a refutation that was already in flight.
+func TestSetStateDeadBumpsIncarnation(t *testing.T) {
+	tbl := NewTable()
+	tbl.Upsert(Member{ID: "node-1", Incarnation: 6, State: StateAlive})
+
+	if !tbl.SetState("node-1", StateDead) {
+		t.Fatal("SetState(dead) reported no change")
+	}
+	m, _ := tbl.Snapshot().Get("node-1")
+	if m.State != StateDead || m.Incarnation != 7 {
+		t.Fatalf("member = %+v, want dead at 7", m)
+	}
+	// A second death is a no-op: the incarnation must not creep on repeats, or
+	// two observers of one crash would disagree about its number.
+	if tbl.SetState("node-1", StateDead) {
+		t.Fatal("a repeated death reported a change")
+	}
+	if m, _ := tbl.Snapshot().Get("node-1"); m.Incarnation != 7 {
+		t.Fatalf("Incarnation = %d after a repeated death, want 7", m.Incarnation)
+	}
+}
+
+func TestSetStateSuspectKeepsIncarnation(t *testing.T) {
+	tbl := NewTable()
+	tbl.Upsert(Member{ID: "node-1", Incarnation: 6, State: StateAlive})
+	tbl.SetState("node-1", StateSuspect)
+	if m, _ := tbl.Snapshot().Get("node-1"); m.Incarnation != 6 {
+		t.Fatalf("Incarnation = %d after suspect, want 6", m.Incarnation)
+	}
+}
+
+// The STATE.md interleaving at table level: B refuted a rumour with "alive at 7",
+// then died; the death is recorded first, the queued refutation arrives second.
+func TestRefutationAtOldIncarnationLosesToDeath(t *testing.T) {
+	tbl := NewTable()
+	tbl.Upsert(Member{ID: "node-b", Incarnation: 6, State: StateAlive})
+	tbl.SetState("node-b", StateDead) // dead at 7
+
+	if tbl.Upsert(Member{ID: "node-b", Incarnation: 7, State: StateAlive}) {
+		t.Fatal("a refutation at the death's incarnation was applied")
+	}
+	if m, _ := tbl.Snapshot().Get("node-b"); m.State != StateDead || m.Incarnation != 7 {
+		t.Fatalf("member = %+v, want dead at 7", m)
+	}
+}
+
+func TestRefutationAtHigherIncarnationBeatsDeath(t *testing.T) {
+	tbl := NewTable()
+	tbl.Upsert(Member{ID: "node-b", Incarnation: 6, State: StateAlive})
+	tbl.SetState("node-b", StateDead) // dead at 7
+
+	if !tbl.Upsert(Member{ID: "node-b", Incarnation: 8, State: StateAlive}) {
+		t.Fatal("a refutation past the death was rejected")
+	}
+	if m, _ := tbl.Snapshot().Get("node-b"); m.State != StateAlive || m.Incarnation != 8 {
+		t.Fatalf("member = %+v, want alive at 8", m)
+	}
+}
+
+func TestSetStateDeadSaturatesIncarnation(t *testing.T) {
+	tbl := NewTable()
+	tbl.Upsert(Member{ID: "node-1", Incarnation: math.MaxInt64, State: StateAlive})
+	tbl.SetState("node-1", StateDead)
+	m, _ := tbl.Snapshot().Get("node-1")
+	if m.State != StateDead || m.Incarnation != math.MaxInt64 {
+		t.Fatalf("member = %+v, want dead at MaxInt64 (clamped, not wrapped)", m)
+	}
+}
+
+func TestNextIncarnation(t *testing.T) {
+	for _, tt := range []struct{ in, want int64 }{
+		{0, 1},
+		{41, 42},
+		{math.MaxInt64 - 1, math.MaxInt64},
+		{math.MaxInt64, math.MaxInt64},
+	} {
+		if got := NextIncarnation(tt.in); got != tt.want {
+			t.Errorf("NextIncarnation(%d) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestRemove(t *testing.T) {
 	tbl := NewTable()
 	tbl.Upsert(Member{ID: "node-1", Incarnation: 1})
