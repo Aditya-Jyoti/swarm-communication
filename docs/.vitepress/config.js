@@ -36,7 +36,8 @@ export default withMermaid(defineConfig({
         items: [
           { text: 'System Overview', link: '/architecture/overview' },
           { text: 'Repository Layout', link: '/architecture/repo-layout' },
-          { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' }
+          { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
+          { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' }
         ]
       },
       {
@@ -48,7 +49,11 @@ export default withMermaid(defineConfig({
           { text: 'io.Reader, io.Writer & ReadFull', link: '/concepts/io-reader-writer-contracts' },
           { text: 'Wire Protocol Design', link: '/concepts/wire-protocol-design' },
           { text: 'epoll, select & Non-Blocking I/O', link: '/concepts/nonblocking-io-and-epoll' },
-          { text: 'Docker Bridge Networking', link: '/concepts/docker-bridge-networking' }
+          { text: 'Docker Bridge Networking', link: '/concepts/docker-bridge-networking' },
+          { text: 'TCP Teardown & Half-Open Sockets', link: '/concepts/tcp-teardown-and-half-open-sockets' },
+          { text: 'Deadlines & I/O Timeouts', link: '/concepts/deadlines-and-io-timeouts' },
+          { text: 'Backpressure & Bounded Queues', link: '/concepts/backpressure-and-bounded-queues' },
+          { text: 'Backoff & Connection Storms', link: '/concepts/backoff-and-connection-storms' }
         ]
       },
       {
