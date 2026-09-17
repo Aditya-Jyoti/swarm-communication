@@ -24,6 +24,9 @@ func (p *Pool) admitLoop(raw net.Conn) {
 		return ok, reason
 	}
 	info, err := acceptHandshake(raw, p.cfg.Self, p.Known(), p.cfg.Now().Add(p.cfg.HandshakeTimeout), policy)
+	p.mu.Lock()
+	p.admitting--
+	p.mu.Unlock()
 	p.untrackPending(raw)
 	if err != nil {
 		_ = raw.Close()
