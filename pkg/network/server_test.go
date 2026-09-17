@@ -146,9 +146,34 @@ func TestTwoNodesExchangeFramesEndToEnd(t *testing.T) {
 type gatedDialer struct {
 	release chan struct{}
 	inner   net.Dialer
+
+	// arrived is closed by the first dial to reach the gate. The pool counts a
+	// dial as in flight (Pool.dialing) before calling DialContext, so once
+	// arrived is closed a quiescence wait cannot pass until that dial resolves.
+	arrived     chan struct{}
+	arrivedOnce sync.Once
+}
+
+func newGatedDialer() *gatedDialer {
+	return &gatedDialer{release: make(chan struct{}), arrived: make(chan struct{})}
+}
+
+// open releases the gate, but only once a dial is parked on it. Without that
+// happens-before edge, a slow scheduler (-cpu 1 on a loaded runner) can leave the
+// redial goroutine not yet started when the gate opens; waitQuiescent then
+// passes trivially, before the dial it is meant to wait for has even begun.
+func (g *gatedDialer) open(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.arrived:
+	case <-time.After(failsafe):
+		t.Fatal("no dial reached the gate")
+	}
+	close(g.release)
 }
 
 func (g *gatedDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	g.arrivedOnce.Do(func() { close(g.arrived) })
 	select {
 	case <-g.release:
 	case <-ctx.Done():
@@ -161,7 +186,7 @@ func (g *gatedDialer) DialContext(ctx context.Context, network, addr string) (ne
 // be the one that survives on both sides, whichever dial lands first, and each
 // side must see exactly one PeerUp.
 func TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst(t *testing.T) {
-	gate := &gatedDialer{release: make(chan struct{})}
+	gate := newGatedDialer()
 	a := startNode(t, "node-a", nil)
 	b := startNode(t, "node-b", func(c *PoolConfig) { c.Dialer = gate })
 
@@ -172,14 +197,17 @@ func TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst(t *testing.T) {
 
 	// a's connection is registered on both sides. Now let b's dial go: a must
 	// reject it at the handshake, and b's loop must park on the inbound.
-	close(gate.release)
-	waitQuiescent(t, a.pool)
+	// Wait on the dialer first: once b is quiescent, a has written its rejection,
+	// so a's own wait then covers the tail of its failed admit, which is the
+	// window in which pending empties with no other state change.
+	gate.open(t)
 	waitQuiescent(t, b.pool)
+	waitQuiescent(t, a.pool)
 	assertSettledOnOneConnection(t, a, b)
 }
 
 func TestSimultaneousDialLowerInitiatorWinsWhenItLandsSecond(t *testing.T) {
-	gate := &gatedDialer{release: make(chan struct{})}
+	gate := newGatedDialer()
 	a := startNode(t, "node-a", func(c *PoolConfig) { c.Dialer = gate })
 	b := startNode(t, "node-b", nil)
 
@@ -193,7 +221,7 @@ func TestSimultaneousDialLowerInitiatorWinsWhenItLandsSecond(t *testing.T) {
 	// flight: that is the proof the swap completed on both sides.
 	oldAtA := entryFor(t, a.pool, "node-b")
 	oldAtB := entryFor(t, b.pool, "node-a")
-	close(gate.release)
+	gate.open(t)
 	waitQuiescent(t, a.pool)
 	waitQuiescent(t, b.pool)
 	if entryFor(t, a.pool, "node-b") == oldAtA || entryFor(t, b.pool, "node-a") == oldAtB {
