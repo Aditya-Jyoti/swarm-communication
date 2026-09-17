@@ -41,8 +41,12 @@ To be re-run by the lead after merging, and this table updated.
 
 ## Open items
 
-1. **Security audit results pending.** An audit ran in parallel with the restructure. Record
-   its findings in the WORKLOG and here.
+1. **Security audit: done** (WORKLOG 7.10). Accepted, not fixed:
+   - The node protocol (port 7000) has no authentication. Any container on the bridge can
+     impersonate a node. This also covers item 3.
+   - DNS rebinding against the loopback dashboard. Add a Host allow-list if it ever leaves
+     loopback.
+   - vite/esbuild/vitepress advisories affect only the docs dev server.
 2. **MEDIUM-1**, deferred by the user. A poisoned peer keeps its connection but stays dead
    (WORKLOG 5.2). Gossip may mitigate it, but that is untested.
 3. **A death at `MaxInt64` cannot be refuted.** Needs a bound on accepted incarnations, or
@@ -62,7 +66,7 @@ To be re-run by the lead after merging, and this table updated.
 
 ## Suggested next session
 
-1. Merge and record the security audit.
+1. Decide whether to add peer authentication to the node protocol.
 2. The user decides on MEDIUM-1 and on a tombstone TTL that grows with N.
 3. `doc-educator`: pages for the concepts nominated in WORKLOG 6.10 and 7.9.
 
