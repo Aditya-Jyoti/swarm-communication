@@ -32,6 +32,7 @@ flowchart LR
 | Node wiring, override resolution | `backend/cmd/swarm-node/main.go` |
 | CC state, `SIM_CONFIG` push | `backend/pkg/controlcenter/sim.go`, `backend/pkg/controlcenter/hub.go` |
 | Dashboard | `frontend/app.js`, `frontend/index.html` |
+| Blender export and write-back | `blender/make_swarm_scene.py`, `blender/swarm_blender.py` |
 
 ## 1. Latency model
 
@@ -345,6 +346,26 @@ The airspace panel has two views: **3D airspace** and the older **Grouped** view
 - **applied on X/N** counts live, non-killed drones whose `sim_version` has reached the CC's
   version.
 
+## 11. The same positions, in Blender
+
+The dashboard is not the only consumer of `nodes[].pos`. `blender/make_swarm_scene.py`
+reads the same `GET /api/state` and writes `swarm-scene.json`, which carries every drone
+in **both** coordinate systems: `position_units` (the `pos` above, unchanged) and
+`location_m` (Blender metres, $k = 20$ m per unit by default).
+
+```bash
+python3 blender/make_swarm_scene.py
+blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
+```
+
+- Links in the scene file carry the same pair the dashboard's labels show: the **measured**
+  `rtt_ms` and the model's `predicted_one_way_ms` = $base + d \times perUnit + jitter/2$.
+- The Blender add-on writes back through the same `POST /api/sim` `positions` body the
+  Advanced panel uses, so moving a cone and moving a slider are the same operation.
+- Units stay the source of truth. Metres are a rendering of them.
+
+Reference: [Blender Scene Tooling](./blender-scene).
+
 ## Common problems
 
 | Symptom | Cause |
@@ -363,3 +384,4 @@ The airspace panel has two views: **3D airspace** and the older **Grouped** view
 - [Latency as a Statistic](/concepts/latency-as-a-statistic)
 - [Idempotence and Hysteresis](/concepts/idempotence-and-hysteresis)
 - [The Control Center](./control-center)
+- [Blender Scene Tooling](./blender-scene)

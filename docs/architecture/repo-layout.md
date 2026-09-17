@@ -13,6 +13,7 @@ In short:
 |---|---|
 | `backend/` | Go module: `cmd/`, `pkg/` (including `pkg/geo`, the drone latency model), `Dockerfile`, `deploy/` |
 | `frontend/` | Dashboard (3D airspace, grouped view, message animation, simulation panel) and the nginx config |
+| `blender/` | Scene generator, Blender add-on and its tests |
 | `docs/` | This site |
 | `docker-compose.yml` | The local swarm |
 | `.env.example` | Every tunable |

@@ -51,6 +51,7 @@ export default withMermaid(defineConfig({
           { text: 'The Control Center', link: '/architecture/control-center' },
           { text: 'Drone Simulation', link: '/architecture/drone-simulation' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' },
+          { text: 'Blender Scene Tooling', link: '/architecture/blender-scene' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
           { text: 'Case Study: Convergence Bugs', link: '/architecture/convergence-debugging' },
           { text: 'Repository Layout', link: '/architecture/repo-layout' }
@@ -110,7 +111,8 @@ export default withMermaid(defineConfig({
         collapsed: false,
         items: [
           { text: '3D Perspective Projection & Depth Sorting', link: '/concepts/3d-perspective-projection-and-depth-sorting' },
-          { text: 'Hash Mixing: Why FNV Needs a Finalizer', link: '/concepts/hash-mixing-and-finalizers' }
+          { text: 'Hash Mixing: Why FNV Needs a Finalizer', link: '/concepts/hash-mixing-and-finalizers' },
+          { text: 'One Implementation of a Schema', link: '/concepts/one-implementation-of-a-schema' }
         ]
       }
     ],
