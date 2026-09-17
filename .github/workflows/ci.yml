@@ -33,9 +33,11 @@ jobs:
         # The Go module lives in backend/ (module path is still swarm-net).
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: backend/go.mod
           cache: true
@@ -69,9 +71,11 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Every variable in docker-compose.yml has a default, so the file must
       # validate with no .env at all, and with the documented .env.example.
@@ -81,7 +85,7 @@ jobs:
           docker compose --env-file .env.example config --quiet
 
       - name: Build node image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: backend
           target: node
@@ -91,7 +95,7 @@ jobs:
           cache-to: type=gha,scope=swarm-net-backend,mode=max
 
       - name: Build control-center image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: backend
           target: control-center
@@ -100,7 +104,7 @@ jobs:
           cache-from: type=gha,scope=swarm-net-backend
 
       - name: Build frontend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: frontend
           push: false
