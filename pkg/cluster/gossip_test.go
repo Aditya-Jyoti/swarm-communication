@@ -210,3 +210,234 @@ func TestRelayedDeathIsNotPushed(t *testing.T) {
 		t.Fatalf("a relayed death was re-pushed: %d broadcasts", n-base)
 	}
 }
+
+// ---- anti-entropy over real nodes ----
+
+// phantomUp tells the given nodes that a peer with no Node behind it has
+// connected. Sends to it fail with ErrUnknownPeer, like a dial still pending;
+// frames "from" it are delivered by calling a node's Handler directly.
+func phantomUp(nodes []*meshNode, id protocol.NodeID, incarnation int64) {
+	for _, m := range nodes {
+		m.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: id, Advertise: addrOf(id), Incarnation: incarnation}}
+	}
+}
+
+func phantomDown(m *meshNode, id protocol.NodeID) {
+	m.ep.events <- network.PeerEvent{Kind: network.PeerDown, Peer: network.PeerInfo{ID: id, Advertise: addrOf(id)}, Disposition: network.DispositionPeerDied}
+}
+
+func memberOf(t *testing.T, m *meshNode, id protocol.NodeID) Member {
+	t.Helper()
+	mem, ok := m.node.Status().View.Get(id)
+	if !ok {
+		t.Fatalf("%s has no record of %s", m.id, id)
+	}
+	return mem
+}
+
+func dropDeltaBroadcasts(from, to protocol.NodeID) func(protocol.NodeID, protocol.NodeID, *protocol.Envelope, bool) bool {
+	return func(f, tt protocol.NodeID, env *protocol.Envelope, broadcast bool) bool {
+		return broadcast && f == from && tt == to && env.Type == protocol.TypeMembershipDelta
+	}
+}
+
+// n1 sees n3 die and pushes it; the push to n2 is lost. n2 keeps believing n3
+// is alive until n1's next anti-entropy round delivers the full view.
+func TestDroppedPushIsRepairedByAntiEntropy(t *testing.T) {
+	ctx, hub, nodes := newMesh(t, ids("n1", "n2"), nil, nil)
+	n1, n2 := nodes[0], nodes[1]
+	fullMesh(t, ctx, nodes)
+	phantomUp(nodes, "n3", 1)
+	quiesce(t, ctx, nodes)
+
+	hub.setDrop(dropDeltaBroadcasts("n1", "n2"))
+	phantomDown(n1, "n3")
+	quiesce(t, ctx, nodes)
+	if m := memberOf(t, n1, "n3"); m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("n1: n3 = %+v, want dead at 2", m)
+	}
+	if m := memberOf(t, n2, "n3"); m.State != StateAlive {
+		t.Fatalf("n2 learned of the death despite the dropped push: %+v", m)
+	}
+
+	// One gossip round at n1. Its only alive peer is n2.
+	n1.clock.Advance(gossipEvery)
+	quiesce(t, ctx, nodes)
+	if m := memberOf(t, n2, "n3"); m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("n2 after anti-entropy: n3 = %+v, want dead at 2", m)
+	}
+}
+
+// The HIGH-2 scenario under anti-entropy. n3 refuted a rumour ("alive at 2"),
+// then died. n2 received the refutation; n1 processed n3's death first and the
+// refutation second, and its push of the death to n2 was lost. So the swarm
+// holds a live "alive at 2" and a "dead at 2". Before the fix n1 held "dead at
+// 1", applied the refutation, and both nodes gossiped n3 back to life forever.
+// Now the death wins at n2 on the first round and nothing ever revives it.
+func TestDeadRecordConvergesAndStaysDead(t *testing.T) {
+	ctx, hub, nodes := newMesh(t, ids("n1", "n2"), nil, nil)
+	n1, n2 := nodes[0], nodes[1]
+	fullMesh(t, ctx, nodes)
+	phantomUp(nodes, "n3", 1)
+	quiesce(t, ctx, nodes)
+
+	refutation, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, "n3", "", protocol.MembershipDeltaPayload{
+		Members: []protocol.MemberRecord{{ID: "n3", Advertise: addrOf("n3"), Incarnation: 2, Role: "worker", State: "alive"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n2.node.Handler()("n3", refutation)
+	quiesce(t, ctx, nodes)
+
+	hub.setDrop(dropDeltaBroadcasts("n1", "n2"))
+	phantomDown(n1, "n3")
+	quiesce(t, ctx, nodes) // death processed first...
+	n1.node.Handler()("n3", refutation)
+	quiesce(t, ctx, nodes) // ...then the queued refutation
+	hub.setDrop(nil)
+
+	if m := memberOf(t, n1, "n3"); m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("n1: n3 = %+v, want dead at 2", m)
+	}
+	if m := memberOf(t, n2, "n3"); m.State != StateAlive || m.Incarnation != 2 {
+		t.Fatalf("n2: n3 = %+v, want the stale alive at 2 before gossip", m)
+	}
+
+	// Several full cycles on both nodes, in both directions.
+	for round := 0; round < 4; round++ {
+		advanceMesh(t, ctx, nodes, gossipEvery)
+		for _, m := range nodes {
+			if mem := memberOf(t, m, "n3"); mem.State != StateDead || mem.Incarnation != 2 {
+				t.Fatalf("round %d: %s holds n3 = %+v, want dead at 2", round, m.id, mem)
+			}
+		}
+	}
+}
+
+// A lost self-announcement leaves n1 with a wrong role and score for n2.
+// Anti-entropy from n2 carries n2's own record, which n1 trusts because
+// rec.ID == from, so both are repaired without any announcement getting
+// through.
+func TestAntiEntropyRepairsSendersOwnRoleAndScore(t *testing.T) {
+	local := map[protocol.NodeID]map[protocol.NodeID]float64{
+		"n1": {"n2": 10},
+		// n2 starts blind; phase 2 lets it measure n1.
+	}
+	ctx, hub, nodes := newMesh(t, ids("n1", "n2"), local, nil)
+	n1, n2 := nodes[0], nodes[1]
+	fullMesh(t, ctx, nodes)
+	// Every self-announcement from n2 to n1 is lost from here on.
+	hub.setDrop(dropDeltaBroadcasts("n2", "n1"))
+
+	// A stale leadership claim from n2, delivered late.
+	stale, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, "n2", "n1", protocol.MembershipDeltaPayload{
+		Members: []protocol.MemberRecord{{ID: "n2", Advertise: addrOf("n2"), Incarnation: 1, Role: "leader", State: "alive", Score: protocol.UnmeasuredScore}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n1.node.Handler()("n2", stale)
+	quiesce(t, ctx, nodes)
+	if m := memberOf(t, n1, "n2"); m.Role != RoleLeader {
+		t.Fatalf("setup: n1 holds n2 = %+v, want the stale leader claim", m)
+	}
+	if st := n2.node.Status(); st.Role != RoleWorker {
+		t.Fatalf("setup: n2 is %s, want worker", st.Role)
+	}
+
+	// Phase 1: n2 gossips. Its only peer is n1, and its view says "worker".
+	n2.clock.Advance(gossipEvery)
+	quiesce(t, ctx, nodes)
+	if m := memberOf(t, n1, "n2"); m.Role != RoleWorker {
+		t.Fatalf("n1 still holds n2 as %s after anti-entropy, want worker", m.Role)
+	}
+	requireIDs(t, "n1 View.Leaders after phase 1", n1.node.Status().View.Leaders(), ids("n1"))
+
+	// Phase 2: n2 can now measure n1, reports 1.0, and elects itself -- and
+	// both announcements are lost. Gossip carries them anyway.
+	// The probe result is asynchronous, so step to the gossip deadline one
+	// probe interval at a time: the round at 3s is applied before the gossip
+	// tick at 4s reads the view. (Unstepped, the tick can win the race and ship
+	// the pre-probe view -- which the following round would repair anyway.)
+	n2.hs.set(addrOf("n1"), 1.0)
+	n2.clock.Advance(probeEvery)
+	quiesce(t, ctx, nodes)
+	n2.clock.Advance(gossipEvery - probeEvery)
+	quiesce(t, ctx, nodes)
+	if st := n2.node.Status(); st.Role != RoleLeader {
+		t.Fatalf("n2 is %s, want leader", st.Role)
+	}
+	m := memberOf(t, n1, "n2")
+	if m.Role != RoleLeader || m.Score != 1.0 {
+		t.Fatalf("n1 holds n2 = %+v, want leader reporting 1.0", m)
+	}
+	for _, mn := range nodes {
+		st := mn.node.Status()
+		requireIDs(t, string(mn.id)+" Leaders", st.Leaders, ids("n2"))
+		requireIDs(t, string(mn.id)+" View.Leaders", st.View.Leaders(), ids("n2"))
+	}
+}
+
+// Three nodes, but n2 and n3 are never connected to each other and n3's
+// announcements cannot reach n2. n2 learns of n3 only from n1's anti-entropy,
+// and every view converges on the same membership.
+func TestThreeNodesConvergeThroughGossipAlone(t *testing.T) {
+	local := map[protocol.NodeID]map[protocol.NodeID]float64{
+		"n1": {"n2": 2, "n3": 2},
+		"n2": {"n1": 2},
+		"n3": {"n1": 2},
+	}
+	ctx, hub, nodes := newMesh(t, ids("n1", "n2", "n3"), local, nil)
+	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+	hub.setDrop(func(from, to protocol.NodeID, _ *protocol.Envelope, _ bool) bool {
+		return (from == "n2" && to == "n3") || (from == "n3" && to == "n2")
+	})
+
+	// n1-n2 first, so n2's welcome from n1 predates n3 entirely.
+	linkUp(n1, n2)
+	quiesce(t, ctx, nodes)
+	linkUp(n1, n3)
+	quiesce(t, ctx, nodes)
+	if _, ok := n2.node.Status().View.Get("n3"); ok {
+		t.Fatal("setup: n2 learned of n3 before any gossip")
+	}
+
+	for round := 0; round < 3; round++ {
+		advanceMesh(t, ctx, nodes, gossipEvery)
+	}
+
+	type key struct {
+		id    protocol.NodeID
+		state State
+		inc   int64
+		score float64
+	}
+	var want []key
+	for _, mem := range n1.node.Status().View.Members {
+		want = append(want, key{mem.ID, mem.State, mem.Incarnation, mem.Score})
+	}
+	if len(want) != 3 {
+		t.Fatalf("n1 view has %d members, want 3", len(want))
+	}
+	for _, m := range nodes {
+		st := m.node.Status()
+		var got []key
+		for _, mem := range st.View.Members {
+			got = append(got, key{mem.ID, mem.State, mem.Incarnation, mem.Score})
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s view = %+v, want %+v", m.id, got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("%s view = %+v, want %+v", m.id, got, want)
+			}
+		}
+		requireIDs(t, string(m.id)+" Leaders", st.Leaders, ids("n1"))
+	}
+	// n2 knows n3's score only by relay.
+	if m := memberOf(t, n2, "n3"); m.Score != 2 {
+		t.Fatalf("n2: n3 score = %v, want 2 learned by relay", m.Score)
+	}
+}
