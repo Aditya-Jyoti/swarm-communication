@@ -468,7 +468,9 @@ func TestNewNodeValidation(t *testing.T) {
 			c.Election.Hysteresis != DefaultHysteresis ||
 			c.HeartbeatInterval != DefaultHeartbeatInterval || c.HeartbeatMisses != DefaultHeartbeatMisses ||
 			c.SuspectAfter != DefaultSuspectAfter || c.DeadAfter != DefaultDeadAfter ||
-			c.SuspicionTimeout != DefaultSuspicionTimeout ||
+			c.SuspicionTimeout != DefaultSuspicionTimeout || c.TombstoneTTL != DefaultTombstoneTTL ||
+			c.StateSyncInterval != DefaultStateSyncInterval || c.LedgerSize != DefaultLedgerSize ||
+			c.Executor == nil ||
 			c.ProbeTimeout <= health.DefaultProbeTimeout ||
 			c.QueueDepth != DefaultQueueDepth || c.Logger == nil {
 			t.Fatalf("defaults not applied: %+v", c)

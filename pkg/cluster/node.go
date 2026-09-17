@@ -148,8 +148,10 @@ type NodeConfig struct {
 	// Pool.Connect, which is how the mesh grows from a single seed. It must not
 	// block. Optional.
 	Connect func(protocol.NodeAddress)
-	// Executor runs tasks assigned to this node. Default: the built-in task
-	// kinds (Phase 4). See control.go.
+	// Executor runs tasks assigned to this node, each on its own goroutine.
+	// Default: NewDefaultExecutor(Clock), the contract's echo/sleep/hash. Like
+	// Health, it MUST honour ctx: shutdown cancels running tasks and then
+	// joins their goroutines.
 	Executor TaskExecutor
 	// OnTaskResult is called, on the loop goroutine, when a task this node
 	// leads completes (its own or an attached worker's). cmd wires it to the
@@ -245,6 +247,10 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	}
 	if c.LedgerSize <= 0 {
 		c.LedgerSize = DefaultLedgerSize
+	}
+	if c.Executor == nil {
+		// After Clock is defaulted: sleep tasks wait on the node's clock.
+		c.Executor = NewDefaultExecutor(c.Clock)
 	}
 	return c
 }
