@@ -51,7 +51,9 @@ export default withMermaid(defineConfig({
           { text: 'The Control Center', link: '/architecture/control-center' },
           { text: 'Drone Simulation', link: '/architecture/drone-simulation' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' },
-          { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' }
+          { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
+          { text: 'Case Study: Convergence Bugs', link: '/architecture/convergence-debugging' },
+          { text: 'Repository Layout', link: '/architecture/repo-layout' }
         ]
       },
       {
