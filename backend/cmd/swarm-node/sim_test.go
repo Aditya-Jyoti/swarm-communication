@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"swarm-net/pkg/cluster"
 	"swarm-net/pkg/protocol"
 )
 
-// applySim forwards an election override only for a newer version whose
-// override differs from the last one forwarded.
+// applySim forwards the effective election pair only for a newer version, and
+// only when it differs from the last pair forwarded. "Keep own" values resolve
+// to the node's start-up settings, so clearing an override reverts them.
 func TestApplySimForwardsChangedOverridesOnly(t *testing.T) {
 	a, err := newApp(loopbackConfig("sim"), io.Discard)
 	if err != nil {
@@ -21,21 +23,30 @@ func TestApplySimForwardsChangedOverridesOnly(t *testing.T) {
 		cancel()
 		_ = a.run(ctx)
 	})
-	var got []electionOverride
-	a.setElection = func(th, hy float64) { got = append(got, electionOverride{th, hy}) }
+	own := electionPair{threshold: cluster.DefaultThreshold, hysteresis: cluster.DefaultHysteresis}
+	if a.ownElection != own {
+		t.Fatalf("ownElection = %+v, want %+v", a.ownElection, own)
+	}
+	var got []electionPair
+	a.setElection = func(th, hy float64) { got = append(got, electionPair{th, hy}) }
 
 	sim := func(v uint64, th, hy float64) protocol.SimConfigPayload {
 		return protocol.SimConfigPayload{Version: v, Threshold: th, Hysteresis: hy}
 	}
-	a.applySim(sim(1, 0, -1))   // no override yet: nothing to forward
-	a.applySim(sim(2, 0.5, -1)) // forwarded
-	a.applySim(sim(3, 0.5, -1)) // same override: not forwarded
-	a.applySim(sim(3, 0.9, 0))  // stale version: ignored entirely
-	a.applySim(sim(2, 0.9, 0))  // older version: ignored
-	a.applySim(sim(4, 0.5, 0))  // hysteresis changed: forwarded
-	a.applySim(sim(5, 0, -1))   // back to "keep own": forwarded (a no-op on the node)
+	a.applySim(sim(1, 0, -1))                        // resolves to own: nothing to forward
+	a.applySim(sim(2, 0.5, -1))                      // (0.5, own hysteresis)
+	a.applySim(sim(3, 0.5, -3))                      // same effective pair: not forwarded
+	a.applySim(sim(3, 0.9, 0))                       // stale version: ignored entirely
+	a.applySim(sim(2, 0.9, 0))                       // older version: ignored
+	a.applySim(sim(4, 0.5, 0))                       // hysteresis 0 is real: forwarded
+	a.applySim(sim(5, 0, -1))                        // cleared: back to own values
+	a.applySim(sim(6, cluster.DefaultThreshold, -1)) // equals own: not forwarded
 
-	want := []electionOverride{{0.5, -1}, {0.5, 0}, {0, -1}}
+	want := []electionPair{
+		{0.5, cluster.DefaultHysteresis},
+		{0.5, 0},
+		own,
+	}
 	if len(got) != len(want) {
 		t.Fatalf("forwarded %v, want %v", got, want)
 	}
@@ -44,9 +55,50 @@ func TestApplySimForwardsChangedOverridesOnly(t *testing.T) {
 			t.Fatalf("forwarded %v, want %v", got, want)
 		}
 	}
-	if v := a.emu.Version(); v != 5 {
-		t.Fatalf("emulation version = %d, want 5", v)
+	if v := a.emu.Version(); v != 6 {
+		t.Fatalf("emulation version = %d, want 6", v)
 	}
+}
+
+// Set then clear, against the real node: the override takes effect, and a
+// SIM_CONFIG with threshold 0 / hysteresis -1 restores the node's own values
+// (configured threshold, start-up default hysteresis).
+func TestApplySimSetThenClearRevertsNode(t *testing.T) {
+	cfg := loopbackConfig("revert")
+	cfg.Threshold = 0.6
+	a, err := newApp(cfg, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.run(ctx) }()
+	defer func() {
+		cancel()
+		if err := recvT(t, done); err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+
+	settled := func(th, hy float64) func() bool {
+		return func() bool {
+			st := a.node.Status()
+			return st.Threshold == th && st.Hysteresis == hy
+		}
+	}
+	waitFor(t, "own settings", settled(0.6, cluster.DefaultHysteresis))
+
+	a.applySim(protocol.SimConfigPayload{Version: 1, Threshold: 0.9, Hysteresis: 0})
+	waitFor(t, "override (0.9, 0)", settled(0.9, 0))
+
+	a.applySim(protocol.SimConfigPayload{Version: 2, Threshold: 0, Hysteresis: -1})
+	waitFor(t, "revert to (0.6, default)", settled(0.6, cluster.DefaultHysteresis))
+
+	// Clearing one field at a time reverts only that field.
+	a.applySim(protocol.SimConfigPayload{Version: 3, Threshold: 0.2, Hysteresis: 1.5})
+	waitFor(t, "override (0.2, 1.5)", settled(0.2, 1.5))
+	a.applySim(protocol.SimConfigPayload{Version: 4, Threshold: 0.2, Hysteresis: -1})
+	waitFor(t, "hysteresis reverted", settled(0.2, cluster.DefaultHysteresis))
 }
 
 // End to end over real sockets: a SIM_CONFIG on one node delays the PONGs it

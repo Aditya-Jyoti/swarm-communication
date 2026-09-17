@@ -43,14 +43,26 @@ const (
 	exitKilled = 0
 )
 
-// noOverride is the election override in force before any SIM_CONFIG sets
-// one: the SIM_CONFIG encoding of "keep the node's own settings".
-var noOverride = electionOverride{threshold: 0, hysteresis: -1}
-
-// electionOverride is the (threshold, hysteresis) pair last passed on to the
-// node from a SIM_CONFIG.
-type electionOverride struct {
+// electionPair is an effective (threshold, hysteresis) setting: both values
+// are always concrete, never SIM_CONFIG's "keep own" encodings.
+type electionPair struct {
 	threshold, hysteresis float64
+}
+
+// effective resolves a SIM_CONFIG override against the node's own settings.
+// threshold 0 and a negative hysteresis mean "the node's own value", which is
+// how the Control Center clears an override; resolving here (rather than
+// forwarding the raw encodings, which SetElectionParams reads as "unchanged")
+// is what makes a clear actually revert the node.
+func (own electionPair) effective(threshold, hysteresis float64) electionPair {
+	out := own
+	if threshold > 0 {
+		out.threshold = threshold
+	}
+	if hysteresis >= 0 {
+		out.hysteresis = hysteresis
+	}
+	return out
 }
 
 func main() {
@@ -132,9 +144,13 @@ type app struct {
 	// setElection passes a SIM_CONFIG election override to the node. A seam so
 	// a test can observe exactly which overrides are forwarded.
 	setElection func(threshold, hysteresis float64)
-	// lastOverride is the override last forwarded. Owned by the client's Run
-	// goroutine, the only caller of applySim, so it needs no lock.
-	lastOverride electionOverride
+	// ownElection is the node's own election settings as resolved at start-up
+	// (configured threshold, default hysteresis). Immutable after newApp.
+	ownElection electionPair
+	// lastElection is the effective pair last forwarded, initially
+	// ownElection. Owned by the client's Run goroutine, the only caller of
+	// applySim, so it needs no lock.
+	lastElection electionPair
 }
 
 // uplinkIdleFloor is the smallest read deadline the Control Center link may
@@ -188,7 +204,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 	log := base.With("node", cfg.NodeID)
 
 	var node *cluster.Node
-	a := &app{cfg: cfg, log: log, exit: os.Exit, lastOverride: noOverride}
+	a := &app{cfg: cfg, log: log, exit: os.Exit}
 
 	pool := network.NewPool(network.PoolConfig{
 		Self: network.Identity{
@@ -304,6 +320,12 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		return nil, fmt.Errorf("swarm-node %q: %w", cfg.NodeID, err)
 	}
 	log.Info("listening", "addr", ln.Addr(), "advertise", cfg.Advertise, "version", version)
+	// The node's own settings are read from the Status NewNode published, so
+	// the hysteresis is the node's resolved default rather than a copy of that
+	// rule here. No override can have been applied yet: nothing runs.
+	st := node.Status()
+	a.ownElection = electionPair{threshold: st.Threshold, hysteresis: st.Hysteresis}
+	a.lastElection = a.ownElection
 	a.pool, a.prober, a.node, a.ln, a.client = pool, prober, node, ln, client
 	return a, nil
 }
@@ -326,8 +348,10 @@ func (a *app) applyChaos(c telemetry.Chaos) {
 // applySim acts on a sanitized SIM_CONFIG, on the client's goroutine.
 //
 // A stale version changes nothing. A newer one replaces the emulation state
-// (which the prober reads for every PONG), and its election override is passed
-// to the node only when it differs from the last one passed on: every slider
+// (which the prober reads for every PONG). Its election override is resolved
+// against the node's own settings (so a cleared override reverts them) and the
+// resulting pair is passed to the node only when it differs from the last one
+// passed on: every slider
 // move and every reconnect resends the whole snapshot, and re-applying the
 // same override would only log and re-run the election for nothing.
 func (a *app) applySim(p protocol.SimConfigPayload) {
@@ -337,12 +361,12 @@ func (a *app) applySim(p protocol.SimConfigPayload) {
 	}
 	a.log.Info("sim config applied", "version", p.Version, "enabled", p.Enabled,
 		"positions", len(p.Positions), "threshold", p.Threshold, "hysteresis", p.Hysteresis)
-	o := electionOverride{threshold: p.Threshold, hysteresis: p.Hysteresis}
-	if o == a.lastOverride {
+	e := a.ownElection.effective(p.Threshold, p.Hysteresis)
+	if e == a.lastElection {
 		return
 	}
-	a.lastOverride = o
-	a.setElection(o.threshold, o.hysteresis)
+	a.lastElection = e
+	a.setElection(e.threshold, e.hysteresis)
 }
 
 // run builds the app, reports the bound address through onListening (nil is
