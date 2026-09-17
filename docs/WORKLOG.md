@@ -1182,3 +1182,29 @@ Nominated for `doc-educator`:
 | Reverse proxies and WebSocket upgrades | nginx must forward `Upgrade`, `Connection` and `Host` for the CC's same-origin check to pass |
 | DNS resolution at request time in nginx | Why `resolver` plus a variable upstream lets nginx start without the CC and follow a recreated container |
 | Container hardening | What `cap_drop`, `no-new-privileges` and a read-only root filesystem each prevent |
+
+### 7.10 Security audit results
+
+**Agent:** `go-engineer` * **Verification:** every fixed item was first reproduced by a test on
+the old code. e2e passes with and without `SWARM_CC_API_TOKEN`.
+
+| Sev | Finding | Status |
+|---|---|---|
+| High | CSRF: any web page could make the operator's browser POST `/api/chaos` (text/plain, foreign Origin) and kill a node | Fixed: cross-site requests get 403, non-JSON gets 415 |
+| High | Task output stored uncapped and re-sent every second: a 39 MB snapshot from 100 echo tasks | Fixed: output capped at 512 bytes, kind at 64 bytes |
+| Medium | Slow-body requests held forever (`ReadHeaderTimeout` does not cover bodies) | Fixed: 10s request deadline, idle timeout, 16 KiB header cap |
+| Medium | No cap on handshakes in progress on the CC and on node pools | Fixed: at most 128 pending |
+| Medium | No auth on `/api/tasks` and `/api/chaos` | Added optional `SWARM_CC_API_TOKEN`, injected by nginx |
+| Low | Unknown JSON fields and trailing data accepted | Fixed: strict decoding |
+| Low | `delay_ms` overflowed into the valid range | Fixed: range-checked before conversion |
+| Low | CI permissions too broad, actions pinned by tag | Fixed: per-job permissions, SHA pins |
+| Info | Node protocol unauthenticated, DNS rebinding on the loopback dashboard | Accepted, see STATE.md |
+
+Tools: govulncheck clean; gosec and staticcheck clean after triage (false positives
+suppressed with reasons); npm audit high findings fixed with an `@xmldom/xmldom` override,
+dev-server-only advisories remain; Trivy found an OpenSSL CVE in the alpine base, fixed by
+moving to alpine 3.24 with `apk upgrade`; hadolint and shellcheck clean. Fuzzing: frame
+decoder, every peer payload, and the task executor, 19M runs, no findings.
+
+Load: 200,000 tasks in 6s, snapshots stayed under 50 KB, memory under 45 MB per container,
+exactly 2 leaders throughout. Chaos: 15 kills in 5 rounds, re-converged in 2s every time.
