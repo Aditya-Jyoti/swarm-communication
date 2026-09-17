@@ -17,15 +17,18 @@ outline: deep
 | `pkg/network/` | TCP listener, dialer, connection pool, read/write loops |
 | `pkg/health/` | `HealthStrategy` interface and `LatencyHealthStrategy` |
 | `pkg/cluster/` | Membership, election math, heartbeats, failover, replication |
-| `pkg/telemetry/` | Node state snapshots destined for the dashboard |
-| `web/static/` | Vanilla HTML/CSS/JS dashboard, embedded into the Control Center binary |
-| `deploy/` | Dockerfiles, `docker-compose.yml`, bridge network definition |
+| `pkg/telemetry/` | The node's Control Center uplink: `TELEMETRY` from `cluster.Status`, `TASK` and `CHAOS` dispatch, chaos validation |
+| `pkg/controlcenter/` | The Control Center: hub, node server, HTTP API and WebSocket |
+| `web/` | `embed.go` plus `static/`: the vanilla HTML/CSS/JS dashboard, compiled into the CC binary |
+| `Dockerfile` | Multi-stage build with two targets, `node` and `control-center` |
+| `docker-compose.yml` | Control Center, `seed`, and a scalable `node` service on the `swarmnet` bridge |
+| `deploy/` | `node-entrypoint.sh`: derives a readable node ID under `--scale`, then `exec`s the binary |
+| `scripts/` | `e2e.sh` (self-healing test), `check-ascii.mjs` and `check-mermaid.mjs` (docs lint) |
 | `docs/` | The VitePress site -- the curriculum |
 | `docs/.vitepress/config.js` | Sidebar; extended after every Concept Discovery pass |
 | `docs/WORKLOG.md` | Append-only engineering log |
 | `docs/architecture/` | How THIS system works |
 | `docs/concepts/` | Transferable foundations it stands on |
-| `docs/guides/` | Operational how-tos (running, scaling, chaos) |
 
 ## Why `pkg/` splits this way
 
@@ -46,7 +49,11 @@ The boundaries are drawn so each package has exactly one reason to change:
   failover behaviour. This is where the genuinely hard reasoning lives, and it is kept free of I/O
   detail so it can be unit-tested without a socket.
 - **`telemetry` changes** when the dashboard needs to show something new. Keeping it separate stops
-  display concerns from leaking into the state machine.
+  display concerns from leaking into the state machine. It reads `cluster.Status`; `cluster`
+  never imports it.
+- **`controlcenter` changes** when the dashboard API or the CC's hub changes. It speaks the wire
+  protocol but is not a mesh member, so it depends on `network` and `telemetry`, never on
+  `cluster` directly.
 
 The dependency graph is a DAG and points one way:
 
@@ -54,6 +61,8 @@ The dependency graph is a DAG and points one way:
 flowchart TD
     N["cmd/swarm-node"]
     C["cmd/control-center"]
+    CC["pkg/controlcenter"]
+    WEB["web"]
     CL["pkg/cluster"]
     T["pkg/telemetry"]
     H["pkg/health"]
@@ -62,11 +71,16 @@ flowchart TD
 
     N --> CL
     N --> T
-    C --> CL
-    C --> T
+    N --> H
+    N --> NW
+    C --> CC
+    C --> WEB
+    CC --> T
+    CC --> NW
+    T --> CL
+    T --> NW
     CL --> H
     CL --> NW
-    T --> NW
     H --> P
     NW --> P
 ```
@@ -88,7 +102,7 @@ promotion path untestable and would invite the two code paths to drift.
 
 ## `web/static` is embedded, not mounted
 
-The dashboard is served by the Control Center from `embed.FS`, not from a bind mount. One binary,
+The dashboard is served by the Control Center from `embed.FS` (`web/embed.go:20`), not from a bind mount. One binary,
 no volume wiring, no path that works in development and breaks in the container. The cost is a
 rebuild to see a CSS change, which is the right trade for a demonstration system that must come up
 identically on someone else's machine.
@@ -102,7 +116,8 @@ opinionated, and obsolete the moment the code changes, which is why it cites cod
 reader should be able to take the framing or netpoller page to an unrelated project and still get
 value. These pages reference this repository, but they are not *about* it.
 
-`guides/` is operational: how to run it, how to scale $N$, how to break it on purpose.
+Operational material (running, scaling, chaos) lives in
+[Running the Swarm](./running-the-swarm), inside `architecture/`.
 
 ## The agent definitions in `.claude/agents/`
 
@@ -113,7 +128,7 @@ Four roles, so that no single context window carries the whole system:
 | `system-architect` | Interface contracts, trade-off analysis, the worklog, escalating questions to the user | Write production Go |
 | `doc-educator` | Concept discovery, the curriculum, sidebar wiring | Make architectural decisions |
 | `go-engineer` | Everything in `pkg/` and `cmd/` | Invent contracts unilaterally |
-| `sim-engineer` | `deploy/` and `web/static/` | Touch cluster logic |
+| `sim-engineer` | `Dockerfile`, `docker-compose.yml`, `deploy/`, `scripts/e2e.sh`, `web/static/` | Touch cluster logic |
 
 The separation is not ceremony. The architect asking "what breaks if a leader is slow rather than
 dead?" and the engineer asking "what does this `Read` return on a half-open socket?" are different
