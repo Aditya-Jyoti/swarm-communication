@@ -42,6 +42,34 @@ docker compose up -d --scale node=11     # N = 12, 4 leaders
 
 Or set `NODE_REPLICAS` in `.env`. No code or YAML edits.
 
+## Drone simulation
+
+Each node is a drone at a 3D position in a 100-unit cube. The Control Center turns distance
+into emulated latency on PONG replies:
+
+$$delay = base + distance \times perUnit + jitter \times U[0, 1)$$
+
+Central drones get the lowest median RTT and become leaders. Each worker joins its nearest
+leader. The dashboard draws the airspace in 3D (drag to orbit, wheel to zoom), labels links
+with distance and RTT, and animates messages between drones.
+
+- **Advanced panel** (collapsed by default): sliders for the latency model, `threshold` and
+  `hysteresis`, an enable switch, randomize/reset positions, and x/y/z sliders per drone.
+  A button clears the threshold and hysteresis overrides. The same settings are available at
+  `GET` and `POST /api/sim`.
+- **Killed drones stay down.** A chaos kill exits 0, and nodes use `restart: on-failure`. To
+  bring them back, run `docker compose up -d`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SWARM_SIM_ENABLED` | `true` | Emulated latency on or off |
+| `SWARM_SIM_BASE_MS` | `1` | Fixed delay per PONG (0..500) |
+| `SWARM_SIM_PER_UNIT_MS` | `2` | Delay per unit of distance (0..10) |
+| `SWARM_SIM_JITTER_MS` | `0.5` | Maximum random extra delay (0..200) |
+
+These are start-up values for the CC. The panel changes them at run time. Details:
+[Drone Simulation](docs/architecture/drone-simulation.md).
+
 ## Running without Docker
 
 ```bash
