@@ -98,6 +98,7 @@ export default withMermaid(defineConfig({
           { text: 'Monotonic Merge & Incarnation', link: '/concepts/monotonic-merge-and-incarnation' },
           { text: 'Split-Brain & Quorum', link: '/concepts/split-brain-and-quorum' },
           { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' },
+          { text: 'At-Least-Once Delivery & Idempotent Re-issue', link: '/concepts/at-least-once-delivery' },
           { text: 'Cooperative vs Uncooperative Failure Injection', link: '/concepts/cooperative-vs-uncooperative-failure-injection' }
         ]
       }
