@@ -37,6 +37,17 @@ type fakeTransport struct {
 	broadcast []*protocol.Envelope
 	peers     map[protocol.NodeID]network.PeerInfo
 	sendErr   map[protocol.NodeID]error
+	// notify, if set, receives every recorded Send without blocking. It is how
+	// a test waits for a send made off the loop (a chaos-delayed reply).
+	notify chan sentEnv
+}
+
+// watch returns a channel that receives every Send recorded from now on.
+func (f *fakeTransport) watch() <-chan sentEnv {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notify = make(chan sentEnv, 64)
+	return f.notify
 }
 
 func newFakeTransport(self protocol.NodeID) *fakeTransport {
@@ -57,6 +68,12 @@ func (f *fakeTransport) Send(_ context.Context, to protocol.NodeID, env *protoco
 		return err
 	}
 	f.sent = append(f.sent, sentEnv{to: to, env: env})
+	if f.notify != nil {
+		select {
+		case f.notify <- sentEnv{to: to, env: env}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -540,7 +557,12 @@ func TestSingleNodeElectsItself(t *testing.T) {
 // round so self has reported that median.
 func threeNodes(t *testing.T, self protocol.NodeID) *harness {
 	t.Helper()
-	h := newHarness(t, self, nil)
+	return threeNodesWith(t, self, nil)
+}
+
+func threeNodesWith(t *testing.T, self protocol.NodeID, mutate func(*NodeConfig)) *harness {
+	t.Helper()
+	h := newHarness(t, self, mutate)
 	h.hs.set(addrOf("node-b"), 1.0)
 	h.hs.set(addrOf("node-c"), 3.0)
 	h.peerUp("node-b", 1)
@@ -1164,7 +1186,8 @@ func TestUnknownAndUnhandledTypesAreDropped(t *testing.T) {
 	before := h.status()
 	h.frame("node-b", protocol.MessageType("FROBNICATE"), map[string]int{"x": 1})
 	h.frame("node-b", protocol.MessageType("FROBNICATE"), nil) // second: the once-logged path
-	h.frame("node-b", protocol.TypeHeartbeat, protocol.HeartbeatPayload{Seq: 1})
+	// Known, but a Control Center frame the node leaves to cmd.
+	h.frame("node-b", protocol.TypeChaos, protocol.ChaosPayload{Action: "kill"})
 	// Data-plane frames travel the other queue and are owned by Phase 5.
 	h.frame("node-b", protocol.TypeTask, protocol.TaskPayload{TaskID: "t1", Kind: "noop"})
 	after := h.status()

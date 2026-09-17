@@ -54,6 +54,12 @@ type suspicion struct {
 	// round is the probe round sequence current when the doubt was raised.
 	// Only a probe round started after it may clear the doubt.
 	round uint64
+	// silent marks a doubt raised by missed heartbeats. A successful probe
+	// does not clear it: PONGs are answered on the peer's reader goroutine,
+	// so a leader whose event loop is wedged still answers every PING. Only
+	// evidence from the loop itself (a resumed beat, a refutation) or a
+	// reconnect clears it.
+	silent bool
 }
 
 // markSuspect records a first-hand doubt about id and reports whether the table
@@ -62,6 +68,15 @@ type suspicion struct {
 // relayed suspicion is otherwise never confirmed here. A dead member is left
 // alone: SetState would otherwise "improve" it to suspect.
 func (n *Node) markSuspect(ctx context.Context, id protocol.NodeID, reason string, err error) bool {
+	return n.suspect(ctx, id, reason, err, false)
+}
+
+// markSilent is markSuspect for missed heartbeats; see suspicion.silent.
+func (n *Node) markSilent(ctx context.Context, id protocol.NodeID) bool {
+	return n.suspect(ctx, id, "missed heartbeats", nil, true)
+}
+
+func (n *Node) suspect(ctx context.Context, id protocol.NodeID, reason string, err error, silent bool) bool {
 	if id == n.cfg.Self {
 		return false
 	}
@@ -69,8 +84,11 @@ func (n *Node) markSuspect(ctx context.Context, id protocol.NodeID, reason strin
 	if !ok || m.State == StateDead {
 		return false
 	}
-	if _, timing := n.suspects[id]; !timing {
-		n.suspects[id] = suspicion{since: n.cfg.Clock.Now(), incarnation: m.Incarnation, round: n.probeSeq}
+	if s, timing := n.suspects[id]; !timing {
+		n.suspects[id] = suspicion{since: n.cfg.Clock.Now(), incarnation: m.Incarnation, round: n.probeSeq, silent: silent}
+	} else if silent && !s.silent {
+		s.silent = true
+		n.suspects[id] = s
 	}
 	changed := n.table.SetState(id, StateSuspect)
 	if changed {
@@ -102,7 +120,7 @@ func (n *Node) probeMissed(ctx context.Context, id protocol.NodeID, err error) b
 // before the link dropped can finish after the PeerDown that raised the
 // suspicion, and its success says nothing about the link now.
 func (n *Node) probeClears(id protocol.NodeID, round uint64, incarnation int64) bool {
-	if s, timing := n.suspects[id]; timing && round <= s.round {
+	if s, timing := n.suspects[id]; timing && (round <= s.round || s.silent) {
 		return false
 	}
 	delete(n.suspects, id)
@@ -137,6 +155,12 @@ func (n *Node) controlTick(ctx context.Context) {
 	}
 	if n.sweepTombstones(now) {
 		n.publish()
+	}
+	switch {
+	case n.isLeader():
+		n.beat(ctx)
+	case n.leader != "":
+		n.checkLeaderSilence(ctx)
 	}
 }
 

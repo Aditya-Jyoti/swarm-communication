@@ -306,6 +306,13 @@ type Node struct {
 	probeWG sync.WaitGroup
 	// calls carries functions to be run on the loop goroutine; see settle.
 	calls chan func()
+	// bgWG joins the short-lived goroutines that deliver chaos-delayed replies
+	// (sendDelayed). Each one waits on a Clock timer or Run's context, so
+	// shutdown, which runs after that context is done, never waits long.
+	bgWG sync.WaitGroup
+	// chaosDelay is the injected reply delay in nanoseconds. Atomic: written by
+	// SetChaosDelay from any goroutine, read by the loop and by Status.
+	chaosDelay atomic.Int64
 
 	// running flips once, when Run starts. stopped is closed when Run returns;
 	// Handler selects on it so a control-plane send cannot outlive the loop.
@@ -369,6 +376,11 @@ type Node struct {
 	// last reconciled against. See sweepTombstones.
 	tombstones  map[protocol.NodeID]tombstone
 	tombVersion uint64
+	// Heartbeats; see heartbeat.go. beatSeq is the leader's per-worker beat
+	// counter. sinceBeat is the worker's count of ticks since the last valid
+	// beat from n.leader.
+	beatSeq   map[protocol.NodeID]uint64
+	sinceBeat int
 }
 
 type inboundFrame struct {
@@ -425,6 +437,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		gossipSet:     make(map[protocol.NodeID]struct{}),
 		suspects:      make(map[protocol.NodeID]suspicion),
 		tombstones:    make(map[protocol.NodeID]tombstone),
+		beatSeq:       make(map[protocol.NodeID]uint64),
 	}
 	n.table.Upsert(Member{
 		ID:          cfg.Self,
@@ -475,6 +488,8 @@ func (n *Node) Status() Status {
 	// Dropped is read live: it is written by reader goroutines, not the loop, so a
 	// snapshot published by the loop could be arbitrarily stale on it.
 	s.Dropped = n.dropped.Load()
+	// Likewise: SetChaosDelay is called by cmd, not the loop.
+	s.ChaosDelay = n.ChaosDelay()
 	return s
 }
 
@@ -716,6 +731,7 @@ func (n *Node) shutdown() {
 		n.log.Info("leaving", "reason", "shutdown", "notified", sent)
 	}
 	n.probeWG.Wait()
+	n.bgWG.Wait()
 	n.publish()
 }
 
@@ -1065,10 +1081,21 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		if n.markLeft(ctx, f.peer) {
 			n.membershipChanged(ctx)
 		}
+	case protocol.TypeHeartbeat:
+		p, ok := payloadOrPoison[protocol.HeartbeatPayload](ctx, n, f)
+		if ok {
+			n.handleHeartbeat(ctx, f, p)
+		}
+	case protocol.TypeHeartbeatAck:
+		p, ok := payloadOrPoison[protocol.HeartbeatAckPayload](ctx, n, f)
+		if ok {
+			n.handleHeartbeatAck(f.peer, p)
+		}
 	default:
-		// Unknown to this build, or known but owned by a later phase (HEARTBEAT,
-		// STATE_SYNC, TASK ...). Both are dropped without touching the connection,
-		// per the forward-compatibility policy in pkg/protocol.
+		// Unknown to this build, or known but not handled by the node (CHAOS and
+		// TELEMETRY belong to the Control Center link, not the mesh). Both are
+		// dropped without touching the connection, per the forward-compatibility
+		// policy in pkg/protocol.
 		if _, seen := n.unknownLogged[env.Type]; !seen {
 			n.unknownLogged[env.Type] = struct{}{}
 			n.log.Warn("unhandled message type; dropping (logged once per type)", "type", env.Type, "peer", f.peer)
@@ -1657,6 +1684,9 @@ func (n *Node) join(ctx context.Context, leader protocol.NodeID) {
 	}
 	n.log.Info("joining leader", "leader", leader, "score", n.local[leader])
 	n.leader = leader
+	// A new attachment gets a full HeartbeatMisses window before its silence
+	// counts against the leader.
+	n.sinceBeat = 0
 }
 
 func (n *Node) isLeader() bool { return contains(n.leaders, n.cfg.Self) }

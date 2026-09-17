@@ -160,6 +160,9 @@ type sim struct {
 	// jitter is the +/- amplitude, in ms, applied to every probe sample.
 	jitter  float64
 	elapsed time.Duration
+	// strays are the (leader, worker) pairs the previous check found listed
+	// by a leader the worker is not attached to.
+	strays map[[2]protocol.NodeID]bool
 }
 
 // newSim starts one Node per id over a simNet with seeded per-link latencies
@@ -378,6 +381,8 @@ func (s *sim) check() agreement {
 	}
 	first := sts[live[0].id]
 	a.leaders = first.Leaders
+	seen := make(map[[2]protocol.NodeID]bool)
+	defer func() { s.strays = seen }()
 	for _, sn := range live {
 		st := sts[sn.id]
 		if !equalIDs(st.Leaders, first.Leaders) {
@@ -397,6 +402,19 @@ func (s *sim) check() agreement {
 		if contains(first.Leaders, sn.id) {
 			if st.Role != RoleLeader || st.Leader != sn.id {
 				a.problems = append(a.problems, fmt.Sprintf("%s is elected but reports %s", sn.id, st))
+			}
+			// A leader may still list a worker that re-homed since its last
+			// beat; the next beat's ack drops it. It must not still list it
+			// one check (two beats) later.
+			for _, w := range st.Attached {
+				key := [2]protocol.NodeID{sn.id, w}
+				if sts[w].Leader == sn.id {
+					continue
+				}
+				seen[key] = true
+				if s.strays[key] {
+					a.problems = append(a.problems, fmt.Sprintf("leader %s still lists %s, which is attached to %q", sn.id, w, sts[w].Leader))
+				}
 			}
 			continue
 		}
@@ -441,9 +459,6 @@ func TestSwarmAgreesAtEveryQuietMomentUnderReordering(t *testing.T) {
 			s.run(10*time.Second, nil) // warm-up: every node measured and announced
 			var bad []string
 			s.run(60*time.Second, func() {
-				if s.elapsed%probeEvery != 0 {
-					return
-				}
 				if a := s.check(); len(a.problems) > 0 && len(bad) < 5 {
 					bad = append(bad, fmt.Sprintf("t=%v: %v", s.elapsed, a.problems))
 				}
@@ -473,20 +488,15 @@ func TestSwarmDoesNotThrashOnSubMarginJitter(t *testing.T) {
 			if want := LeaderCount(6, DefaultThreshold); len(a.leaders) != want {
 				t.Fatalf("leaders = %v, want %d", a.leaders, want)
 			}
-			terms := make(map[protocol.NodeID]uint64)
-			for _, sn := range s.nodes {
-				terms[sn.id] = sn.node.Status().Term
-			}
+			// Every leader-set change is broadcast, so the ELECTION_RESULT count
+			// is the re-election count. (Terms are not: they also move when a
+			// node adopts a higher term over a heartbeat.)
 			results := s.net.sentCount(protocol.TypeElectionResult)
-			s.run(60*time.Second, nil)
-			if b := s.check(); len(b.problems) > 0 || !equalIDs(b.leaders, a.leaders) {
-				t.Fatalf("leaders moved %v -> %v (%v)", a.leaders, b.leaders, b.problems)
-			}
-			for _, sn := range s.nodes {
-				if got := sn.node.Status().Term; got != terms[sn.id] {
-					t.Errorf("%s re-elected %d times under sub-margin jitter", sn.id, got-terms[sn.id])
+			s.run(60*time.Second, func() {
+				if b := s.check(); len(b.problems) > 0 || !equalIDs(b.leaders, a.leaders) {
+					t.Fatalf("t=%v: leaders moved %v -> %v (%v)", s.elapsed, a.leaders, b.leaders, b.problems)
 				}
-			}
+			})
 			if got := s.net.sentCount(protocol.TypeElectionResult); got != results {
 				t.Errorf("%d ELECTION_RESULT broadcasts under sub-margin jitter", got-results)
 			}
