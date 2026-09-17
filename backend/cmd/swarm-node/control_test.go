@@ -162,6 +162,17 @@ func TestControlCenterWiring(t *testing.T) {
 		t.Fatalf("result = %+v", rp)
 	}
 
+	// SIM_CONFIG reaches the node: telemetry reports the version and the
+	// overridden election settings (hysteresis 0 is a real zero).
+	cc.send(protocol.TypeSimConfig, "wired", protocol.SimConfigPayload{
+		Version: 1, Enabled: true, Threshold: 1, Hysteresis: 0,
+		Positions: map[protocol.NodeID]protocol.Position{"wired": {X: 1, Y: 2, Z: 3}},
+	})
+	cc.next(protocol.TypeTelemetry, func(env *protocol.Envelope) bool {
+		tp, err := protocol.PayloadOf[protocol.TelemetryPayload](env)
+		return err == nil && tp.SimVersion == 1 && tp.Threshold == 1 && tp.Hysteresis == 0
+	})
+
 	// CHAOS kill calls exit(1) and nothing else.
 	cc.send(protocol.TypeChaos, "wired", protocol.ChaosPayload{Action: "kill"})
 	if code := recvT(t, rec.exits); code != exitRuntime {

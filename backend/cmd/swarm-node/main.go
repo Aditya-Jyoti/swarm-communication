@@ -38,6 +38,16 @@ const (
 	exitConfig  = 2
 )
 
+// noOverride is the election override in force before any SIM_CONFIG sets
+// one: the SIM_CONFIG encoding of "keep the node's own settings".
+var noOverride = electionOverride{threshold: 0, hysteresis: -1}
+
+// electionOverride is the (threshold, hysteresis) pair last passed on to the
+// node from a SIM_CONFIG.
+type electionOverride struct {
+	threshold, hysteresis float64
+}
+
 func main() {
 	cfg, err := Load(os.Args[1:], os.Getenv, os.Hostname)
 	if err != nil {
@@ -108,6 +118,18 @@ type app struct {
 	// setDelays applies a CHAOS delay (0 clears it) to both reply paths: the
 	// prober's PONGs and the node's HEARTBEAT_ACKs. A seam for the same reason.
 	setDelays func(d time.Duration)
+
+	// emu holds the last applied SIM_CONFIG; the prober reads its per-peer
+	// delay. flows counts mesh frames for telemetry; nil without a Control
+	// Center, since nobody would drain it.
+	emu   *telemetry.Emulation
+	flows *telemetry.FlowRecorder
+	// setElection passes a SIM_CONFIG election override to the node. A seam so
+	// a test can observe exactly which overrides are forwarded.
+	setElection func(threshold, hysteresis float64)
+	// lastOverride is the override last forwarded. Owned by the client's Run
+	// goroutine, the only caller of applySim, so it needs no lock.
+	lastOverride electionOverride
 }
 
 // uplinkIdleFloor is the smallest read deadline the Control Center link may
@@ -138,8 +160,12 @@ func uplinkIdleTimeout(mesh time.Duration) time.Duration {
 // cycles are broken with late-bound closures over a *cluster.Node that is nil
 // until the node exists, and over an *app that is filled in as we go.
 //
-// The order is therefore: pool, prober, client (closures only), node, and the
-// listener last.
+// The order is therefore: pool, the flow recorder in front of it (only with a
+// Control Center), the emulation state, prober (sending through the recorder,
+// delaying PONGs by the emulation), client (closures only), node (also sending
+// through the recorder), and the listener last. The CC client has its own
+// private pool and is deliberately not behind the recorder: flows count mesh
+// frames only.
 //
 // This is safe without a lock because of ordering, not luck: the closures are
 // only ever invoked from goroutines the pool starts (connection readers, dial
@@ -157,7 +183,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 	log := base.With("node", cfg.NodeID)
 
 	var node *cluster.Node
-	a := &app{cfg: cfg, log: log, exit: os.Exit}
+	a := &app{cfg: cfg, log: log, exit: os.Exit, lastOverride: noOverride}
 
 	pool := network.NewPool(network.PoolConfig{
 		Self: network.Identity{
@@ -177,15 +203,32 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		},
 	})
 
-	prober := network.NewMeshProber(pool, func(addr protocol.NodeAddress) (protocol.NodeID, bool) {
+	// mesh is what the node and the prober send through. With a Control Center
+	// it is the flow recorder, so heartbeats, gossip, PINGs and PONGs are all
+	// counted for the dashboard; without one there is nobody to drain the
+	// counts, so the pool is used directly.
+	var mesh network.Transport = pool
+	if cfg.ControlCenter != "" {
+		a.flows = telemetry.NewFlowRecorder(pool)
+		mesh = a.flows
+	}
+
+	a.emu = telemetry.NewEmulation(cfg.NodeID, nil)
+
+	prober := network.NewMeshProber(mesh, func(addr protocol.NodeAddress) (protocol.NodeID, bool) {
 		return node.Resolve(addr)
 	}, nil)
+	// Nothing applied yet means no delay, so this is safe before any SIM_CONFIG.
+	prober.SetPeerDelay(a.emu.PeerDelay)
 
 	strategy := health.NewLatencyHealthStrategy(health.Config{Probe: prober.Probe})
 
 	a.setDelays = func(d time.Duration) {
 		prober.SetDelay(d)
 		node.SetChaosDelay(d)
+	}
+	a.setElection = func(threshold, hysteresis float64) {
+		node.SetElectionParams(threshold, hysteresis)
 	}
 
 	var (
@@ -198,11 +241,18 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 			Self:     network.Identity{ID: cfg.NodeID, Advertise: cfg.Advertise},
 			Addr:     cfg.ControlCenter,
 			Interval: cfg.TelemetryInterval,
-			Snapshot: func() protocol.TelemetryPayload { return telemetry.FromStatus(node.Status()) },
+			// The client is the only drainer of the flow counts, so each
+			// sample carries exactly the frames sent since the previous one.
+			Snapshot: telemetry.SnapshotFunc(
+				func() cluster.Status { return node.Status() },
+				a.emu.Version,
+				a.flows.Drain,
+			),
 			SubmitTask: func(ctx context.Context, t protocol.TaskPayload) error {
 				return node.SubmitTask(ctx, t)
 			},
 			OnChaos: a.applyChaos,
+			OnSim:   a.applySim,
 			Conn:    network.ConnConfig{IdleTimeout: uplinkIdleTimeout(cfg.IdleTimeout)},
 			Logger:  base,
 		})
@@ -220,7 +270,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		Self:           cfg.NodeID,
 		Advertise:      cfg.Advertise,
 		Incarnation:    time.Now().Unix(),
-		Transport:      pool,
+		Transport:      mesh,
 		Health:         strategy,
 		Election:       cluster.Config{Threshold: cfg.Threshold},
 		ProbeInterval:  cfg.ProbeInterval,
@@ -266,6 +316,28 @@ func (a *app) applyChaos(c telemetry.Chaos) {
 		a.log.Warn("chaos delay applied", "delay", c.Delay)
 		a.setDelays(c.Delay)
 	}
+}
+
+// applySim acts on a sanitized SIM_CONFIG, on the client's goroutine.
+//
+// A stale version changes nothing. A newer one replaces the emulation state
+// (which the prober reads for every PONG), and its election override is passed
+// to the node only when it differs from the last one passed on: every slider
+// move and every reconnect resends the whole snapshot, and re-applying the
+// same override would only log and re-run the election for nothing.
+func (a *app) applySim(p protocol.SimConfigPayload) {
+	if !a.emu.Apply(p) {
+		a.log.Debug("stale sim config ignored", "version", p.Version, "held", a.emu.Version())
+		return
+	}
+	a.log.Info("sim config applied", "version", p.Version, "enabled", p.Enabled,
+		"positions", len(p.Positions), "threshold", p.Threshold, "hysteresis", p.Hysteresis)
+	o := electionOverride{threshold: p.Threshold, hysteresis: p.Hysteresis}
+	if o == a.lastOverride {
+		return
+	}
+	a.lastOverride = o
+	a.setElection(o.threshold, o.hysteresis)
 }
 
 // run builds the app, reports the bound address through onListening (nil is
