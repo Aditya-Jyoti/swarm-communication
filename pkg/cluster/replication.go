@@ -241,6 +241,9 @@ func (n *Node) syncPayload(workers []protocol.NodeID) (json.RawMessage, error) {
 			}
 		}
 		drop := max(done/2, 1)
+		if done == 0 {
+			drop = max(len(p.Ledger)/2, 1)
+		}
 		kept := make([]protocol.TaskRecord, 0, len(p.Ledger))
 		for _, r := range p.Ledger {
 			if drop > 0 && (r.State != taskPending || done == 0) {
