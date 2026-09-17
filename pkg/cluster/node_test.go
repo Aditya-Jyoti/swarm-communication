@@ -37,6 +37,17 @@ type fakeTransport struct {
 	broadcast []*protocol.Envelope
 	peers     map[protocol.NodeID]network.PeerInfo
 	sendErr   map[protocol.NodeID]error
+	// notify, if set, receives every recorded Send without blocking. It is how
+	// a test waits for a send made off the loop (a chaos-delayed reply).
+	notify chan sentEnv
+}
+
+// watch returns a channel that receives every Send recorded from now on.
+func (f *fakeTransport) watch() <-chan sentEnv {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notify = make(chan sentEnv, 64)
+	return f.notify
 }
 
 func newFakeTransport(self protocol.NodeID) *fakeTransport {
@@ -57,6 +68,12 @@ func (f *fakeTransport) Send(_ context.Context, to protocol.NodeID, env *protoco
 		return err
 	}
 	f.sent = append(f.sent, sentEnv{to: to, env: env})
+	if f.notify != nil {
+		select {
+		case f.notify <- sentEnv{to: to, env: env}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -256,6 +273,43 @@ func baseConfig(self protocol.NodeID, tr *fakeTransport, hs *fakeHealth, clock *
 		Election:       Config{Threshold: DefaultThreshold, Hysteresis: 0.1},
 		Rehome:         0.1,
 		Logger:         quietLogger(),
+		// Phase 3 tests advance the clock by probe and gossip periods and count
+		// what was sent. A 500ms failure-detector tick would add heartbeats and
+		// missed-beat failovers to every one of them, so the shared config
+		// parks it; Phase 4 tests opt in with hbEvery.
+		HeartbeatInterval: parkedTick,
+		// Likewise, many Phase 3 tests leave peers unscored, so every probe of
+		// them fails; with the production thresholds those peers would die
+		// part-way through tests that are about something else.
+		SuspectAfter: parkedMisses,
+		DeadAfter:    parkedMisses,
+	}
+}
+
+// parkedTick is a tick period no test ever advances to, and parkedMisses a
+// probe-miss count no test ever reaches.
+const (
+	parkedTick   = 1000 * time.Hour
+	parkedMisses = 1 << 30
+)
+
+// confirmSuspicions runs the failure detector's confirmation step on n's loop
+// as if SuspicionTimeout had already elapsed, without firing any other timer.
+// Phase 3 tests use it to turn "link lost" into the death they are about.
+func confirmSuspicions(ctx context.Context, n *Node) error {
+	return n.settle(ctx, func() {
+		if n.expireSuspicions(ctx, n.cfg.Clock.Now().Add(n.cfg.SuspicionTimeout)) {
+			n.membershipChanged(ctx)
+		}
+	})
+}
+
+// peerDead reports a lost link to id and confirms the resulting suspicion.
+func (h *harness) peerDead(id protocol.NodeID) {
+	h.t.Helper()
+	h.peerDown(id, network.DispositionPeerDied)
+	if err := confirmSuspicions(h.ctx, h.node); err != nil {
+		h.t.Fatalf("confirm: %v", err)
 	}
 }
 
@@ -411,6 +465,12 @@ func TestNewNodeValidation(t *testing.T) {
 		if c.ProbeInterval != DefaultProbeInterval || c.ElectionFloor != DefaultElectionFloor ||
 			c.GossipInterval != DefaultGossipInterval || c.Shuffle == nil ||
 			c.ProbeTimeout != DefaultProbeTimeout || c.Rehome != DefaultHysteresis ||
+			c.Election.Hysteresis != DefaultHysteresis ||
+			c.HeartbeatInterval != DefaultHeartbeatInterval || c.HeartbeatMisses != DefaultHeartbeatMisses ||
+			c.SuspectAfter != DefaultSuspectAfter || c.DeadAfter != DefaultDeadAfter ||
+			c.SuspicionTimeout != DefaultSuspicionTimeout || c.TombstoneTTL != DefaultTombstoneTTL ||
+			c.StateSyncInterval != DefaultStateSyncInterval || c.LedgerSize != DefaultLedgerSize ||
+			c.Executor == nil ||
 			c.ProbeTimeout <= health.DefaultProbeTimeout ||
 			c.QueueDepth != DefaultQueueDepth || c.Logger == nil {
 			t.Fatalf("defaults not applied: %+v", c)
@@ -499,7 +559,12 @@ func TestSingleNodeElectsItself(t *testing.T) {
 // round so self has reported that median.
 func threeNodes(t *testing.T, self protocol.NodeID) *harness {
 	t.Helper()
-	h := newHarness(t, self, nil)
+	return threeNodesWith(t, self, nil)
+}
+
+func threeNodesWith(t *testing.T, self protocol.NodeID, mutate func(*NodeConfig)) *harness {
+	t.Helper()
+	h := newHarness(t, self, mutate)
 	h.hs.set(addrOf("node-b"), 1.0)
 	h.hs.set(addrOf("node-c"), 3.0)
 	h.peerUp("node-b", 1)
@@ -703,15 +768,34 @@ func TestJoinSendFailureLeavesNodeDetached(t *testing.T) {
 	}
 }
 
+// A lost link to the leader is a suspicion first: the worker leaves the leader
+// at once, but the swarm does not re-elect until the suspicion is confirmed.
+// Confirmation is what triggers the re-election.
 func TestPeerDownFailureTriggersReelection(t *testing.T) {
 	h := threeNodes(t, "node-a")
+	h.reportRole("node-b", 1, 1.0, RoleLeader) // node-b has announced its seat
 	before := h.status()
 	requireIDs(t, "Leaders", before.Leaders, ids("node-b"))
+	if before.Leader != "node-b" {
+		t.Fatalf("setup: %s, want attached to node-b", before)
+	}
 	broadcastsBefore := len(h.tr.broadcastOf(protocol.TypeElectionResult))
 
 	h.peerDown("node-b", network.DispositionPeerDied)
 
 	st := h.status()
+	if m, _ := st.View.Get("node-b"); m.State != StateSuspect || m.Incarnation != 1 {
+		t.Fatalf("node-b = %+v, want suspect at 1", m)
+	}
+	requireIDs(t, "Leaders while suspect", st.Leaders, ids("node-b"))
+	if st.Term != before.Term || st.Leader != "" {
+		t.Fatalf("while suspect: %s, want same term and detached", st)
+	}
+
+	if err := confirmSuspicions(h.ctx, h.node); err != nil {
+		t.Fatal(err)
+	}
+	st = h.status()
 	if m, ok := st.View.Get("node-b"); !ok || m.State != StateDead {
 		t.Fatalf("node-b = %+v, want dead", m)
 	}
@@ -756,7 +840,7 @@ func TestPeerReconnectAtOldIncarnationHealsByRefutation(t *testing.T) {
 	b.peerUp("node-a", 1)
 	b.probeRound() // node-b now reports 1.0 about itself
 
-	a.peerDown("node-b", network.DispositionPeerDied)
+	a.peerDead("node-b")
 	st := a.status()
 	if m, _ := st.View.Get("node-b"); m.State != StateDead || m.Incarnation != 2 {
 		t.Fatalf("node-b = %+v, want dead at 2", m)
@@ -824,7 +908,7 @@ func TestQueuedRefutationCannotResurrectAfterDeath(t *testing.T) {
 	t.Run("death processed first", func(t *testing.T) {
 		h := newHarness(t, "node-a", nil)
 		h.peerUp("node-b", 6)
-		h.peerDown("node-b", network.DispositionPeerDied)
+		h.peerDead("node-b")
 		h.report("node-b", 7, 1.0)
 		if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 7 {
 			t.Fatalf("node-b = %+v, want dead at 7", m)
@@ -834,9 +918,37 @@ func TestQueuedRefutationCannotResurrectAfterDeath(t *testing.T) {
 		h := newHarness(t, "node-a", nil)
 		h.peerUp("node-b", 6)
 		h.report("node-b", 7, 1.0)
-		h.peerDown("node-b", network.DispositionPeerDied)
+		h.peerDead("node-b")
 		if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 8 {
 			t.Fatalf("node-b = %+v, want dead at 8", m)
+		}
+	})
+	// The Phase 4 variant: the refutation lands while the death is still only
+	// a suspicion. A refutation is a legitimate claim of life, so it wins and
+	// the suspicion is dropped rather than confirmed at a stale incarnation.
+	// The peer really is gone, though, so its probes keep failing and the
+	// probe thresholds kill it at the new incarnation. Nothing is lost; the
+	// verdict just takes the probe path.
+	t.Run("refutation during suspicion", func(t *testing.T) {
+		h := newHarness(t, "node-a", func(c *NodeConfig) {
+			c.SuspectAfter, c.DeadAfter = 1, 2
+		})
+		h.peerUp("node-b", 6)
+		h.peerDown("node-b", network.DispositionPeerDied)
+		h.report("node-b", 7, 1.0)
+		if m, _ := h.status().View.Get("node-b"); m.State != StateAlive || m.Incarnation != 7 {
+			t.Fatalf("node-b = %+v, want the refutation to win: alive at 7", m)
+		}
+		if err := confirmSuspicions(h.ctx, h.node); err != nil {
+			t.Fatal(err)
+		}
+		if m, _ := h.status().View.Get("node-b"); m.State != StateAlive {
+			t.Fatalf("a resolved suspicion was confirmed: %+v", m)
+		}
+		h.probeRound() // unscored: fails
+		h.probeRound()
+		if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 8 {
+			t.Fatalf("node-b = %+v, want dead at 8 via missed probes", m)
 		}
 	})
 }
@@ -844,8 +956,8 @@ func TestQueuedRefutationCannotResurrectAfterDeath(t *testing.T) {
 func TestStalePeerUpCannotResurrectNewerDeath(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 5)
-	h.peerDown("node-b", network.DispositionTimeout) // dead at 6
-	h.peerUp("node-b", 3)                            // an old socket registering late
+	h.peerDead("node-b")  // dead at 6
+	h.peerUp("node-b", 3) // an old socket registering late
 	if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 6 {
 		t.Fatalf("node-b = %+v, want still dead at 6", m)
 	}
@@ -876,8 +988,9 @@ func TestPeerDownDispositions(t *testing.T) {
 	}{
 		{"clean close marks dead", network.DispositionCleanClose, true, StateDead},
 		{"protocol violation marks dead", network.DispositionProtocolViolation, true, StateDead},
-		{"timeout marks dead", network.DispositionTimeout, true, StateDead},
-		{"other marks dead", network.DispositionOther, true, StateDead},
+		{"peer died marks suspect", network.DispositionPeerDied, true, StateSuspect},
+		{"timeout marks suspect", network.DispositionTimeout, true, StateSuspect},
+		{"other marks suspect", network.DispositionOther, true, StateSuspect},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1075,9 +1188,11 @@ func TestUnknownAndUnhandledTypesAreDropped(t *testing.T) {
 	before := h.status()
 	h.frame("node-b", protocol.MessageType("FROBNICATE"), map[string]int{"x": 1})
 	h.frame("node-b", protocol.MessageType("FROBNICATE"), nil) // second: the once-logged path
-	h.frame("node-b", protocol.TypeHeartbeat, protocol.HeartbeatPayload{Seq: 1})
-	// Data-plane frames travel the other queue and are owned by Phase 5.
-	h.frame("node-b", protocol.TypeTask, protocol.TaskPayload{TaskID: "t1", Kind: "noop"})
+	// Known, but a Control Center frame the node leaves to cmd.
+	h.frame("node-b", protocol.TypeChaos, protocol.ChaosPayload{Action: "kill"})
+	// Data-plane frames travel the other queue; TELEMETRY is for the Control
+	// Center, not the mesh.
+	h.frame("node-b", protocol.TypeTelemetry, protocol.TelemetryPayload{Node: "node-b"})
 	after := h.status()
 	if after.View.Version != before.View.Version || after.Term != before.Term {
 		t.Fatalf("unhandled frames changed state: %s -> %s", before, after)
@@ -1248,7 +1363,7 @@ func TestDepartedPeersStopSkewingSelfScore(t *testing.T) {
 		if i%2 == 0 {
 			h.frame(id, protocol.TypeLeave, protocol.LeavePayload{Reason: "scale-down"})
 		} else {
-			h.peerDown(id, network.DispositionPeerDied)
+			h.peerDead(id)
 		}
 	}
 	st := h.status()
@@ -1294,6 +1409,10 @@ func TestInFlightProbeOfDeadPeerIsDiscarded(t *testing.T) {
 		h.node.handlePeerEvent(h.ctx, network.PeerEvent{
 			Kind: network.PeerDown, Peer: network.PeerInfo{ID: "node-c"}, Disposition: network.DispositionPeerDied,
 		})
+		// ...and its confirmation, so node-c is dead rather than suspect.
+		if h.node.expireSuspicions(h.ctx, h.clock.Now().Add(h.node.cfg.SuspicionTimeout)) {
+			h.node.membershipChanged(h.ctx)
+		}
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2051,6 +2170,8 @@ func TestNoConnectHookIsFine(t *testing.T) {
 	h.settle()
 }
 
+// Records without Seq (an older build) are unordered, so their roles keep the
+// first-hand-only rule. Seq-ordered relays are covered in converge_test.go.
 func TestRelayedRoleIsNotBelieved(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 1)

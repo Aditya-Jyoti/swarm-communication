@@ -116,6 +116,29 @@ func TestMembershipDeltaWithNoMembersIsLegal(t *testing.T) {
 // A self-reported score that is NaN or Inf cannot be carried by JSON; the
 // sanitiser must turn it into the unmeasured sentinel rather than fail the
 // encode, and a receiver must read it back as unmeasured.
+// Seq round-trips, and a zero Seq is omitted so a record from a build without
+// it is byte-identical on the wire.
+func TestMemberRecordSeqOnTheWire(t *testing.T) {
+	b, err := json.Marshal(MemberRecord{ID: "n", Score: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte(`"seq"`)) {
+		t.Fatalf("zero Seq leaked onto the wire: %s", b)
+	}
+	b, err = json.Marshal(MemberRecord{ID: "n", Score: 1, Seq: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back MemberRecord
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Seq != 42 {
+		t.Fatalf("Seq = %d after round trip (%s)", back.Seq, b)
+	}
+}
+
 func TestMemberRecordScoreSanitisedOnTheWire(t *testing.T) {
 	tests := []struct {
 		name     string

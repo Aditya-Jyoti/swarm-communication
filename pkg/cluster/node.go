@@ -33,11 +33,45 @@ const (
 	// NodeConfig.ProbeTimeout for why the node's budget must be the looser one.
 	DefaultProbeTimeout = 2 * health.DefaultProbeTimeout
 	DefaultQueueDepth   = 256
+	// DefaultHeartbeatInterval is the leader's beat period and the period of the
+	// node's failure-detector tick (suspicion expiry, tombstone GC).
+	DefaultHeartbeatInterval = 500 * time.Millisecond
+	// DefaultHeartbeatMisses is how many ticks a worker waits without a beat
+	// before it suspects its leader: 1.5s at the default interval. Three rather
+	// than one because a single late beat is scheduling noise, not a failure.
+	DefaultHeartbeatMisses = 3
+	// DefaultSuspectAfter and DefaultDeadAfter are consecutive failed probes. At
+	// the 1s probe interval a peer is suspect after ~3s of silence and dead after
+	// ~6s, which is the same moment DefaultSuspicionTimeout would fire.
+	DefaultSuspectAfter = 3
+	DefaultDeadAfter    = 6
+	// DefaultSuspicionTimeout is how long a first-hand suspicion may stand
+	// before it becomes a death. It is sized for the pool's first redial: a link
+	// that drops and comes straight back must not cost an incarnation bump and a
+	// re-election.
+	DefaultSuspicionTimeout = 3 * time.Second
+	// DefaultTombstoneTTL is how long a death record is kept. See sweepTombstones
+	// for how it relates to the anti-entropy repair bound.
+	DefaultTombstoneTTL = 60 * time.Second
+	// DefaultStateSyncInterval is the periodic STATE_SYNC resend. Changes are
+	// sent at once; the period only repairs a snapshot a worker missed.
+	DefaultStateSyncInterval = 2 * time.Second
+	// DefaultLedgerSize bounds the task ledger. See ledgerAppend.
+	DefaultLedgerSize = 500
 	// leaveTimeout bounds the LEAVE broadcast on shutdown. It is a real-time bound,
 	// not a synchronisation: shutdown must not wait on a peer whose send queue is
 	// full, and a LEAVE that does not get out costs the peers one failure-detector
 	// round, which they must survive anyway (a SIGKILL never sends one).
 	leaveTimeout = 500 * time.Millisecond
+	// maxRejectionsPerRound bounds how many rejected JOINs a worker answers with
+	// another JOIN before the next probe round. A rejection re-evaluates at once
+	// and may follow the rejecter's hint, which is right when one node is
+	// behind. When two nodes disagree about who leads, though, each rejection
+	// names the other, and without a bound the worker and the two "leaders"
+	// exchange JOIN / JOIN_ACK at network speed (a run under reordering sent
+	// ~100k of each in one simulated instant). Past the bound the worker waits,
+	// detached, for the next round, by which time the views have converged.
+	maxRejectionsPerRound = 3
 )
 
 // ErrAlreadyRunning is returned by Run when the node's loop is already running or
@@ -65,6 +99,13 @@ type NodeConfig struct {
 	// Clock defaults to RealClock.
 	Clock Clock
 	// Election parameterises Elect. The zero value takes election.go's defaults.
+	//
+	// Election.Hysteresis follows the Rehome convention at this level: zero
+	// means DefaultHysteresis, not "no damping". Elect itself reads zero as
+	// "no damping", and before this rule a caller that set only the threshold
+	// (cmd/swarm-node does) ran the swarm with no damping at all: every score
+	// wobble was re-announced and could move the leader set. A node that
+	// really wants no damping passes a tiny positive margin.
 	Election Config
 	// ProbeInterval is how often every alive peer is scored. Default 1s.
 	ProbeInterval time.Duration
@@ -107,13 +148,49 @@ type NodeConfig struct {
 	// Pool.Connect, which is how the mesh grows from a single seed. It must not
 	// block. Optional.
 	Connect func(protocol.NodeAddress)
-	// Executor runs tasks assigned to this node. Default: the built-in task
-	// kinds (Phase 4). See control.go.
+	// Executor runs tasks assigned to this node, each on its own goroutine.
+	// Default: NewDefaultExecutor(Clock), the contract's echo/sleep/hash. Like
+	// Health, it MUST honour ctx: shutdown cancels running tasks and then
+	// joins their goroutines.
 	Executor TaskExecutor
 	// OnTaskResult is called, on the loop goroutine, when a task this node
 	// leads completes (its own or an attached worker's). cmd wires it to the
 	// Control Center uplink. It must not block. Optional.
 	OnTaskResult func(protocol.TaskResultPayload)
+
+	// ---- Phase 4: failure detection. Every field defaults when <= 0, so a
+	// caller that sets none of them gets the documented behaviour. ----
+
+	// HeartbeatInterval is the leader's beat period, and the period of the
+	// failure-detector tick that expires suspicions and tombstones. Default 500ms.
+	HeartbeatInterval time.Duration
+	// HeartbeatMisses is how many ticks without a beat make a worker suspect its
+	// leader and fail over. Default 3.
+	HeartbeatMisses int
+	// SuspectAfter is how many consecutive failed probes make a peer suspect.
+	// Default 3.
+	SuspectAfter int
+	// DeadAfter is how many consecutive failed probes make a peer dead, whether
+	// or not its suspicion has timed out. Default 6.
+	DeadAfter int
+	// SuspicionTimeout is how long a first-hand suspicion stands before it is
+	// confirmed as a death. It is checked on the failure-detector tick, so the
+	// effective timeout is rounded up to the next HeartbeatInterval. Default 3s.
+	SuspicionTimeout time.Duration
+	// TombstoneTTL is how long a dead member's record is kept before it is
+	// removed from the table, measured on the Clock from when this node first
+	// saw the death. Default 60s. It must comfortably exceed the anti-entropy
+	// repair bound, (2N-1) * GossipInterval; see sweepTombstones.
+	TombstoneTTL time.Duration
+
+	// ---- Phase 4: replication and tasks ----
+
+	// StateSyncInterval is how often a leader re-sends its full STATE_SYNC to
+	// every attached worker, on top of sending one after every change.
+	// Default 2s.
+	StateSyncInterval time.Duration
+	// LedgerSize bounds the task ledger. Default 500.
+	LedgerSize int
 }
 
 func (c NodeConfig) withDefaults() NodeConfig {
@@ -138,11 +215,42 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	if c.Rehome == 0 {
 		c.Rehome = DefaultHysteresis
 	}
+	if c.Election.Hysteresis == 0 {
+		c.Election.Hysteresis = DefaultHysteresis
+	}
 	if c.QueueDepth <= 0 {
 		c.QueueDepth = DefaultQueueDepth
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
+	}
+	if c.HeartbeatInterval <= 0 {
+		c.HeartbeatInterval = DefaultHeartbeatInterval
+	}
+	if c.HeartbeatMisses <= 0 {
+		c.HeartbeatMisses = DefaultHeartbeatMisses
+	}
+	if c.SuspectAfter <= 0 {
+		c.SuspectAfter = DefaultSuspectAfter
+	}
+	if c.DeadAfter <= 0 {
+		c.DeadAfter = DefaultDeadAfter
+	}
+	if c.SuspicionTimeout <= 0 {
+		c.SuspicionTimeout = DefaultSuspicionTimeout
+	}
+	if c.TombstoneTTL <= 0 {
+		c.TombstoneTTL = DefaultTombstoneTTL
+	}
+	if c.StateSyncInterval <= 0 {
+		c.StateSyncInterval = DefaultStateSyncInterval
+	}
+	if c.LedgerSize <= 0 {
+		c.LedgerSize = DefaultLedgerSize
+	}
+	if c.Executor == nil {
+		// After Clock is defaulted: sleep tasks wait on the node's clock.
+		c.Executor = NewDefaultExecutor(c.Clock)
 	}
 	return c
 }
@@ -224,6 +332,20 @@ type Node struct {
 	probeWG sync.WaitGroup
 	// calls carries functions to be run on the loop goroutine; see settle.
 	calls chan func()
+	// bgWG joins the short-lived goroutines that deliver chaos-delayed replies
+	// (sendDelayed). Each one waits on a Clock timer or Run's context, so
+	// shutdown, which runs after that context is done, never waits long.
+	bgWG sync.WaitGroup
+	// chaosDelay is the injected reply delay in nanoseconds. Atomic: written by
+	// SetChaosDelay from any goroutine, read by the loop and by Status.
+	chaosDelay atomic.Int64
+	// submits carries SubmitTask calls to the loop. taskDone carries finished
+	// tasks back from their goroutines; it is buffered to maxInflightTasks,
+	// the most that can be running, so a finishing task never waits on a busy
+	// loop. taskWG joins the task goroutines on shutdown.
+	submits  chan submitReq
+	taskDone chan taskOutcome
+	taskWG   sync.WaitGroup
 
 	// running flips once, when Run starts. stopped is closed when Run returns;
 	// Handler selects on it so a control-plane send cannot outlive the loop.
@@ -242,8 +364,11 @@ type Node struct {
 	leaders     []protocol.NodeID
 	leader      protocol.NodeID
 	// hint is a leader named by a JOIN_ACK rejection; consumed by the next evaluate.
-	hint     protocol.NodeID
-	attached map[protocol.NodeID]struct{}
+	hint protocol.NodeID
+	// rejections counts JOIN_ACK rejections since the last probe round; see
+	// maxRejectionsPerRound.
+	rejections int
+	attached   map[protocol.NodeID]struct{}
 	// local is my measured score per peer, plus my own self-score. Affinity only.
 	local map[protocol.NodeID]float64
 	// reported is each member's self-reported score as of the last evaluate,
@@ -271,6 +396,32 @@ type Node struct {
 	gossipNext    int
 	gossipSet     map[protocol.NodeID]struct{}
 	gossipVersion uint64
+	// suspects holds the suspicions this node raised FIRST-HAND (a lost link,
+	// missed probes, missed beats) and is timing. A suspect record merely
+	// relayed to us has no entry: it is the originator's job to confirm it, and
+	// the member's job to refute it. See failure.go.
+	suspects map[protocol.NodeID]suspicion
+	// probeSeq numbers probe rounds, so a round that started before a suspicion
+	// cannot clear it with a stale success.
+	probeSeq uint64
+	// tombstones times every death record in the table, first-hand or
+	// relayed, keyed by member. tombVersion is the table version they were
+	// last reconciled against. See sweepTombstones.
+	tombstones  map[protocol.NodeID]tombstone
+	tombVersion uint64
+	// Heartbeats; see heartbeat.go. beatSeq is the leader's per-worker beat
+	// counter. sinceBeat is the worker's count of ticks since the last valid
+	// beat from n.leader.
+	beatSeq   map[protocol.NodeID]uint64
+	sinceBeat int
+	// Replication; see replication.go.
+	repl replica
+	// Tasks; see tasks.go.
+	tasks taskState
+	// runCtx is Run's context. Goroutines the loop starts (tasks, delayed
+	// replies) are bound to it rather than to whatever context the current
+	// handler was given, which in tests may be a settle caller's.
+	runCtx context.Context
 }
 
 type inboundFrame struct {
@@ -280,6 +431,7 @@ type inboundFrame struct {
 
 // probeRound is the outcome of scoring every peer once.
 type probeRound struct {
+	seq     uint64
 	results map[protocol.NodeID]probeResult
 }
 
@@ -314,6 +466,8 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		dataIn:        make(chan inboundFrame, cfg.QueueDepth),
 		probeCh:       make(chan probeRound),
 		calls:         make(chan func()),
+		submits:       make(chan submitReq),
+		taskDone:      make(chan taskOutcome, maxInflightTasks),
 		stopped:       make(chan struct{}),
 		incarnation:   cfg.Incarnation,
 		attached:      make(map[protocol.NodeID]struct{}),
@@ -324,6 +478,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		claims:        make(map[protocol.NodeID]protocol.ElectionResultPayload),
 		unknownLogged: make(map[protocol.MessageType]struct{}),
 		gossipSet:     make(map[protocol.NodeID]struct{}),
+		suspects:      make(map[protocol.NodeID]suspicion),
+		tombstones:    make(map[protocol.NodeID]tombstone),
+		beatSeq:       make(map[protocol.NodeID]uint64),
 	}
 	n.table.Upsert(Member{
 		ID:          cfg.Self,
@@ -337,6 +494,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		// on that claim alone. A node that really is alone still leads, via Elect's
 		// nobody-is-measurable fallback.
 		Score: health.ScoreUnavailable(),
+		// Seq starts at 1 so that anything we ever say about ourselves outranks
+		// the Seq-0 placeholder a peer creates from our handshake.
+		Seq: 1,
 	})
 	n.dialed[cfg.Advertise] = struct{}{}
 	n.publish()
@@ -371,6 +531,8 @@ func (n *Node) Status() Status {
 	// Dropped is read live: it is written by reader goroutines, not the loop, so a
 	// snapshot published by the loop could be arbitrarily stale on it.
 	s.Dropped = n.dropped.Load()
+	// Likewise: SetChaosDelay is called by cmd, not the loop.
+	s.ChaosDelay = n.ChaosDelay()
 	return s
 }
 
@@ -397,6 +559,9 @@ func (s *Status) clone() Status {
 		v.Leaders = append([]protocol.NodeID(nil), v.Leaders...)
 		out.Claims[k] = v
 	}
+	// Records are values, but Body is a byte slice: copied too, or a reader
+	// that edits a body would edit every other reader's.
+	out.Ledger = cloneLedger(s.Ledger)
 	return out
 }
 
@@ -441,6 +606,7 @@ func (n *Node) Run(ctx context.Context) error {
 		return ErrAlreadyRunning
 	}
 	defer close(n.stopped)
+	n.runCtx = ctx
 
 	probeT := n.cfg.Clock.NewTicker(n.cfg.ProbeInterval)
 	defer probeT.Stop()
@@ -451,6 +617,13 @@ func (n *Node) Run(ctx context.Context) error {
 	// tick and a gossip tick) rely on the probe round starting first.
 	gossipT := n.cfg.Clock.NewTicker(n.cfg.GossipInterval)
 	defer gossipT.Stop()
+	// Phase 4 tickers go after the Phase 3 ones for the same reason: at a shared
+	// deadline a probe round must already be in flight before a suspicion
+	// expires, and existing tests depend on that order.
+	tickT := n.cfg.Clock.NewTicker(n.cfg.HeartbeatInterval)
+	defer tickT.Stop()
+	syncT := n.cfg.Clock.NewTicker(n.cfg.StateSyncInterval)
+	defer syncT.Stop()
 
 	// A single node must lead itself without waiting for a peer or a tick.
 	n.evaluate(ctx)
@@ -491,9 +664,21 @@ func (n *Node) Run(ctx context.Context) error {
 			n.evaluate(ctx)
 		case <-gossipT.C():
 			n.gossipRound(ctx)
+		case <-tickT.C():
+			n.controlTick(ctx)
+		case <-syncT.C():
+			n.periodicSync(ctx)
+		case o := <-n.taskDone:
+			n.handleTaskOutcome(ctx, o)
+		case req := <-n.submits:
+			req.reply <- n.submit(ctx, req.task)
 		case fn := <-n.calls:
 			fn()
 		}
+		// Replication is flushed once per event, after it: several changes made
+		// while handling one event (a death that detaches a worker and
+		// reassigns its tasks) leave as one snapshot, not several.
+		n.flushSync(ctx)
 	}
 }
 
@@ -512,6 +697,9 @@ func (n *Node) settle(ctx context.Context, fn func()) error {
 		if fn != nil {
 			fn()
 		}
+		// Flushed before done, so the caller sees the snapshot its events
+		// caused rather than racing the loop's own flush.
+		n.flushSync(ctx)
 		close(done)
 	}
 	select {
@@ -539,6 +727,7 @@ func (n *Node) barrier(ctx context.Context, fn func()) error {
 		if fn != nil {
 			fn()
 		}
+		n.flushSync(ctx)
 		close(done)
 	}
 	select {
@@ -557,7 +746,12 @@ func (n *Node) barrier(ctx context.Context, fn func()) error {
 }
 
 // drain handles everything already queued, then waits for an in-flight probe
-// round if there is one, and repeats until nothing is pending. Loop goroutine only.
+// round or running task if there is one, and repeats until nothing is pending.
+// Loop goroutine only.
+//
+// Waiting for tasks makes settle deterministic for task tests, with the same
+// caveat as probes: a task parked on the Clock (a sleep) only finishes once the
+// test advances the clock, so such a test advances before it settles.
 func (n *Node) drain(ctx context.Context) {
 	for {
 		select {
@@ -578,15 +772,33 @@ func (n *Node) drain(ctx context.Context) {
 			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
 			continue
+		case o := <-n.taskDone:
+			n.handleTaskOutcome(ctx, o)
+			continue
+		case req := <-n.submits:
+			req.reply <- n.submit(ctx, req.task)
+			continue
 		default:
 		}
-		if !n.probing {
+		if !n.probing && n.tasks.inflight == 0 {
 			return
 		}
+		// A nil channel is never ready, so each wait is armed only when
+		// there is something to wait for.
+		var probeCh chan probeRound
+		if n.probing {
+			probeCh = n.probeCh
+		}
+		var taskCh chan taskOutcome
+		if n.tasks.inflight > 0 {
+			taskCh = n.taskDone
+		}
 		select {
-		case r := <-n.probeCh:
+		case r := <-probeCh:
 			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
+		case o := <-taskCh:
+			n.handleTaskOutcome(ctx, o)
 		case <-ctx.Done():
 			return
 		}
@@ -605,6 +817,10 @@ func (n *Node) shutdown() {
 		n.log.Info("leaving", "reason", "shutdown", "notified", sent)
 	}
 	n.probeWG.Wait()
+	n.bgWG.Wait()
+	// Task goroutines were started with Run's context, which is done, and the
+	// Executor contract requires them to honour it.
+	n.taskWG.Wait()
 	n.publish()
 }
 
@@ -643,6 +859,10 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 		if n.table.Revive(id, ev.Peer.Incarnation) {
 			changed = true
 		}
+		// A reconnect inside the suspicion window is exactly what the window is
+		// for: the suspicion is resolved, not confirmed. Revive has already
+		// cleared a suspect record held at the member's own incarnation.
+		delete(n.suspects, id)
 		n.log.Info("peer up", "peer", id, "addr", ev.Peer.Advertise, "incarnation", ev.Peer.Incarnation)
 		// Hand the newcomer our whole view so it can refute anything stale we
 		// or our peers believe about it, and learn who else is here. Sent before
@@ -663,9 +883,23 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 			changed = n.markDead(ctx, id, "incompatible protocol", ev.Err)
 		default:
 			// PeerDied, Timeout, and the unclassified Other all mean the link is
-			// gone without a goodbye. Phase 4 refines this with heartbeat-based
-			// suspicion; until then a vanished peer is dead.
-			changed = n.markDead(ctx, id, "link lost ("+ev.Disposition.String()+")", ev.Err)
+			// gone without a goodbye. That is suspicion, not death.
+			//
+			// Why not dead at once, as in Phase 3: a TCP reset is evidence about
+			// a link, and links break for reasons that leave the peer healthy (a
+			// bridge hiccup, an idle-timeout race). A death bumps the incarnation,
+			// so a peer declared dead on a blip has to refute before anyone will
+			// talk to it again, and the election reshuffles twice in between.
+			// The pool redials straight away; SuspicionTimeout (3s) is sized to
+			// let that redial land, and a PeerUp inside the window clears the
+			// suspicion through Revive.
+			//
+			// Why not ignore link loss and wait for missed probes: a crashed
+			// container resets its sockets, and that reset is the fastest failure
+			// signal we will ever get. Suspecting on it immediately lets workers
+			// leave the leader now, and the timeout, not the probe count, decides
+			// when the swarm re-elects: a crash is confirmed in 3s instead of ~6s.
+			changed = n.markSuspect(ctx, id, "link lost ("+ev.Disposition.String()+")", ev.Err)
 		}
 	default:
 		return
@@ -694,17 +928,21 @@ func (n *Node) connect(addr protocol.NodeAddress) {
 	n.cfg.Connect(addr)
 }
 
-// markDead is the single place a peer is declared dead. Every caller goes
-// through it so that Phase 4 can insert a suspicion step (suspect first, dead
-// after K missed beats) without hunting for SetState calls. It reports whether
-// the table changed; the caller decides whether to re-evaluate. A change is
-// pushed to every connected peer; see pushRecord.
+// markDead is the single place a peer is declared dead by inference. It is the
+// verdict step of the failure detector: callers are a confirmed suspicion
+// (timeout or DeadAfter missed probes, see failure.go) and the evidence that
+// needs no confirmation (a poisoned payload, a protocol violation). A doubt goes
+// through markSuspect instead. It reports whether the table changed; the caller
+// decides whether to re-evaluate. A change is pushed to every connected peer;
+// see pushRecord.
 func (n *Node) markDead(ctx context.Context, id protocol.NodeID, reason string, err error) bool {
 	delete(n.attached, id)
+	delete(n.suspects, id)
 	changed := n.table.SetState(id, StateDead)
 	if changed {
 		n.log.Warn("peer marked dead", "peer", id, "reason", reason, "err", err)
 		n.pushRecord(ctx, id)
+		n.reassignFrom(ctx, id)
 	}
 	return changed
 }
@@ -722,10 +960,12 @@ func (n *Node) markDead(ctx context.Context, id protocol.NodeID, reason string, 
 // Phase 4's suspicion step must not apply to it, and it is not worth a warning.
 func (n *Node) markLeft(ctx context.Context, id protocol.NodeID) bool {
 	delete(n.attached, id)
+	delete(n.suspects, id)
 	changed := n.table.SetState(id, StateDead)
 	if changed {
 		n.log.Info("peer left", "peer", id)
 		n.pushRecord(ctx, id)
+		n.reassignFrom(ctx, id)
 	}
 	return changed
 }
@@ -821,7 +1061,9 @@ func (n *Node) gossipRound(ctx context.Context) {
 		n.gossipOrder = n.gossipOrder[:0]
 		clear(n.gossipSet)
 		for _, m := range view.Members {
-			if m.State == StateAlive && m.ID != n.cfg.Self {
+			// Suspect peers are gossiped to as well: our view is how a suspect
+			// learns it is suspected, and it can only refute what it hears.
+			if m.State != StateDead && m.ID != n.cfg.Self {
 				n.gossipOrder = append(n.gossipOrder, m.ID)
 				n.gossipSet[m.ID] = struct{}{}
 			}
@@ -837,11 +1079,11 @@ func (n *Node) gossipRound(ctx context.Context) {
 	n.sendView(ctx, peer, view)
 }
 
-// sameGossipSet reports whether view's alive peers are exactly gossipSet.
+// sameGossipSet reports whether view's non-dead peers are exactly gossipSet.
 func (n *Node) sameGossipSet(view View) bool {
 	count := 0
 	for _, m := range view.Members {
-		if m.State != StateAlive || m.ID == n.cfg.Self {
+		if m.State == StateDead || m.ID == n.cfg.Self {
 			continue
 		}
 		if _, ok := n.gossipSet[m.ID]; !ok {
@@ -855,16 +1097,24 @@ func (n *Node) sameGossipSet(view View) bool {
 // membershipChanged is the single path after any table mutation: bound the health
 // history and the per-peer maps to the live set, then re-evaluate.
 func (n *Node) membershipChanged(ctx context.Context) {
+	n.retainLive()
+	n.evaluate(ctx)
+}
+
+// retainLive is membershipChanged without the evaluate, for callers that are
+// about to evaluate anyway (a finished probe round).
+func (n *Node) retainLive() {
 	view := n.table.Snapshot()
 	if r, ok := n.cfg.Health.(HealthRetainer); ok {
 		r.Retain(view.Addresses())
 	}
 	n.pruneLocal(view)
-	n.evaluate(ctx)
 }
 
-// pruneLocal drops local and missed entries for every peer that is not alive in
-// view. Self is kept: its local entry is the previous self-score.
+// pruneLocal drops local and missed entries for every peer that is dead or gone
+// in view. Self is kept: its local entry is the previous self-score. Suspect
+// peers are kept too: they are still probed, and their miss count is what
+// decides whether the suspicion becomes a death.
 //
 // Without this both maps only ever grow. Worse than the memory, selfScore takes
 // its median over n.local, and an entry for a peer that has left is never
@@ -875,7 +1125,7 @@ func (n *Node) membershipChanged(ctx context.Context) {
 func (n *Node) pruneLocal(view View) {
 	alive := make(map[protocol.NodeID]struct{}, len(view.Members))
 	for _, m := range view.Members {
-		if m.State == StateAlive {
+		if m.State != StateDead {
 			alive[m.ID] = struct{}{}
 		}
 	}
@@ -922,10 +1172,36 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		if n.markLeft(ctx, f.peer) {
 			n.membershipChanged(ctx)
 		}
+	case protocol.TypeHeartbeat:
+		p, ok := payloadOrPoison[protocol.HeartbeatPayload](ctx, n, f)
+		if ok {
+			n.handleHeartbeat(ctx, f, p)
+		}
+	case protocol.TypeHeartbeatAck:
+		p, ok := payloadOrPoison[protocol.HeartbeatAckPayload](ctx, n, f)
+		if ok {
+			n.handleHeartbeatAck(f.peer, p)
+		}
+	case protocol.TypeStateSync:
+		p, ok := payloadOrPoison[protocol.StateSyncPayload](ctx, n, f)
+		if ok {
+			n.handleStateSync(f.peer, p)
+		}
+	case protocol.TypeTask:
+		p, ok := payloadOrPoison[protocol.TaskPayload](ctx, n, f)
+		if ok {
+			n.handleTask(ctx, f.peer, p)
+		}
+	case protocol.TypeTaskResult:
+		p, ok := payloadOrPoison[protocol.TaskResultPayload](ctx, n, f)
+		if ok {
+			n.handleTaskResult(f.peer, p)
+		}
 	default:
-		// Unknown to this build, or known but owned by a later phase (HEARTBEAT,
-		// STATE_SYNC, TASK ...). Both are dropped without touching the connection,
-		// per the forward-compatibility policy in pkg/protocol.
+		// Unknown to this build, or known but not handled by the node (CHAOS and
+		// TELEMETRY belong to the Control Center link, not the mesh). Both are
+		// dropped without touching the connection, per the forward-compatibility
+		// policy in pkg/protocol.
 		if _, seen := n.unknownLogged[env.Type]; !seen {
 			n.unknownLogged[env.Type] = struct{}{}
 			n.log.Warn("unhandled message type; dropping (logged once per type)", "type", env.Type, "peer", f.peer)
@@ -970,23 +1246,32 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 		if rec.Measured() {
 			score = rec.Score
 		}
-		// A role is only believed first-hand: the sender speaking about itself.
-		// Relayed roles are whatever the relay knew when it last looked, and a
-		// full view sent at connect time routinely predates the announcements
-		// that changed them; applying one would erase an incumbency on this
-		// node alone and split the election. A member's role therefore moves
-		// only when that member says so, and otherwise keeps what we hold.
+		i, known := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID)
+		// A tombstone for a member we do not hold is dropped, not inserted.
+		// Once a node has collected a death (sweepTombstones), a peer that has
+		// not collected it yet would otherwise re-insert it on its next gossip
+		// round, restart our TTL, and the swarm would pass the same tombstone
+		// back and forth forever. Nothing is lost by skipping it: we hold no
+		// "alive" copy of the member for the tombstone to outrank.
+		if !known && ParseState(rec.State) == StateDead {
+			continue
+		}
+		// Roles are ordered by Seq, so a relayed role is as good as a first-hand
+		// one: Upsert keeps whichever claim is newer. A record without Seq
+		// (an older build) is unordered, and for those a role is only believed
+		// first-hand: a relayed one is whatever the relay knew when it last
+		// looked, and applying it could erase an incumbency on this node alone.
 		//
 		// Looked up by binary search rather than View.Get, which scans: a scan
 		// per record would leave the loop O(N^2) even with the snapshot hoisted.
 		// before came from Snapshot, so it is sorted by ID; View.Get cannot
 		// assume that for an arbitrary View.
-		role := RoleWorker
-		if i, ok := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID); ok {
-			role = before.Members[i].Role
-		}
-		if rec.ID == from {
-			role = ParseRole(rec.Role)
+		role := ParseRole(rec.Role)
+		if rec.Seq == 0 && rec.ID != from {
+			role = RoleWorker
+			if known {
+				role = before.Members[i].Role
+			}
 		}
 		// Dial before merging: once the record is in the table, Resolve knows
 		// the address and connect would take it for an existing peer.
@@ -1000,12 +1285,38 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 			Role:        role,
 			State:       ParseState(rec.State),
 			Score:       score,
+			Seq:         rec.Seq,
 		}) {
 			changed = true
 		}
 	}
 	if changed {
+		n.voidAttachmentIfLeaderStepped(before)
 		n.membershipChanged(ctx)
+	}
+}
+
+// voidAttachmentIfLeaderStepped forgets our attachment when the leader we are
+// attached to has just claimed to be a worker.
+//
+// A leader that steps down clears its attached set (evaluate), and it does
+// not get it back when it steps up again. Our own election may never have
+// dropped it -- views pass through different intermediate states on different
+// nodes -- so without this we would stay "attached" to a leader that no longer
+// lists us, and never JOIN again. The claim is Seq-ordered, so a stale one
+// cannot trigger this. Voiding makes the next evaluate re-JOIN if the node is
+// still our best leader, which is exactly the repair.
+func (n *Node) voidAttachmentIfLeaderStepped(before View) {
+	if n.leader == "" || n.leader == n.cfg.Self {
+		return
+	}
+	i, ok := slices.BinarySearchFunc(before.Members, n.leader, compareMemberID)
+	if !ok || before.Members[i].Role != RoleLeader {
+		return
+	}
+	if m, ok := n.table.Snapshot().Get(n.leader); ok && m.Role != RoleLeader {
+		n.log.Info("leader stepped down; attachment void", "leader", n.leader)
+		n.leader = ""
 	}
 }
 
@@ -1023,6 +1334,7 @@ func memberRecord(m Member) protocol.MemberRecord {
 		Role:        m.Role.String(),
 		State:       m.State.String(),
 		Score:       m.Score,
+		Seq:         m.Seq,
 	}
 }
 
@@ -1070,6 +1382,7 @@ func (n *Node) refuteIfNeeded(ctx context.Context, from protocol.NodeID, rec pro
 		Role:        self.Role,
 		State:       StateAlive,
 		Score:       self.Score,
+		Seq:         self.Seq,
 	})
 	n.log.Warn("refuting rumour about self", "from", from, "rumour", rec.State, "incarnation", n.incarnation)
 	n.announceSelf(ctx)
@@ -1106,9 +1419,22 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		if leader == "" {
 			leader = from
 		}
+		// An acceptance only counts for the JOIN we are still waiting on. One
+		// that arrives after we were promoted, or after we moved on to another
+		// leader, is stale: applying it would leave a leader attached to someone
+		// else, or a worker pointing at a leader it has abandoned. The sender
+		// learns from our next HEARTBEAT_ACK that we are not its worker.
+		if n.isLeader() || n.leader != leader {
+			n.log.Debug("stale JOIN_ACK ignored", "from", from, "leader", leader, "current", n.leader)
+			return
+		}
 		n.leader = leader
 		n.hint = ""
+		// A new attachment is a new replication session: the leader's
+		// snapshot versions say nothing about the previous leader's.
+		n.repl.held = false
 		n.log.Info("attached to leader", "leader", leader)
+		n.handOff(ctx)
 		n.publish()
 		return
 	}
@@ -1119,6 +1445,7 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		n.leader = ""
 	}
 	n.hint = p.Leader
+	n.rejections++
 	n.evaluate(ctx)
 }
 
@@ -1133,13 +1460,17 @@ func (n *Node) startProbeRound(ctx context.Context) {
 		n.log.Debug("probe round still in flight; skipping tick")
 		return
 	}
+	// Suspect peers are probed too: a probe that keeps failing is what turns the
+	// suspicion into a death (DeadAfter), and one that succeeds clears it.
 	var targets []Member
-	for _, m := range n.table.Snapshot().Alive() {
-		if m.ID != n.cfg.Self && m.Addr != "" {
+	for _, m := range n.table.Snapshot().Members {
+		if m.State != StateDead && m.ID != n.cfg.Self && m.Addr != "" {
 			targets = append(targets, m)
 		}
 	}
 	n.probing = true
+	n.probeSeq++
+	seq := n.probeSeq
 
 	// One derived context bounds the whole round. Cancelling it on shutdown makes
 	// every in-flight probe return ErrProbeCanceled, which the WORKLOG 3.4 call
@@ -1190,7 +1521,7 @@ func (n *Node) startProbeRound(ctx context.Context) {
 		wg.Wait()
 		close(roundDone)
 		select {
-		case n.probeCh <- probeRound{results: results}:
+		case n.probeCh <- probeRound{seq: seq, results: results}:
 		case <-ctx.Done():
 		}
 	}()
@@ -1200,13 +1531,24 @@ func (n *Node) startProbeRound(ctx context.Context) {
 // mandated in WORKLOG 3.4. Loop goroutine only.
 func (n *Node) applyProbeRound(ctx context.Context, r probeRound) {
 	n.probing = false
+	n.rejections = 0
 	view := n.table.Snapshot()
-	for id, res := range r.results {
+	// Sorted, so that when several peers cross a threshold in one round the
+	// pushes and log lines come out in the same order every run.
+	peers := make([]protocol.NodeID, 0, len(r.results))
+	for id := range r.results {
+		peers = append(peers, id)
+	}
+	sortIDs(peers)
+	changed := false
+	for _, id := range peers {
+		res := r.results[id]
 		// A round outlives the membership it was started from. A peer that died
 		// or left while its probe was in flight has already been pruned by
 		// membershipChanged; writing its result now would re-insert exactly the
 		// stale entry pruneLocal exists to remove.
-		if m, ok := view.Get(id); !ok || m.State != StateAlive {
+		m, ok := view.Get(id)
+		if !ok || m.State == StateDead {
 			continue
 		}
 		switch {
@@ -1217,10 +1559,19 @@ func (n *Node) applyProbeRound(ctx context.Context, r probeRound) {
 			n.local[id] = health.ScoreUnavailable()
 			n.missed[id]++
 			n.log.Debug("probe failed", "peer", id, "missed", n.missed[id], "err", res.err)
+			if n.probeMissed(ctx, id, res.err) {
+				changed = true
+			}
 		default:
 			n.local[id] = res.score
 			n.missed[id] = 0
+			if m.State == StateSuspect && n.probeClears(id, r.seq, m.Incarnation) {
+				changed = true
+			}
 		}
+	}
+	if changed {
+		n.retainLive()
 	}
 	n.updateSelfScore(ctx)
 }
@@ -1332,6 +1683,12 @@ func (n *Node) selfScore() float64 {
 // answer change" -- which is what makes having several entry points safe
 // (WORKLOG 2.4).
 func (n *Node) evaluate(ctx context.Context) {
+	wasLeader := n.isLeader()
+	defer func() {
+		if now := n.isLeader(); now != wasLeader {
+			n.roleChanged(now)
+		}
+	}()
 	view := n.table.Snapshot()
 	// Election ranks on the self-reported scores in the view; affinity below
 	// ranks on local measurements. See selfScore for why they must differ.
@@ -1373,10 +1730,18 @@ func (n *Node) evaluate(ctx context.Context) {
 		n.leader = n.cfg.Self
 		n.hint = ""
 		// Attached workers that have died, left, or been promoted are no longer
-		// ours to lead.
+		// ours to lead. A suspect worker stays: its suspicion resolves one way
+		// or the other within SuspicionTimeout, and dropping it on the doubt
+		// would force a re-JOIN for nothing if it is refuted.
+		//
+		// "Promoted" means the worker CLAIMS leadership, not that our election
+		// momentarily includes it. Views pass through different intermediate
+		// states on different nodes; dropping a worker on our own transient
+		// result leaves it believing it is attached (it never promoted, so it
+		// never re-JOINs) while we no longer list it.
 		for id := range n.attached {
 			m, ok := view.Get(id)
-			if !ok || m.State != StateAlive || contains(res.Leaders, id) {
+			if !ok || m.State == StateDead || m.Role == RoleLeader {
 				delete(n.attached, id)
 			}
 		}
@@ -1385,12 +1750,31 @@ func (n *Node) evaluate(ctx context.Context) {
 		for id := range n.attached {
 			delete(n.attached, id)
 		}
-		best, ok := ChooseLeader(n.local, res.Leaders)
-		if n.hint != "" && contains(res.Leaders, n.hint) {
+		usable := n.usableLeaders(res.Leaders)
+		// A leader we suspect first-hand is not one we can stay with, even while
+		// the election keeps its seat: this is the failover step. Detaching now,
+		// rather than waiting for ShouldRehome to find a better leader, is what
+		// lets the worker be "detached" (and say so in telemetry) when the
+		// suspect was the only leader.
+		if n.leader != "" && !contains(usable, n.leader) {
+			n.log.Info("detaching from unusable leader", "leader", n.leader)
+			// Leaving because the leader failed or left, not because it lost
+			// its seat: its outstanding tasks go with us.
+			m, known := view.Get(n.leader)
+			if _, doubted := n.suspects[n.leader]; doubted || !known || m.State == StateDead {
+				n.adoptOrphans()
+			}
+			n.leader = ""
+		}
+		best, ok := ChooseLeader(n.local, usable)
+		if n.hint != "" && contains(usable, n.hint) {
 			best, ok = n.hint, true
 		}
 		n.hint = ""
-		if ok && ShouldRehome(n.leader, best, n.local, res.Leaders, n.cfg.Rehome) {
+		if n.rejections > maxRejectionsPerRound {
+			ok = false
+		}
+		if ok && ShouldRehome(n.leader, best, n.local, usable, n.cfg.Rehome) {
 			n.join(ctx, best)
 		}
 	}
@@ -1422,6 +1806,9 @@ func (n *Node) join(ctx context.Context, leader protocol.NodeID) {
 	}
 	n.log.Info("joining leader", "leader", leader, "score", n.local[leader])
 	n.leader = leader
+	// A new attachment gets a full HeartbeatMisses window before its silence
+	// counts against the leader.
+	n.sinceBeat = 0
 }
 
 func (n *Node) isLeader() bool { return contains(n.leaders, n.cfg.Self) }
@@ -1468,6 +1855,7 @@ func (n *Node) publish() {
 		s.Attached = append(s.Attached, id)
 	}
 	sortIDs(s.Attached)
+	s.ControlStatus = n.repl.published()
 
 	n.statusMu.Lock()
 	n.status = s

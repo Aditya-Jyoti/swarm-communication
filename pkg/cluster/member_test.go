@@ -479,6 +479,65 @@ func TestUpsertScoreOnlyChangeBumpsVersionNotLiveness(t *testing.T) {
 	}
 }
 
+// Claims (Role, Score) are ordered by Seq within an incarnation, whoever
+// relays them. This is the convergence fix: arrival order no longer decides.
+func TestUpsertOrdersClaimsBySeq(t *testing.T) {
+	tb := NewTable()
+	tb.Upsert(Member{ID: "x", Incarnation: 1, Role: RoleLeader, Score: 1, Seq: 5})
+
+	// Older and equal Seq: the claims held stand, and nothing changes.
+	for _, seq := range []uint64{0, 4, 5} {
+		if tb.Upsert(Member{ID: "x", Incarnation: 1, Role: RoleWorker, Score: 9, Seq: seq}) {
+			t.Fatalf("Seq %d over 5 reported a change", seq)
+		}
+		if m, _ := tb.Snapshot().Get("x"); m.Role != RoleLeader || m.Score != 1 || m.Seq != 5 {
+			t.Fatalf("Seq %d over 5 changed the claims: %+v", seq, m)
+		}
+	}
+	// ...but state still worsens through an old claim: liveness has its own order.
+	if !tb.Upsert(Member{ID: "x", Incarnation: 1, State: StateSuspect, Role: RoleWorker, Score: 9, Seq: 4}) {
+		t.Fatal("a suspicion carried by an old claim was dropped")
+	}
+	if m, _ := tb.Snapshot().Get("x"); m.State != StateSuspect || m.Role != RoleLeader || m.Score != 1 {
+		t.Fatalf("member = %+v, want suspect with claims unchanged", m)
+	}
+
+	// Newer Seq: taken whole, an unmeasured score included (a member that went
+	// blind must become ineligible everywhere).
+	if !tb.Upsert(Member{ID: "x", Incarnation: 1, Role: RoleWorker, Score: math.NaN(), Seq: 6}) {
+		t.Fatal("newer claim reported as no change")
+	}
+	if m, _ := tb.Snapshot().Get("x"); m.Role != RoleWorker || !math.IsNaN(m.Score) || m.Seq != 6 {
+		t.Fatalf("member = %+v, want worker, NaN, Seq 6", m)
+	}
+
+	// A newer incarnation overwrites regardless of Seq: a restart counts afresh.
+	if !tb.Upsert(Member{ID: "x", Incarnation: 2, Role: RoleLeader, Score: 3, Seq: 1}) {
+		t.Fatal("restart ignored")
+	}
+	if m, _ := tb.Snapshot().Get("x"); m.Seq != 1 || m.Score != 3 || m.State != StateAlive {
+		t.Fatalf("member = %+v after restart", m)
+	}
+}
+
+// The setters are the author's writes, and each bumps Seq exactly once per
+// real change.
+func TestSetScoreAndSetRoleBumpSeq(t *testing.T) {
+	tb := NewTable()
+	tb.Upsert(Member{ID: "self", Seq: 1, Score: math.NaN()})
+	tb.SetScore("self", 1)
+	tb.SetScore("self", 1) // no change
+	tb.SetRole("self", RoleLeader)
+	tb.SetRole("self", RoleLeader) // no change
+	if m, _ := tb.Snapshot().Get("self"); m.Seq != 3 {
+		t.Fatalf("Seq = %d, want 3", m.Seq)
+	}
+	tb.SetState("self", StateSuspect)
+	if m, _ := tb.Snapshot().Get("self"); m.Seq != 3 {
+		t.Fatalf("SetState moved Seq to %d", m.Seq)
+	}
+}
+
 func TestSetScoreAndViewScores(t *testing.T) {
 	tb := NewTable()
 	if tb.SetScore("nobody", 1) {

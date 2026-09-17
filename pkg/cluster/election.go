@@ -109,10 +109,24 @@ func LeaderCount(n int, threshold float64) int {
 // it.
 //
 // A candidate with no entry in scores is treated as unmeasured, not as excellent.
+//
+// # Suspect members
+//
+// A suspect LEADER stays in the election: it counts toward N and may keep its
+// seat. Suspicion is a doubt that resolves within SuspicionTimeout, either by a
+// refutation or by a death. Dropping the leader on the doubt would re-elect,
+// and then re-elect back when the refutation lands, which turns every lost
+// packet into two swarm-wide re-homes. Workers already stop using a leader
+// they suspect first-hand (see Node.usableLeaders), so keeping the seat costs
+// nobody a live leader; it only delays the promotion until the suspicion is
+// confirmed. A DEAD leader gets no such grace and is replaced at once.
+//
+// A suspect WORKER is out: it is neither counted nor eligible. Promoting a node
+// we already doubt is the wrong way to fill a seat.
 func Elect(view View, scores map[protocol.NodeID]float64, cfg Config) Result {
 	cfg = cfg.withDefaults()
 
-	alive := view.Alive()
+	alive := electorate(view)
 	result := Result{Size: len(alive)}
 	if len(alive) == 0 {
 		return result
@@ -177,6 +191,18 @@ func Elect(view View, scores map[protocol.NodeID]float64, cfg Config) Result {
 	}
 	sortIDs(result.Leaders)
 	return result
+}
+
+// electorate returns the members Elect considers, in view order: every alive
+// member, plus suspect members that currently claim leadership.
+func electorate(view View) []Member {
+	out := make([]Member, 0, len(view.Members))
+	for _, m := range view.Members {
+		if m.State == StateAlive || (m.State == StateSuspect && m.Role == RoleLeader) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // applyHysteresis lets a sitting leader keep its seat unless a challenger beats it by

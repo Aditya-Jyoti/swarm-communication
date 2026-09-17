@@ -354,6 +354,17 @@ type MemberRecord struct {
 	// carry NaN or Inf, so MarshalJSON substitutes it; receivers must treat a
 	// negative score as unmeasured, never as excellent.
 	Score float64 `json:"score"`
+	// Seq orders the member's own claims (Role and Score) within one
+	// incarnation. The member bumps it every time it changes either; a receiver
+	// takes a claim only if its Seq is newer than the one it holds.
+	//
+	// Without it, Role and Score have no merge order at equal incarnation, and a
+	// full view relayed by anti-entropy can carry an old score in after a newer
+	// announcement that arrived first on a faster link. Different nodes then
+	// hold different scores for the same member, elect different leaders, and
+	// the relaying never stops. Zero means "unordered" (a build without Seq);
+	// omitempty keeps such records byte-identical on the wire.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // UnmeasuredScore is the wire value of MemberRecord.Score for a node that has no
@@ -448,6 +459,14 @@ type TaskRecord struct {
 	State      string `json:"state"` // "pending" | "done" | "failed"
 	// Result is the worker's output, populated once State leaves "pending".
 	Result string `json:"result,omitempty"`
+	// Kind and Body are the task itself, carried while it is pending. They
+	// exist for failover: a worker promoted to leader knows its tasks only from
+	// the last snapshot, and a record without the task body cannot be
+	// re-issued. A leader may clear Body once the task completes. Both are
+	// omitempty, so a record from a build without them encodes identically,
+	// and an older decoder ignores them as unknown keys.
+	Kind string          `json:"kind,omitempty"`
+	Body json.RawMessage `json:"body,omitempty"`
 }
 
 // StateSyncPayload is a leader's full state snapshot for an attached worker.
