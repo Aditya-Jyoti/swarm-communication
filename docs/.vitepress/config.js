@@ -48,6 +48,9 @@ export default withMermaid(defineConfig({
           { text: 'Repository Layout', link: '/architecture/repo-layout' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
           { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' },
+          { text: 'Failure Detection & Failover', link: '/architecture/failure-detection-and-failover' },
+          { text: 'Replication & Tasks', link: '/architecture/replication-and-tasks' },
+          { text: 'Convergence Debugging', link: '/architecture/convergence-debugging' },
           { text: 'Control Plane Contract', link: '/architecture/control-plane' },
           { text: 'The Control Center', link: '/architecture/control-center' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' }
@@ -82,7 +85,8 @@ export default withMermaid(defineConfig({
           { text: 'Context & Cancellation Propagation', link: '/concepts/context-cancellation' },
           { text: 'Interface Polymorphism', link: '/concepts/interface-polymorphism' },
           { text: 'Error Wrapping & Classification', link: '/concepts/error-wrapping-and-classification' },
-          { text: 'Monotonic vs Wall Clocks', link: '/concepts/monotonic-vs-wall-clocks' }
+          { text: 'Monotonic vs Wall Clocks', link: '/concepts/monotonic-vs-wall-clocks' },
+          { text: 'Heartbeat Intervals, Jitter & Timers', link: '/concepts/heartbeat-intervals-and-timers' }
         ]
       },
       {
@@ -93,8 +97,10 @@ export default withMermaid(defineConfig({
           { text: 'Failure Detectors', link: '/concepts/failure-detectors' },
           { text: 'Gossip & Anti-Entropy', link: '/concepts/gossip-and-anti-entropy' },
           { text: 'Monotonic Merge & Incarnation', link: '/concepts/monotonic-merge-and-incarnation' },
+          { text: 'Logical Clocks: Terms & Sequence Numbers', link: '/concepts/logical-clocks' },
           { text: 'Split-Brain & Quorum', link: '/concepts/split-brain-and-quorum' },
           { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' },
+          { text: 'At-Least-Once Delivery & Idempotent Re-issue', link: '/concepts/at-least-once-delivery' },
           { text: 'Cooperative vs Uncooperative Failure Injection', link: '/concepts/cooperative-vs-uncooperative-failure-injection' }
         ]
       }

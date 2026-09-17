@@ -76,29 +76,31 @@ answered within 1 ms, a 50 ms silence is $\phi$ of many sigmas and suspicion ris
 routinely takes 40 ms, the same silence is unremarkable. The threshold is on $\phi$, not on a
 count, so the detector adapts per peer. Cassandra and Akka use it.
 
-This swarm chose K-missed-beats, and **it ships in Phase 4**. Today the wire contract exists
-but no code sends or counts a beat:
+This swarm chose K-missed-beats, in three places, and all of them ship (Phase 4):
 
-- `TypeHeartbeat` (`pkg/protocol/message.go:76`) says so in its comment: "K consecutive
-  misses trigger failover in Phase 4".
-- `HeartbeatPayload.Seq` (`pkg/protocol/message.go:302`) is what will make "missed"
-  countable. A worker counts *gaps in sequence*, not elapsed silence alone, so a leader that
-  is slow but still beating is distinguishable from one that stopped.
+| Detector | $T$ | $K$ | Watches |
+|---|---|---|---|
+| probes | 1 s | 3 to suspect, 6 to kill | every peer, from every node |
+| leader heartbeats | 500 ms | 3 ticks | a worker's own leader |
+| socket idle deadline | 15 s | 1 | every connection |
 
-### What Phase 3 actually does
+Every verdict goes through a **suspect** step first, unless the evidence is a fact (a `LEAVE`,
+a clean close, garbage on the wire):
 
-There is no suspicion and no miss budget yet. A lost link *is* a death:
-
-| Transport event | Phase 3 verdict | Where |
+| Transport or detector event | Verdict | Where |
 |---|---|---|
-| clean close or `LEAVE` | dead (departed) | `pkg/cluster/node.go:646`, `pkg/cluster/node.go:909` |
-| protocol violation | dead | `pkg/cluster/node.go:652` |
-| peer died, timeout, other | dead | `pkg/cluster/node.go:657` |
-| undecodable payload | dead | `pkg/cluster/node.go:930` |
+| clean close or `LEAVE` | dead at once (departed) | `pkg/cluster/node.go:877`, `pkg/cluster/node.go:1172` |
+| protocol violation | dead at once | `pkg/cluster/node.go:883` |
+| undecodable payload | dead at once | `pkg/cluster/node.go:1219` |
+| peer died, timeout, other | suspect | `pkg/cluster/node.go:902` |
+| 3 missed probes | suspect | `pkg/cluster/failure.go:109` |
+| 3 ticks without a beat | suspect | `pkg/cluster/heartbeat.go:74` |
+| suspicion older than 3 s, or 6 missed probes | dead | `pkg/cluster/failure.go:190`, `pkg/cluster/failure.go:107` |
 
-All inferred deaths go through one function, `markDead` (`pkg/cluster/node.go:691`), so
-that Phase 4 can insert the suspect step in exactly one place. The detector in Phase 3 is
-therefore the transport's read deadline alone.
+The worker counts **ticks without a valid beat**, not gaps in `HeartbeatPayload.Seq`
+(`pkg/protocol/message.go:302`). `Seq` is sent and echoed, but nothing counts gaps in it. The
+full mechanism is on
+[Failure Detection and Failover](/architecture/failure-detection-and-failover).
 
 ---
 
@@ -108,10 +110,11 @@ therefore the transport's read deadline alone.
 
 | Knob | Lives in | Moves |
 |---|---|---|
-| heartbeat / probe interval $T$ | the sender's ticker | how often evidence arrives |
+| heartbeat / probe interval $T$ | `pkg/cluster/node.go:38`, `pkg/cluster/node.go:24` | how often evidence arrives |
 | probe timeout $t_p$ | `pkg/health/latency.go:39`, default 2 s | how long one probe waits |
 | read idle timeout $t_{idle}$ | `pkg/network/conn.go:107`, default 15 s (`pkg/network/conn.go:123`) | how long a socket may be silent before it is torn down |
-| miss budget $K$ | the cluster's detector (Phase 4) | how many consecutive absences are tolerated |
+| miss budget $K$ | `pkg/cluster/node.go:42`, `pkg/cluster/node.go:46` | how many consecutive absences are tolerated |
+| suspicion timeout | `pkg/cluster/node.go:52`, default 3 s | how long an accused peer has to answer |
 
 Worst-case detection latency for a clean crash is roughly
 
@@ -202,42 +205,40 @@ default:
 Order matters. `IsCancellation` first, `err != nil` second. Reversed, every shutdown is a
 partition.
 
-### Suspicion as a state, not a bit (Phase 4)
+### Suspicion as a state, not a bit
 
-`StateSuspect` is **defined** at `pkg/cluster/member.go:47`, between alive and dead, and it
-round-trips on the wire. It is **assigned nowhere** in `pkg/` yet. Nothing today moves a
-member into it.
-
-```sh
-$ grep -rn 'StateSuspect' pkg --include='*.go' | grep -v _test
-pkg/cluster/member.go:47:	StateSuspect
-pkg/cluster/member.go:53:	case StateSuspect:
-pkg/cluster/member.go:67:		return StateSuspect
-```
-
-The plan for Phase 4, and the reason the state already exists:
+`StateSuspect` (`pkg/cluster/member.go:47`) sits between alive and dead. It is assigned in one
+place, `suspect` (`pkg/cluster/failure.go:93`), and timed only by the node that raised it.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Alive
-    Alive --> Suspect: K beats missed (Phase 4)
-    Suspect --> Alive: member refutes at higher incarnation
-    Suspect --> Dead: suspicion deadline expires (Phase 4)
-    Alive --> Dead: link lost (Phase 3 today)
+    Alive --> Suspect: link lost, or K probes or beats missed
+    Suspect --> Alive: reconnect, newer probe success, or member refutes
+    Suspect --> Dead: suspicion timeout, or 6 probes missed
+    Alive --> Dead: LEAVE, clean close, or garbage on the wire
     Dead --> Alive: member refutes past the death
 ```
 
 A detector that goes straight from alive to dead has no window in which the accused can
 object. Suspect is that window: the swarm gossips "I think X is gone", and X, if alive,
 answers with a higher incarnation. That buys accuracy without paying for it in $K$: a false
-suspicion is corrected by the victim instead of by waiting longer.
+suspicion is corrected by the victim instead of by waiting longer. This is the SWIM design
+(Das, Gupta and Motivala, 2002).
 
-The groundwork is already in the merge code:
+The merge code keeps it a doubt:
 
-- `SetState` bumps the incarnation on death only (`pkg/cluster/member.go:325`). A suspicion
+- `SetState` bumps the incarnation on death only (`pkg/cluster/member.go:356`). A suspicion
   stays at the member's own incarnation, so the member can still refute it by bumping once.
-- `Revive` still covers a suspect record held at the member's own incarnation
-  (`pkg/cluster/member.go:368`).
+- `Revive` clears a suspect record held at the member's own incarnation, for example on a
+  reconnect (`pkg/cluster/member.go:399`).
+
+Two rules keep one bad link from doing swarm-wide damage:
+
+- A **relayed** suspicion is merged, so elections see it, but it is never timed into a death
+  here (`pkg/cluster/failure.go:32`).
+- A suspect **leader** keeps its seat until the suspicion is confirmed, and a suspect
+  **worker** cannot be promoted (`electorate`, `pkg/cluster/election.go:198`).
 
 The merge rules behind refutation are on
 [Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
@@ -246,9 +247,10 @@ The merge rules behind refutation are on
 
 ## Why It Matters in This Swarm
 
-- **Election consumes the detector's output as a view.** `Elect` (`pkg/cluster/election.go:112`)
-  sizes the leader count from `view.Alive()` (`pkg/cluster/election.go:115`). Every false positive shrinks $N$, changes
-  `LeaderCount`, and can trigger a re-election of a swarm that lost nobody.
+- **Election consumes the detector's output as a view.** `Elect` (`pkg/cluster/election.go:126`)
+  sizes the leader count from its electorate (`pkg/cluster/election.go:129`). Every confirmed
+  false positive shrinks $N$, changes `LeaderCount`, and can trigger a re-election of a swarm
+  that lost nobody. A mere suspicion of a leader does not, by design.
 - **The detector's false positives are correlated.** A GC pause, a cgroup throttle, or a host
   under load delays *every* probe from that node at once. $p^K$ assumes independence; under
   correlated tails the true false-positive rate is closer to $p$. This is the argument for
@@ -261,9 +263,12 @@ The merge rules behind refutation are on
   `pkg/protocol/message.go:93` says a SIGKILLed container never sends one. Completeness must
   come from silence alone.
 - **A false positive is expensive to undo.** A death bumps the member's incarnation
-  (`pkg/cluster/member.go:325`), so a peer wrongly declared dead cannot come back by simply
-  reconnecting. It must see the death and refute it. That is the argument for landing the
-  suspect step before tightening any timeout.
+  (`pkg/cluster/member.go:356`), so a peer wrongly declared dead cannot come back by simply
+  reconnecting. It must see the death and refute it. That is why the suspect step exists, and
+  why its 3 s window is sized to let a dropped link redial first.
+- **Heartbeats see what probes cannot.** `PING` is answered on a reader goroutine, so a leader
+  whose event loop is wedged still passes every probe. Only its heartbeats stop. A suspicion
+  raised by silence is therefore not cleared by a probe (`pkg/cluster/failure.go:123`).
 
 ---
 
@@ -279,12 +284,18 @@ bug: dead peers classified as cancellations, and no eviction ever).
 
 ### The transport evicts first
 
-Symptom: peers are dropped with a connection-closed error rather than a suspect-then-dead
-transition, and `StateSuspect` is never observed. (In Phase 3 this is the expected behaviour,
-since nothing assigns `StateSuspect` yet.) Once Phase 4 lands, the cause is
-$t_{idle} < K \cdot T + t_p$. The
-socket's idle deadline fires before the detector's budget is spent. Raise the idle timeout or
-lower $K \cdot T$; they must be ordered.
+Symptom: peers are dropped on an idle-timeout `PeerDown` before any probe misses are logged.
+Cause: $t_{idle} < K \cdot T + t_p$. The socket's idle deadline fires before the detector's
+budget is spent. Raise the idle timeout or lower $K \cdot T$; they must be ordered. The
+defaults are 15 s against about 5 s.
+
+### A crash that looks like a goodbye
+
+Symptom: a `docker kill` shows up as `peer left`, not `peer suspected`, and failover is faster
+than the suspicion timeout. Cause: the kernel closes a killed process's sockets, usually with a
+FIN, so the peer reads EOF on a frame boundary: a clean close. The swarm treats that as a
+departure. See
+[TCP Teardown and Half-Open Sockets](/concepts/tcp-teardown-and-half-open-sockets).
 
 ### $K = 1$ in a test that leaks into production
 
@@ -299,12 +310,14 @@ median rather than well past the tail. A probe timeout is a *completeness* bound
 be an order of magnitude above p99, not near it. The `FailurePenalty` multiplier then ensures a
 genuine timeout still ranks worse than any honest slow answer.
 
-### Counting silence instead of sequence gaps
+### Slow versus stopped
 
-Symptom: a leader under load, still beating but late, is evicted alongside a leader that stopped.
-Cause: the worker measured elapsed time since the last beat rather than gaps in `Seq`. Late
-beats arrive and close the gap; missing beats do not. The `Seq` field exists so the two cases
-have different observations.
+Symptom: a leader under load, still beating but late, is failed over like a leader that
+stopped. Cause: its beats are more than about two intervals apart. The worker counts ticks
+without a beat, so any beat that lands resets it, however late, but a gap of two missed beats
+is a failover (see
+[Heartbeat Intervals, Jitter and Timers](/concepts/heartbeat-intervals-and-timers)). Counting
+gaps in `Seq` would let a worker tell loss from delay. It is not implemented.
 
 ---
 
@@ -321,3 +334,7 @@ have different observations.
 - [Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation) -- refutation
   and why death bumps the incarnation.
 - [Split-Brain and Quorum](/concepts/split-brain-and-quorum) -- what a false positive does to $N$.
+- [Failure Detection and Failover](/architecture/failure-detection-and-failover) -- this
+  detector as built.
+- [Heartbeat Intervals, Jitter and Timers](/concepts/heartbeat-intervals-and-timers) -- what $T$
+  really means at runtime.
