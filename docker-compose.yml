@@ -26,9 +26,14 @@
 # container name and uses that for both. `seed` sets them explicitly because
 # every other node needs a fixed address to dial first.
 #
-# Security: the HTTP API (tasks, chaos) is unauthenticated, so the published
-# port binds to ${BIND_ADDR:-127.0.0.1}. Set BIND_ADDR=0.0.0.0 only on a
-# trusted network.
+# Security: the published port binds to ${BIND_ADDR:-127.0.0.1}. The HTTP API
+# (tasks, chaos) needs no credentials by default. SWARM_CC_API_TOKEN turns on a
+# bearer token at the control center; the frontend's nginx adds it to /api/
+# and /ws server-side, so the dashboard keeps working and the browser never
+# sees it. That shuts out callers that bypass nginx (any other container on
+# the bridge, or a published CC port), NOT people who can reach the
+# dashboard: set BIND_ADDR=0.0.0.0 only on a trusted network either way.
+# Threat model: backend/pkg/controlcenter/auth.go.
 name: swarm-net
 
 x-hardening: &hardening
@@ -90,6 +95,8 @@ services:
     read_only: true
     environment:
       SWARM_LOG_LEVEL: "${SWARM_LOG_LEVEL:-info}"
+      # Empty = no auth. See the Security note at the top of this file.
+      SWARM_CC_API_TOKEN: "${SWARM_CC_API_TOKEN:-}"
     # Not published by default: the dashboard and API are reached through
     # `frontend`. To expose the CC directly (e.g. to bypass nginx while
     # debugging), uncomment these two lines and set CC_HTTP_PORT in .env:
@@ -133,6 +140,8 @@ services:
     networks: [swarmnet]
     environment:
       CONTROL_CENTER_UPSTREAM: "control-center:8080"
+      # Same value as the CC's; nginx injects it (nginx.conf.template).
+      CC_API_TOKEN: "${SWARM_CC_API_TOKEN:-}"
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${FRONTEND_PORT:-8080}:8080"
     # No depends_on on purpose: nginx resolves control-center per request, so
