@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"slices"
 	"sort"
 	"sync"
@@ -22,6 +23,10 @@ import (
 const (
 	DefaultProbeInterval = 1 * time.Second
 	DefaultElectionFloor = 30 * time.Second
+	// DefaultGossipInterval is the anti-entropy period. With one peer per round
+	// (k=1) a full cycle over N peers takes N * 2s: this is the repair bound for
+	// anything push-on-change lost, not the normal dissemination path.
+	DefaultGossipInterval = 2 * time.Second
 	// DefaultProbeTimeout is twice the strategy's own per-probe budget. See
 	// NodeConfig.ProbeTimeout for why the node's budget must be the looser one.
 	DefaultProbeTimeout = 2 * health.DefaultProbeTimeout
@@ -88,6 +93,12 @@ type NodeConfig struct {
 	// on the reader goroutine; if it returns true the frame is consumed and the
 	// node never sees it.
 	OnFrame func(peer protocol.NodeID, env *protocol.Envelope) bool
+	// GossipInterval is how often one peer is sent our full view (anti-entropy).
+	// Default 2s.
+	GossipInterval time.Duration
+	// Shuffle permutes the anti-entropy peer order in place. Default: a
+	// math/rand/v2 shuffle. Tests inject a deterministic permutation.
+	Shuffle func([]protocol.NodeID)
 	// Connect is called, on the loop goroutine, for every peer address the node
 	// learns about (HELLO's KnownPeers, a MEMBERSHIP_DELTA naming a new member)
 	// and has not seen before -- at most once per address. cmd wires it to
@@ -106,6 +117,12 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	if c.ElectionFloor <= 0 {
 		c.ElectionFloor = DefaultElectionFloor
 	}
+	if c.GossipInterval <= 0 {
+		c.GossipInterval = DefaultGossipInterval
+	}
+	if c.Shuffle == nil {
+		c.Shuffle = shuffleIDs
+	}
 	if c.ProbeTimeout == 0 {
 		c.ProbeTimeout = DefaultProbeTimeout
 	}
@@ -119,6 +136,12 @@ func (c NodeConfig) withDefaults() NodeConfig {
 		c.Logger = slog.Default()
 	}
 	return c
+}
+
+// shuffleIDs is the production Shuffle. The top-level math/rand/v2 functions
+// are safe for concurrent use and randomly seeded, so there is no source to own.
+func shuffleIDs(ids []protocol.NodeID) {
+	rand.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
 }
 
 // Status is an immutable snapshot of a node for telemetry. Every map and slice is
@@ -229,6 +252,14 @@ type Node struct {
 	// unknownLogged makes "unknown message type" a once-per-type log line rather
 	// than a line per frame from a newer build.
 	unknownLogged map[protocol.MessageType]struct{}
+	// Anti-entropy peer order; see gossipRound. gossipOrder is a shuffled
+	// permutation of the alive peers, walked by gossipNext. gossipSet holds the
+	// same IDs for membership comparison, and gossipVersion is the table version
+	// the order was last checked against.
+	gossipOrder   []protocol.NodeID
+	gossipNext    int
+	gossipSet     map[protocol.NodeID]struct{}
+	gossipVersion uint64
 }
 
 type inboundFrame struct {
@@ -281,6 +312,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		missed:        make(map[protocol.NodeID]int),
 		claims:        make(map[protocol.NodeID]protocol.ElectionResultPayload),
 		unknownLogged: make(map[protocol.MessageType]struct{}),
+		gossipSet:     make(map[protocol.NodeID]struct{}),
 	}
 	n.table.Upsert(Member{
 		ID:          cfg.Self,
@@ -403,6 +435,11 @@ func (n *Node) Run(ctx context.Context) error {
 	defer probeT.Stop()
 	floorT := n.cfg.Clock.NewTicker(n.cfg.ElectionFloor)
 	defer floorT.Stop()
+	// Registered last on purpose. FakeClock breaks deadline ties on registration
+	// order, and tests that advance to a shared deadline (2s is both a probe
+	// tick and a gossip tick) rely on the probe round starting first.
+	gossipT := n.cfg.Clock.NewTicker(n.cfg.GossipInterval)
+	defer gossipT.Stop()
 
 	// A single node must lead itself without waiting for a peer or a tick.
 	n.evaluate(ctx)
@@ -441,6 +478,8 @@ func (n *Node) Run(ctx context.Context) error {
 			n.evaluate(ctx)
 		case <-floorT.C():
 			n.evaluate(ctx)
+		case <-gossipT.C():
+			n.gossipRound(ctx)
 		case fn := <-n.calls:
 			fn()
 		}
@@ -597,7 +636,7 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 		// Hand the newcomer our whole view so it can refute anything stale we
 		// or our peers believe about it, and learn who else is here. Sent before
 		// evaluate so a refutation is already on its way when we elect.
-		n.sendView(ctx, id)
+		n.sendView(ctx, id, n.table.Snapshot())
 	case network.PeerDown:
 		delete(n.attached, id)
 		switch {
@@ -677,11 +716,10 @@ func (n *Node) markLeft(id protocol.NodeID) bool {
 	return changed
 }
 
-// sendView sends our full membership view to one peer as a MEMBERSHIP_DELTA.
+// sendView sends view, our full membership, to one peer as a MEMBERSHIP_DELTA.
 // A full view is just a large delta under Table.Upsert's merge rule, which is
-// what makes this the right shape for both a welcome and (in 3b) anti-entropy.
-func (n *Node) sendView(ctx context.Context, to protocol.NodeID) {
-	view := n.table.Snapshot()
+// what makes this the right shape for both a welcome and anti-entropy.
+func (n *Node) sendView(ctx context.Context, to protocol.NodeID, view View) {
 	records := make([]protocol.MemberRecord, 0, len(view.Members))
 	for _, m := range view.Members {
 		records = append(records, memberRecord(m))
@@ -694,8 +732,80 @@ func (n *Node) sendView(ctx context.Context, to protocol.NodeID) {
 		return
 	}
 	if err := n.cfg.Transport.Send(ctx, to, env); err != nil {
-		n.log.Warn("view send failed", "peer", to, "err", err)
+		// Membership and the connection table legitimately disagree for a while
+		// (a member learned by gossip that we have not dialled yet), and gossip
+		// retries every cycle, so a missing connection is not worth a warning.
+		level := slog.LevelWarn
+		if errors.Is(err, network.ErrUnknownPeer) {
+			level = slog.LevelDebug
+		}
+		n.log.Log(ctx, level, "view send failed", "peer", to, "err", err)
 	}
+}
+
+// gossipRound is one anti-entropy step: send our full view to one alive peer.
+//
+// # Peer selection: shuffled round-robin, k=1
+//
+// Peers are visited in a random permutation, one per round, and the
+// permutation is redrawn when it is exhausted. A uniformly random pick each
+// round would be simpler but gives no bound: by chance some peer goes unvisited
+// for many rounds. A permutation guarantees every alive peer hears our view
+// once per N rounds, so a lost push is repaired within N * GossipInterval. The
+// shuffle, rather than ID order, keeps the swarm from all targeting the same
+// peer at once. A redraw at the wrap may put the last peer first again; that
+// costs one redundant send and nothing else.
+//
+// The order is redrawn early only when the SET of alive peers changes. The
+// table version is the cheap trigger for checking, but most version bumps are
+// score reports, and redrawing on each would keep resetting the cursor and
+// quietly turn the bound back into random selection.
+//
+// The view includes our own record. That record is first-hand, and receivers
+// trust a role only when rec.ID is the sender, so gossip repairs our own role
+// and score at every peer within a cycle. It cannot repair a role we merely
+// relay; that stays the owner's job.
+func (n *Node) gossipRound(ctx context.Context) {
+	view := n.table.Snapshot()
+	if view.Version != n.gossipVersion {
+		n.gossipVersion = view.Version
+		if !n.sameGossipSet(view) {
+			n.gossipNext = len(n.gossipOrder) // force a redraw below
+		}
+	}
+	if n.gossipNext >= len(n.gossipOrder) {
+		n.gossipOrder = n.gossipOrder[:0]
+		clear(n.gossipSet)
+		for _, m := range view.Members {
+			if m.State == StateAlive && m.ID != n.cfg.Self {
+				n.gossipOrder = append(n.gossipOrder, m.ID)
+				n.gossipSet[m.ID] = struct{}{}
+			}
+		}
+		n.cfg.Shuffle(n.gossipOrder)
+		n.gossipNext = 0
+	}
+	if len(n.gossipOrder) == 0 {
+		return
+	}
+	peer := n.gossipOrder[n.gossipNext]
+	n.gossipNext++
+	n.sendView(ctx, peer, view)
+}
+
+// sameGossipSet reports whether view's alive peers are exactly gossipSet.
+func (n *Node) sameGossipSet(view View) bool {
+	count := 0
+	for _, m := range view.Members {
+		if m.State != StateAlive || m.ID == n.cfg.Self {
+			continue
+		}
+		if _, ok := n.gossipSet[m.ID]; !ok {
+			return false
+		}
+		count++
+	}
+	return count == len(n.gossipSet)
 }
 
 // membershipChanged is the single path after any table mutation: bound the health
@@ -898,7 +1008,8 @@ func (n *Node) announceSelf(ctx context.Context) {
 // equal-incarnation rule means we could never talk them out of it. The only
 // refutation is a higher incarnation: bump past the rumour and re-announce. A
 // record about us that is stale (lower incarnation) or benign (alive) is ignored;
-// we are the authority on ourselves. Phase 3b's gossip extends the re-announce.
+// we are the authority on ourselves. The re-announce is a broadcast; if it is
+// lost, anti-entropy carries our refuted record to each peer within a cycle.
 func (n *Node) refuteIfNeeded(ctx context.Context, from protocol.NodeID, rec protocol.MemberRecord) {
 	if ParseState(rec.State) == StateAlive || rec.Incarnation < n.incarnation {
 		return

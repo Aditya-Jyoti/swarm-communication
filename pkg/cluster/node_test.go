@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,9 +214,14 @@ func (h *fakeHealth) lastRetained() map[protocol.NodeAddress]struct{} {
 // ---- harness ----
 
 const (
-	probeEvery = time.Second
-	floorEvery = 30 * time.Second
+	probeEvery  = time.Second
+	floorEvery  = 30 * time.Second
+	gossipEvery = 2 * time.Second
 )
+
+// keepOrder is the test Shuffle: it leaves the (ID-sorted) order alone, so which
+// peer a gossip round targets is deterministic.
+func keepOrder([]protocol.NodeID) {}
 
 type harness struct {
 	t      *testing.T
@@ -237,17 +243,19 @@ func quietLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 func baseConfig(self protocol.NodeID, tr *fakeTransport, hs *fakeHealth, clock *FakeClock) NodeConfig {
 	return NodeConfig{
-		Self:          self,
-		Advertise:     addrOf(self),
-		Transport:     tr,
-		Health:        hs,
-		Clock:         clock,
-		ProbeInterval: probeEvery,
-		ElectionFloor: floorEvery,
-		ProbeTimeout:  probeEvery / 2,
-		Election:      Config{Threshold: DefaultThreshold, Hysteresis: 0.1},
-		Rehome:        0.1,
-		Logger:        quietLogger(),
+		Self:           self,
+		Advertise:      addrOf(self),
+		Transport:      tr,
+		Health:         hs,
+		Clock:          clock,
+		ProbeInterval:  probeEvery,
+		ElectionFloor:  floorEvery,
+		GossipInterval: gossipEvery,
+		Shuffle:        keepOrder,
+		ProbeTimeout:   probeEvery / 2,
+		Election:       Config{Threshold: DefaultThreshold, Hysteresis: 0.1},
+		Rehome:         0.1,
+		Logger:         quietLogger(),
 	}
 }
 
@@ -401,6 +409,7 @@ func TestNewNodeValidation(t *testing.T) {
 		}
 		c := n.cfg
 		if c.ProbeInterval != DefaultProbeInterval || c.ElectionFloor != DefaultElectionFloor ||
+			c.GossipInterval != DefaultGossipInterval || c.Shuffle == nil ||
 			c.ProbeTimeout != DefaultProbeTimeout || c.Rehome != DefaultHysteresis ||
 			c.ProbeTimeout <= health.DefaultProbeTimeout ||
 			c.QueueDepth != DefaultQueueDepth || c.Logger == nil {
@@ -1689,8 +1698,22 @@ func TestUnmeasuredReportOnTheWireStaysIneligible(t *testing.T) {
 // target's Handler on the caller's goroutine, exactly as a reader goroutine
 // would, so the whole exchange is driven by settle rather than by time.
 type meshHub struct {
+	// delivered counts frames handed to a node's Handler; quiesce uses it to
+	// tell a quiet mesh from one that is still talking.
+	delivered atomic.Uint64
+
 	mu    sync.Mutex
 	nodes map[protocol.NodeID]*Node
+	// drop, if set, is asked about every frame; true loses it silently, as a
+	// network would. broadcast tells a Broadcast fan-out from a Send. Guarded
+	// by mu.
+	drop func(from, to protocol.NodeID, env *protocol.Envelope, broadcast bool) bool
+}
+
+func (h *meshHub) setDrop(fn func(from, to protocol.NodeID, env *protocol.Envelope, broadcast bool) bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.drop = fn
 }
 
 type meshEndpoint struct {
@@ -1708,6 +1731,7 @@ func (e *meshEndpoint) Self() protocol.NodeID { return e.self }
 func (e *meshEndpoint) Send(_ context.Context, to protocol.NodeID, env *protocol.Envelope) error {
 	e.hub.mu.Lock()
 	target := e.hub.nodes[to]
+	drop := e.hub.drop
 	e.hub.mu.Unlock()
 	if target == nil {
 		return network.ErrUnknownPeer
@@ -1715,6 +1739,10 @@ func (e *meshEndpoint) Send(_ context.Context, to protocol.NodeID, env *protocol
 	e.mu.Lock()
 	e.sent = append(e.sent, sentEnv{to: to, env: env})
 	e.mu.Unlock()
+	if drop != nil && drop(e.self, to, env, false) {
+		return nil
+	}
+	e.hub.delivered.Add(1)
 	target.Handler()(e.self, env)
 	return nil
 }
@@ -1723,7 +1751,7 @@ func (e *meshEndpoint) Broadcast(_ context.Context, env *protocol.Envelope) int 
 	e.hub.mu.Lock()
 	targets := make([]*Node, 0, len(e.hub.nodes))
 	for id, n := range e.hub.nodes {
-		if id != e.self {
+		if id != e.self && (e.hub.drop == nil || !e.hub.drop(e.self, id, env, true)) {
 			targets = append(targets, n)
 		}
 	}
@@ -1732,6 +1760,7 @@ func (e *meshEndpoint) Broadcast(_ context.Context, env *protocol.Envelope) int 
 	e.broadcast = append(e.broadcast, env)
 	e.mu.Unlock()
 	for _, n := range targets {
+		e.hub.delivered.Add(1)
 		n.Handler()(e.self, env)
 	}
 	return len(targets)
@@ -1777,24 +1806,24 @@ type meshNode struct {
 	clock *FakeClock
 }
 
-// quiesce settles every node repeatedly until no node has queued input or a
-// round in flight. Each settle can enqueue frames on other nodes, so one pass
-// is not enough; the bound is generous and the loop exits early in practice.
+// quiesce settles every node repeatedly until a full pass delivers no new frame.
+//
+// Queue length is not a usable idleness signal: a loop that has dequeued a
+// frame and is still handling it shows an empty queue. A delivery count is.
+// Every frame delivered before a pass is either already handled or is handled
+// inside that node's settle during the pass (settle runs between events, then
+// drains), so a pass with no new deliveries means nothing is left in flight.
 func quiesce(t *testing.T, ctx context.Context, nodes []*meshNode) {
 	t.Helper()
+	hub := nodes[0].ep.hub
 	for pass := 0; pass < 64; pass++ {
+		before := hub.delivered.Load()
 		for _, m := range nodes {
 			if err := m.node.settle(ctx, nil); err != nil {
 				t.Fatalf("settle %s: %v", m.id, err)
 			}
 		}
-		idle := true
-		for _, m := range nodes {
-			if len(m.node.ctrlIn) != 0 || len(m.node.dataIn) != 0 {
-				idle = false
-			}
-		}
-		if idle {
+		if hub.delivered.Load() == before {
 			return
 		}
 	}
