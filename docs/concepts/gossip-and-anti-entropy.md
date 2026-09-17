@@ -1,6 +1,6 @@
 ---
 title: "Gossip and Anti-Entropy"
-description: "How this swarm spreads membership: push-on-change for first-hand deaths, shuffled round-robin anti-entropy for repair, the N x T_gossip bound, why a full view is just a large delta, and why gossip converges but never agrees."
+description: "How this swarm spreads membership: push-on-change for first-hand news, shuffled round-robin anti-entropy for repair, the N x T_gossip bound and the tombstone TTL it sizes, Seq-ordered relays, why a full view is just a large delta, and why gossip converges but never agrees."
 outline: deep
 ---
 
@@ -11,7 +11,7 @@ because nodes keep telling each other what they know. That is gossip. It is what
 `MEMBERSHIP_DELTA` carries, and it is why two nodes can hold different $N$ at the moment they
 each run an election.
 
-This page covers the two ways a record travels in Phase 3b, the repair bound, and the one thing
+This page covers how a record travels, the repair bound, and the one thing
 gossip does not give you. The merge rule that makes it all safe has its own page:
 [Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
 
@@ -23,7 +23,8 @@ gossip does not give you. The merge rule that makes it all safe has its own page
 
 | Path | Sends | To | When | Job |
 |---|---|---|---|---|
-| **Push** (`pushRecord`) | one record | every connected peer | this node saw a death or departure first-hand | fast |
+| **Push** (`pushRecord`) | one record | every connected peer | this node saw a death, departure or suspicion first-hand | fast |
+| **Announce** (`announceSelf`) | this node's own record | every connected peer | its own score, role or incarnation changed | fast |
 | **Anti-entropy** (`gossipRound`) | the full view | ONE alive peer | every $T_{gossip}$ (default 2 s) | repair |
 
 A push is fast but lossy: a dropped frame or a full send queue leaves a hole. Anti-entropy is
@@ -55,11 +56,12 @@ reaches everyone in one hop, so there is no infection curve to climb. What the f
 *not* remove is loss. That is the only reason anti-entropy exists here: not to spread news,
 but to repair news that did not arrive.
 
-### Only first-hand deaths are pushed
+### Only first-hand news is pushed
 
-`pushRecord` fires from `markDead` and `markLeft` only
-(`pkg/cluster/node.go:696`, `pkg/cluster/node.go:717`). A record merged from someone else's
-delta is not re-pushed.
+`pushRecord` fires from `markDead`, `markLeft` and a new first-hand suspicion only
+(`pkg/cluster/node.go:944`, `pkg/cluster/node.go:967`, `pkg/cluster/failure.go:98`). A record
+merged from someone else's delta is not re-pushed. A suspicion is pushed because the suspect
+itself is among the receivers, and hearing the rumour is its only way to refute it.
 
 | Rule | Frames per death |
 |---|---|
@@ -68,19 +70,19 @@ delta is not re-pushed.
 
 In a full mesh the original broadcast already reached everyone, so re-pushing buys nothing
 except $N^2$ traffic. A crash that *every* node observes still costs about $N^2$ frames (each
-observer broadcasts once), which the comment at `pkg/cluster/node.go:732` accepts because
+observer broadcasts once), which the comment at `pkg/cluster/node.go:983` accepts because
 deaths are rare.
 
 ### A full view is just a large delta
 
-There is no snapshot message. `MembershipDeltaPayload` (`pkg/protocol/message.go:390`) is
-the only membership payload, and its comment (`pkg/protocol/message.go:386`) says a delta
+There is no snapshot message. `MembershipDeltaPayload` (`pkg/protocol/message.go:401`) is
+the only membership payload, and its comment (`pkg/protocol/message.go:397`) says a delta
 "asserts facts about the members it names and says nothing about members it omits". The
 receiver merges; it never replaces.
 
-That works because `Table.Upsert` (`pkg/cluster/member.go:212`) is per record and
+That works because `Table.Upsert` (`pkg/cluster/member.go:225`) is per record and
 idempotent. Merging a record you already hold returns `false`. So a full view of 50 is 50
-independent upserts, most of them no-ops, and the welcome view (`pkg/cluster/node.go:639`),
+independent upserts, most of them no-ops, and the welcome view (`pkg/cluster/node.go:870`),
 the gossip view and a one-record push all run through the same code.
 
 ---
@@ -90,7 +92,7 @@ the gossip view and a one-record push all run through the same code.
 ### One gossip round
 
 ```go
-// pkg/cluster/node.go:799 (abridged)
+// pkg/cluster/node.go:1052 (abridged)
 func (n *Node) gossipRound(ctx context.Context) {
 	view := n.table.Snapshot()
 	if view.Version != n.gossipVersion {
@@ -114,7 +116,7 @@ func (n *Node) gossipRound(ctx context.Context) {
 ```
 
 It runs on the node's single event loop, from its own ticker
-(`pkg/cluster/node.go:441`, handled at `pkg/cluster/node.go:481`). No lock is held across the
+(`pkg/cluster/node.go:618`, handled at `pkg/cluster/node.go:665`). No lock is held across the
 send, and there is no extra goroutine.
 
 ### Peer selection: shuffled round-robin, k = 1
@@ -140,8 +142,8 @@ flowchart LR
 | shuffled, not ID order | ID order makes every node target the same peer on the same tick |
 | redraw only when the *alive set* changes | most version bumps are score reports. Redrawing on each would keep resetting the cursor and quietly turn the permutation back into random selection |
 
-`Shuffle` is a config seam (`pkg/cluster/node.go:101`), defaulting to `math/rand/v2`
-(`pkg/cluster/node.go:143`). Tests inject a deterministic one.
+`Shuffle` is a config seam (`pkg/cluster/node.go:144`), defaulting to `math/rand/v2`
+(`pkg/cluster/node.go:260`). Tests inject a deterministic one.
 
 ### The repair bound
 
@@ -171,23 +173,55 @@ Two caveats worth knowing:
 | 50 | 200 ms | 10 s |
 
 This is a *repair* bound, not the normal path. Normally the push arrives in milliseconds.
-Tune it with `SWARM_GOSSIP_INTERVAL` or `-gossip-interval` (`cmd/swarm-node/config.go:60`).
+Tune it with `SWARM_GOSSIP_INTERVAL` or `-gossip-interval` (`cmd/swarm-node/config.go:95`).
+
+### The repair bound sizes the tombstone TTL
+
+A death record (tombstone) is collected after `TombstoneTTL`, 60 s by default
+(`pkg/cluster/node.go:55`). It must outlive every stale "alive" copy, so it must outlive the
+worst-case repair, which the code takes as the non-alive-set bound
+(`pkg/cluster/failure.go:219`):
+
+$$
+TTL > (2N - 1) \cdot T_{gossip}
+$$
+
+| $N$ | $(2N - 1) \cdot 2\,\text{s}$ | 60 s enough? |
+|---|---|---|
+| 10 | 38 s | yes |
+| 15 | 58 s | barely |
+| 25 | 98 s | no |
+
+Past about $N = 15$ at the default interval, raise the TTL or shorten $T_{gossip}$. A
+tombstone collected too early lets a stale "alive" record **re-infect** the node. The ghost is
+then probed, fails, and dies again, which costs one more tombstone cycle but is not permanent.
+
+One more rule stops collected tombstones from bouncing: a relayed dead record for a member this
+node does not hold is dropped, not inserted (`pkg/cluster/node.go:1256`). Otherwise two nodes
+that collected the same death seconds apart would hand it back and forth forever, each time
+restarting the other's TTL. Details on
+[Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
 
 ### Receiving a view: one snapshot, binary search
 
 ```go
-// pkg/cluster/node.go:947, 971-977
+// pkg/cluster/node.go:1236, 1249-1275 (abridged)
 before := n.table.Snapshot()
 for _, rec := range p.Members {
 	// ...
-	role := RoleWorker
-	if i, ok := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID); ok {
-		role = before.Members[i].Role
+	i, known := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID)
+	if !known && ParseState(rec.State) == StateDead {
+		continue // a tombstone we already collected
 	}
-	if rec.ID == from {
-		role = ParseRole(rec.Role)
+	role := ParseRole(rec.Role)
+	if rec.Seq == 0 && rec.ID != from {
+		// pre-Seq build: believe a role only first-hand
+		role = RoleWorker
+		if known {
+			role = before.Members[i].Role
+		}
 	}
-	// ... Upsert
+	// ... Upsert, which keeps role and score unless rec.Seq is newer
 }
 ```
 
@@ -201,21 +235,26 @@ loop. `BenchmarkHandleMembershipDelta` (`pkg/cluster/bench_test.go:184`), steady
 | 1000 | 125 ms, 1000 allocs | 211 us, 1 alloc |
 
 The binary search is valid only because `Snapshot` sorts by ID
-(`pkg/cluster/member.go:417`). `View.Get` scans instead, because it cannot assume an arbitrary
+(`pkg/cluster/member.go:456`). `View.Get` scans instead, because it cannot assume an arbitrary
 `View` is sorted.
 
 ### What gossip can and cannot repair
 
-A receiver believes a **role** only from the member itself, that is when `rec.ID == from`
-(`pkg/cluster/node.go:975`). Relayed roles are ignored. State, incarnation, address and score
-merge from anyone.
+Role and score are the member's own **claims**, ordered by the member's `Seq`
+(`pkg/cluster/member.go:251`). A relay can carry a claim, but it can never make an old claim
+win: a relayed record replaces role and score only if its `Seq` is newer than the one held.
+
+Before `Seq` existed, relayed roles were ignored and relayed scores were last-writer-wins by
+arrival order. TCP keeps order within a link but not across links, so a full view built before a
+score change could land after the announcement of that change, and nodes elected from different
+scores. See [Convergence Debugging](/architecture/convergence-debugging).
 
 | Field in a gossiped record | Repaired by anti-entropy? |
 |---|---|
-| death of a third node | yes |
+| death or suspicion of a third node | yes |
 | the *sender's own* role and score | yes, the view includes the sender's own record |
-| a third node's role | **no** -- only that node's own announcement moves it |
-| a third node's score | yes, relayed scores merge (`TestThreeNodesConvergeThroughGossipAlone`) |
+| a third node's role and score | yes, if the relay's `Seq` is newer (`TestRelayedClaimsAreOrderedBySeq`) |
+| a third node's claims from a pre-`Seq` build | score yes, role **no** |
 
 ---
 
@@ -227,8 +266,8 @@ After enough rounds every view is the same. But at any given instant two views m
 no node ever *knows* that everyone holds its view. Convergence is a property of the limit.
 Agreement is a property of a moment, and gossip has no such moment.
 
-`Elect` (`pkg/cluster/election.go:112`) runs on a `View` snapshot and sizes itself from
-`view.Alive()` (`pkg/cluster/election.go:115`). Two nodes with different views can compute
+`Elect` (`pkg/cluster/election.go:126`) runs on a `View` snapshot and sizes itself from
+its electorate (`pkg/cluster/election.go:129`). Two nodes with different views can compute
 different leader sets. `ELECTION_RESULT` (`pkg/protocol/message.go:85`) makes that visible,
 and the next gossip round makes the views, and then the elections, converge. Quorum reasoning
 needs an *agreed* $n$ -- see [Split-Brain and Quorum](/concepts/split-brain-and-quorum).
@@ -237,13 +276,13 @@ needs an *agreed* $n$ -- see [Split-Brain and Quorum](/concepts/split-brain-and-
 
 | What | Where |
 |---|---|
-| gossip interval default (2 s) | `pkg/cluster/node.go:29` |
-| config fields `GossipInterval`, `Shuffle` | `pkg/cluster/node.go:98`, `pkg/cluster/node.go:101` |
-| welcome view on every `PeerUp` | `pkg/cluster/node.go:639` |
-| first-hand death push | `pkg/cluster/node.go:735` |
-| full view send | `pkg/cluster/node.go:753` |
-| departure kept as a dead record | `pkg/cluster/node.go:712` |
-| self-rumour refutation | `pkg/cluster/node.go:1044` |
+| gossip interval default (2 s) | `pkg/cluster/node.go:31` |
+| config fields `GossipInterval`, `Shuffle` | `pkg/cluster/node.go:141`, `pkg/cluster/node.go:144` |
+| welcome view on every `PeerUp` | `pkg/cluster/node.go:870` |
+| first-hand death or suspicion push | `pkg/cluster/node.go:986` |
+| full view send | `pkg/cluster/node.go:1004` |
+| departure kept as a dead record | `pkg/cluster/node.go:961` |
+| self-rumour refutation | `pkg/cluster/node.go:1369` |
 | bootstrap seed list in `HELLO` | `pkg/protocol/message.go:264` |
 | unknown message types are ignored, not fatal | `pkg/protocol/message.go:30` |
 
@@ -267,8 +306,20 @@ The full interleaving is on
 Symptom: a node that sent `LEAVE` reappears as alive a few seconds later, although its process
 is gone. Cause: deleting the record on `LEAVE`. The next peer that had not heard the `LEAVE`
 gossips its old "alive" record, and with nothing to outrank it, `Upsert` inserts it as new.
-This is why `markLeft` keeps a dead record (`pkg/cluster/node.go:712`) and `Table.Remove`
-(`pkg/cluster/member.go:390`) is no longer called by the node.
+This is why `markLeft` keeps a dead record (`pkg/cluster/node.go:961`), and why the only
+`Table.Remove` call is tombstone collection after the TTL (`pkg/cluster/failure.go:263`).
+
+### Stale scores from relays
+
+Symptom: nodes hold different scores for the same member, elect different leaders, and never
+settle, under real (reordering) links but not in an in-process test. Cause: role or score
+merged by arrival order instead of by `Seq`. Check the `seq` values in `/api/state` peers.
+
+### Tombstone ping-pong
+
+Symptom: a long-dead member keeps reappearing in views as dead, and `tombstone collected`
+logs repeat for it. Cause: relayed dead records re-inserted for members already collected. The
+receiver must drop them (`pkg/cluster/node.go:1256`).
 
 ### Replace instead of merge
 
