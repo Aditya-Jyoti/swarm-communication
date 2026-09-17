@@ -172,6 +172,19 @@ curl -s -H 'Content-Type: application/json' \
 curl -s -H 'Content-Type: application/json' -d '{"threshold":0,"hysteresis":-1}' 127.0.0.1:8080/api/sim
 ```
 
+### 3D in Blender
+
+The same live state can be exported as a Blender scene, edited there, and pushed back:
+
+```bash
+python3 blender/make_swarm_scene.py            # -> blender/swarm-scene.json
+blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
+```
+
+The add-on polls the same `/api/state` the dashboard uses, so a slider move here shows up
+there within a second, and moving a cone in Blender plus **Push positions** moves the real
+drone. Full reference: [Blender Scene Tooling](./blender-scene).
+
 ## Break it
 
 From the dashboard, per node:
