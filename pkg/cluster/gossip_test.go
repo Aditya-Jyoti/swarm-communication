@@ -147,3 +147,66 @@ func TestGossipSurvivesSendFailure(t *testing.T) {
 	h.gossipTick()
 	requireIDs(t, "after failures", viewSends(h, base), ids("node-b"))
 }
+
+// ---- push-on-change ----
+
+func deltaRecords(t *testing.T, env *protocol.Envelope) []protocol.MemberRecord {
+	t.Helper()
+	p, err := protocol.PayloadOf[protocol.MembershipDeltaPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.Members
+}
+
+func TestFirstHandDeathIsPushed(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		kill func(h *harness)
+	}{
+		{"link lost", func(h *harness) { h.peerDown("node-b", network.DispositionPeerDied) }},
+		{"clean close", func(h *harness) { h.peerDown("node-b", network.DispositionCleanClose) }},
+		{"LEAVE", func(h *harness) { h.frame("node-b", protocol.TypeLeave, protocol.LeavePayload{}) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, "node-a", nil)
+			h.peerUp("node-b", 1)
+			h.peerUp("node-c", 1)
+			base := len(h.tr.broadcastOf(protocol.TypeMembershipDelta))
+
+			tt.kill(h)
+			pushed := h.tr.broadcastOf(protocol.TypeMembershipDelta)[base:]
+			if len(pushed) != 1 {
+				t.Fatalf("delta broadcasts after the death = %d, want 1", len(pushed))
+			}
+			recs := deltaRecords(t, pushed[0])
+			if len(recs) != 1 || recs[0].ID != "node-b" || recs[0].State != "dead" || recs[0].Incarnation != 2 {
+				t.Fatalf("pushed %+v, want node-b dead at 2", recs)
+			}
+
+			// A repeat of the same death changes nothing and pushes nothing.
+			h.peerDown("node-b", network.DispositionPeerDied)
+			if n := len(h.tr.broadcastOf(protocol.TypeMembershipDelta)); n != base+1 {
+				t.Fatalf("a no-op death was pushed: %d broadcasts", n-base)
+			}
+		})
+	}
+}
+
+// A death learned from a peer is not re-pushed: that is what keeps a change
+// from echoing around a full mesh.
+func TestRelayedDeathIsNotPushed(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.peerUp("node-b", 1)
+	h.peerUp("node-c", 1)
+	base := len(h.tr.broadcastOf(protocol.TypeMembershipDelta))
+	h.frame("node-b", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-c", Advertise: addrOf("node-c"), Incarnation: 2, Role: "worker", State: "dead",
+	}}})
+	if m, _ := h.status().View.Get("node-c"); m.State != StateDead {
+		t.Fatalf("relayed death not applied: %+v", m)
+	}
+	if n := len(h.tr.broadcastOf(protocol.TypeMembershipDelta)); n != base {
+		t.Fatalf("a relayed death was re-pushed: %d broadcasts", n-base)
+	}
+}

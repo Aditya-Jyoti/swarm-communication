@@ -643,18 +643,18 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 		case ev.Disposition == network.DispositionCleanClose:
 			// The peer told us it was leaving. Recorded as a death, not deleted:
 			// see markLeft.
-			changed = n.markLeft(id)
+			changed = n.markLeft(ctx, id)
 		case ev.Disposition == network.DispositionProtocolViolation:
 			// Not evidence of death, but the link cannot be resynchronised and
 			// the pool will not redial it in a loop, so for membership purposes
 			// the peer is unusable. Logged distinctly: an operator seeing this
 			// wants to check for a version skew, not a crash.
-			changed = n.markDead(id, "incompatible protocol", ev.Err)
+			changed = n.markDead(ctx, id, "incompatible protocol", ev.Err)
 		default:
 			// PeerDied, Timeout, and the unclassified Other all mean the link is
 			// gone without a goodbye. Phase 4 refines this with heartbeat-based
 			// suspicion; until then a vanished peer is dead.
-			changed = n.markDead(id, "link lost ("+ev.Disposition.String()+")", ev.Err)
+			changed = n.markDead(ctx, id, "link lost ("+ev.Disposition.String()+")", ev.Err)
 		}
 	default:
 		return
@@ -686,12 +686,14 @@ func (n *Node) connect(addr protocol.NodeAddress) {
 // markDead is the single place a peer is declared dead. Every caller goes
 // through it so that Phase 4 can insert a suspicion step (suspect first, dead
 // after K missed beats) without hunting for SetState calls. It reports whether
-// the table changed; the caller decides whether to re-evaluate.
-func (n *Node) markDead(id protocol.NodeID, reason string, err error) bool {
+// the table changed; the caller decides whether to re-evaluate. A change is
+// pushed to every connected peer; see pushRecord.
+func (n *Node) markDead(ctx context.Context, id protocol.NodeID, reason string, err error) bool {
 	delete(n.attached, id)
 	changed := n.table.SetState(id, StateDead)
 	if changed {
 		n.log.Warn("peer marked dead", "peer", id, "reason", reason, "err", err)
+		n.pushRecord(ctx, id)
 	}
 	return changed
 }
@@ -707,13 +709,42 @@ func (n *Node) markDead(id protocol.NodeID, reason string, err error) bool {
 //
 // It does not go through markDead: a goodbye is a fact, not an inference, so
 // Phase 4's suspicion step must not apply to it, and it is not worth a warning.
-func (n *Node) markLeft(id protocol.NodeID) bool {
+func (n *Node) markLeft(ctx context.Context, id protocol.NodeID) bool {
 	delete(n.attached, id)
 	changed := n.table.SetState(id, StateDead)
 	if changed {
 		n.log.Info("peer left", "peer", id)
+		n.pushRecord(ctx, id)
 	}
 	return changed
+}
+
+// pushRecord broadcasts our record of id: push-on-change for a death this node
+// observed first-hand.
+//
+// Before this, a death travelled only as far as each peer's own PeerDown. In a
+// full mesh that is everyone, but a peer that lost only its link to the victim
+// would never be told, and would wait a full anti-entropy cycle.
+//
+// Only first-hand deaths are pushed. Relayed changes (merged from a delta) are
+// deliberately NOT re-pushed: a broadcast in a full mesh has already reached
+// everyone, and re-pushing on receipt would turn every change into N^2 frames.
+// Anything a push loses is repaired by gossipRound. A crash that every node
+// observes still costs about N^2 frames (one broadcast per observer, a no-op at
+// all but the first receiver); deaths are rare enough that the simple rule wins.
+func (n *Node) pushRecord(ctx context.Context, id protocol.NodeID) {
+	view := n.table.Snapshot()
+	m, ok := view.Get(id)
+	if !ok {
+		return
+	}
+	env, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, n.cfg.Self, "", protocol.MembershipDeltaPayload{
+		Members:     []protocol.MemberRecord{memberRecord(m)},
+		ViewVersion: view.Version,
+	})
+	if err == nil {
+		n.cfg.Transport.Broadcast(ctx, env)
+	}
 }
 
 // sendView sends view, our full membership, to one peer as a MEMBERSHIP_DELTA.
@@ -875,7 +906,7 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		}
 	case protocol.TypeLeave:
 		// The payload is informational; a LEAVE with a bad body is still a LEAVE.
-		if n.markLeft(f.peer) {
+		if n.markLeft(ctx, f.peer) {
 			n.membershipChanged(ctx)
 		}
 	default:
@@ -896,7 +927,7 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 func payloadOrPoison[T any](ctx context.Context, n *Node, f inboundFrame) (T, bool) {
 	p, err := protocol.PayloadOf[T](f.env)
 	if err != nil {
-		if n.markDead(f.peer, "malformed "+string(f.env.Type)+" payload", err) {
+		if n.markDead(ctx, f.peer, "malformed "+string(f.env.Type)+" payload", err) {
 			n.membershipChanged(ctx)
 		}
 		var zero T
