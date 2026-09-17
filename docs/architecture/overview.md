@@ -77,8 +77,8 @@ Two distinct traffic planes overlay the same TCP mesh:
 
 - **The control plane.** Peer discovery, health probes, election messages, heartbeats, membership
   gossip. Node-to-node, constant, small, latency-sensitive.
-- **The data plane.** Tasks injected at the Control Center, broadcast down through leaders to
-  workers; telemetry aggregated back up. Bursty, larger, throughput-sensitive.
+- **The data plane.** Tasks injected at the Control Center, sent to one leader, assigned by it to
+  one of its workers; results and telemetry sent back up. Bursty, larger, throughput-sensitive.
 
 They share a transport but not a priority. Heartbeats must not queue behind a task payload -- a
 fact that constrains the framing and connection-pool design in `pkg/network`.
@@ -97,23 +97,26 @@ because it is the first thing anyone runs.
 
 Candidates are ranked by health score; the top `LeaderCount` become leaders. The interesting
 question is not the formula but what happens when two nodes compute different values of $N$ at the
-same instant. That is a split-brain scenario, handled in Phase 3/4, not wished away here.
+same instant. That is a split-brain scenario, covered in
+[Split-Brain and Quorum](/concepts/split-brain-and-quorum) and
+[Convergence Debugging](/architecture/convergence-debugging).
 
 Because leadership is acquired rather than configured, role is a state in a machine:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Joining
-    Joining --> Worker: not ranked in the top LeaderCount
-    Joining --> Leader: ranked in the top LeaderCount
+    [*] --> Leader: alone at start, elects itself
+    Leader --> Detached: demoted, a healthier peer outranks it
+    Detached --> Worker: JOIN_ACK accepted by the best leader
+    Worker --> Detached: 3 silent ticks, leader suspected, or leader stepped down
+    Worker --> Worker: re-home to a leader better by the margin
+    Detached --> Leader: elected
     Worker --> Leader: promoted, healthiest survivor after failover
-    Leader --> Worker: demoted, a healthier peer outranks it
-    Worker --> Orphaned: K heartbeats missed from its leader
-    Orphaned --> Worker: re-probed and re-attached
-    Orphaned --> Leader: promoted
     Leader --> [*]: shutdown
     Worker --> [*]: shutdown
 ```
+
+A detached node is a worker with no leader. Status reports it with an empty `leader`.
 
 ### 2. Affinity clustering, not quotas
 
@@ -130,9 +133,10 @@ the leader, not as a quota baked into the clustering rule.
 ### 3. Health as an interface
 
 ```go
+// pkg/health/strategy.go:83 (comments trimmed)
 type HealthStrategy interface {
     Name() string
-    EvaluateScore(target NodeAddress) (float64, error)
+    EvaluateScore(ctx context.Context, target protocol.NodeAddress) (float64, error)
 }
 ```
 
@@ -141,40 +145,40 @@ packet loss, or a composite weighted score can be substituted without `pkg/clust
 anything new. The cluster logic must therefore never inspect *what* a score means -- only compare
 scores. Any code that assumes "score is milliseconds" is a bug against this contract.
 
-The open design questions this raises -- score direction (is higher better?), normalisation range,
-error semantics when a probe fails, and staleness -- are contract decisions for Phase 2, listed in
-the [Worklog](/WORKLOG) as open items.
+The contract's rules (lower is better, NaN means unmeasured, a cancelled probe is not a failure)
+are in `pkg/health/strategy.go` and the [Worklog](/WORKLOG), section 2.3. Election ranks on each
+node's **self-reported** score, while a worker picks its leader on its **own** measurements.
 
 ### 4. Self-healing
 
 ```mermaid
 sequenceDiagram
-    participant W as Worker
     participant L as Assigned leader
+    participant W as Worker
     participant P as Surviving peers
     participant CC as Control Center
 
-    W->>L: heartbeat
-    L-->>W: ack
-    W->>L: heartbeat
-    L-->>W: ack
-    Note over L: SIGKILL -- the process is gone
-    W-xL: heartbeat (miss 1)
-    W-xL: heartbeat (miss 2)
-    W-xL: heartbeat (miss K)
-    Note over W,L: SIGKILL means no FIN, so the socket may stay 'open'<br/>until a write fails. The deadline decides, not the socket.
-    W->>W: isolate the faulty leader from the local membership view
-    W->>P: re-evaluate health of surviving peers
-    P-->>W: scores
-    Note over P: the healthiest worker is promoted
-    P->>CC: new leader registers
-    W->>P: re-probe and re-attach, possibly to a different cluster
+    L->>W: HEARTBEAT
+    W-->>L: HEARTBEAT_ACK
+    L->>W: HEARTBEAT
+    W-->>L: HEARTBEAT_ACK
+    Note over L: crash
+    Note over W,P: socket reset, or 3 ticks with no beat
+    W->>W: suspect the leader, detach, carry its pending tasks
+    Note over W,P: leader keeps its seat while only suspect
+    Note over W,P: 3s later the suspicion is confirmed, leader dead
+    Note over P: election without it promotes the healthiest node
+    W->>P: JOIN_CLUSTER to the best leader, hand over the tasks
+    P->>CC: TELEMETRY now reports role leader
 ```
 
-$K$ consecutive misses, not one, because a single missed beat is indistinguishable from a scheduler
-hiccup or a GC pause. The gap between "slow" and "dead" is unknowable from the outside -- this is
-the core insight of failure-detector theory, and $K$ and the heartbeat interval are the two knobs
-that trade detection latency against false positives.
+$K = 3$ ticks, not one, because a single missed beat is indistinguishable from a scheduler hiccup
+or a GC pause. The gap between "slow" and "dead" is unknowable from the outside -- this is the
+core insight of failure-detector theory, and $K$ and the heartbeat interval are the two knobs
+that trade detection latency against false positives. A leader crash is repaired within about
+$3\,\text{s} + 2 \times 0.5\,\text{s}$. The mechanics are in
+[Failure Detection and Failover](./failure-detection-and-failover), and what happens to in-flight
+work in [Replication and Tasks](./replication-and-tasks).
 
 ## Package boundaries
 
@@ -229,6 +233,11 @@ a readable ID from Docker DNS. Details: [Running the Swarm](./running-the-swarm)
 ## Where to go next
 
 - [Repository Layout](./repo-layout) -- what lives where, and why the boundaries fall there.
+- [Failure Detection and Failover](./failure-detection-and-failover) -- suspicion, heartbeats and
+  the failover bound.
+- [Replication and Tasks](./replication-and-tasks) -- `STATE_SYNC` and at-least-once task
+  delivery.
+- [Convergence Debugging](./convergence-debugging) -- two real bugs and what they teach.
 - [The Control Center](./control-center) -- how telemetry, tasks and chaos flow.
 - [Running the Swarm](./running-the-swarm) -- start, scale, break, and test it.
 - [TCP Sockets & The Kernel](/concepts/tcp-sockets-and-the-kernel) -- the substrate everything
