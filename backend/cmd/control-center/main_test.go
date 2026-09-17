@@ -67,6 +67,27 @@ func TestLoad(t *testing.T) {
 			t.Errorf("Load(%v) = %v, want config error", args, err)
 		}
 	}
+	// The API token comes from the environment only (a flag would show in
+	// `ps`), and a weak one refuses to start.
+	tokEnv := func(v string) func(string) string {
+		return func(k string) string {
+			if k == "SWARM_CC_API_TOKEN" {
+				return v
+			}
+			return ""
+		}
+	}
+	if cfg, err := Load(nil, tokEnv("0123456789abcdef0123")); err != nil || cfg.APIToken != "0123456789abcdef0123" {
+		t.Errorf("token from env = %+v, %v", cfg, err)
+	}
+	for _, bad := range []string{"short", "has space in the token", "dollar$0123456789abc"} {
+		if _, err := Load(nil, tokEnv(bad)); !errors.Is(err, errConfig) {
+			t.Errorf("token %q = %v, want config error", bad, err)
+		}
+	}
+	if _, err := Load([]string{"-api-token=0123456789abcdef0123"}, noEnv); !errors.Is(err, errConfig) {
+		t.Errorf("-api-token flag accepted: %v", err)
+	}
 	for _, lvl := range []string{"error", "warning", "info"} {
 		if _, err := Load([]string{"-log-level=" + lvl}, noEnv); err != nil {
 			t.Errorf("level %s: %v", lvl, err)
