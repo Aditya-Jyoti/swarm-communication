@@ -3,7 +3,9 @@
 // dashboard.
 //
 // It is wiring only. The hub, the node server and the API live in
-// pkg/controlcenter; the dashboard assets are embedded from web/static.
+// pkg/controlcenter. The dashboard is not embedded: it is a static site served
+// by the frontend container (frontend/), which proxies /api, /healthz and /ws
+// here.
 package main
 
 import (
@@ -20,7 +22,6 @@ import (
 	"time"
 
 	"swarm-net/pkg/controlcenter"
-	"swarm-net/web"
 )
 
 // version is overridden at link time with -ldflags "-X main.version=<tag>".
@@ -91,7 +92,6 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 	}
 	cc, err := controlcenter.New(controlcenter.Config{
 		NodeListen: cfg.NodeListen,
-		Static:     web.Static(),
 		Logger:     log,
 	})
 	if err != nil {

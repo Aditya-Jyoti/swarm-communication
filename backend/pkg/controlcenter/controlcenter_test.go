@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -259,9 +258,12 @@ func getState(t *testing.T, cc *testCC) Snapshot {
 
 // --- tests ---------------------------------------------------------------------
 
-func TestHealthzAndPlaceholderPage(t *testing.T) {
+func TestHealthzAndRootPointer(t *testing.T) {
 	cc := startCC(t, nil)
-	for path, want := range map[string]string{"/healthz": "ok", "/": "Dashboard not built"} {
+	for path, want := range map[string]string{
+		"/healthz": "ok",
+		"/":        "dashboard is served by the frontend",
+	} {
 		resp, err := http.Get(cc.http.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -271,16 +273,22 @@ func TestHealthzAndPlaceholderPage(t *testing.T) {
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
 			t.Errorf("GET %s = %d %q", path, resp.StatusCode, body)
 		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Errorf("GET %s Content-Type = %q, want text/plain", path, ct)
+		}
 	}
-	resp, err := http.Get(cc.http.URL + "/app.js")
-	if err != nil {
-		t.Fatal(err)
+	// The CC serves no files: the dashboard assets live in the frontend image.
+	for _, path := range []string{"/app.js", "/index.html", "/style.css"} {
+		resp, err := http.Get(cc.http.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, resp.StatusCode)
+		}
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GET /app.js without a dashboard = %d, want 404", resp.StatusCode)
-	}
-	resp, err = http.Post(cc.http.URL+"/api/state", "application/json", nil)
+	resp, err := http.Post(cc.http.URL+"/api/state", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,20 +298,32 @@ func TestHealthzAndPlaceholderPage(t *testing.T) {
 	}
 }
 
-func TestServesEmbeddedDashboard(t *testing.T) {
-	cc := startCC(t, func(c *Config) {
-		c.Static = fstest.MapFS{"index.html": {Data: []byte("<h1>dash</h1>")}, "app.js": {Data: []byte("x()")}}
-	})
-	for path, want := range map[string]string{"/": "<h1>dash</h1>", "/app.js": "x()"} {
-		resp, err := http.Get(cc.http.URL + path)
-		if err != nil {
-			t.Fatal(err)
+// TestWSOriginThroughProxy pins the contract the frontend's nginx relies on:
+// the upgrade is accepted when Origin matches the Host header (nginx passes
+// the browser's Host through), and refused when it does not.
+func TestWSOriginThroughProxy(t *testing.T) {
+	cc := startCC(t, nil)
+	url := "ws" + strings.TrimPrefix(cc.http.URL, "http") + "/ws"
+	dial := func(host, origin string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), testWait)
+		defer cancel()
+		h := http.Header{}
+		h.Set("Origin", origin)
+		c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{Host: host, HTTPHeader: h})
+		if err == nil {
+			c.CloseNow()
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if string(body) != want {
-			t.Errorf("GET %s = %q, want %q", path, body, want)
-		}
+		return err
+	}
+	if err := dial("localhost:8080", "http://localhost:8080"); err != nil {
+		t.Errorf("same-origin via proxy Host: %v", err)
+	}
+	if err := dial("localhost:8080", "http://evil.example"); err == nil {
+		t.Error("cross-origin upgrade accepted")
+	}
+	// What a proxy that rewrote Host to its upstream would produce.
+	if err := dial("control-center:8080", "http://localhost:8080"); err == nil {
+		t.Error("Host/Origin mismatch accepted")
 	}
 }
 
