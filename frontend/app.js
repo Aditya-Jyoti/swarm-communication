@@ -1,7 +1,8 @@
 // swarm-net dashboard.
 //
 // Plain browser JavaScript: no framework, no bundler, no CDN. The file is
-// embedded in the control-center binary and served as-is.
+// served as-is by the frontend's nginx, which proxies api/ and ws on the same
+// origin to the control center, so every URL here is relative.
 //
 // Data flow (contract: docs/architecture/control-plane.md):
 //   server -> browser  {"type":"snapshot", nodes:[...], tasks:[...]}  every 1s
