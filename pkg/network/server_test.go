@@ -310,6 +310,9 @@ type scriptedListener struct {
 type acceptStep struct {
 	conn net.Conn
 	err  error
+	// hold, if set, keeps Accept from returning until it is closed, so a test
+	// can observe the loop while it is provably still inside Accept.
+	hold chan struct{}
 }
 
 func newScriptedListener(steps ...acceptStep) *scriptedListener {
@@ -327,6 +330,9 @@ func (s *scriptedListener) Accept() (net.Conn, error) {
 	s.mu.Unlock()
 	s.accepts <- n
 	if step != nil {
+		if step.hold != nil {
+			<-step.hold
+		}
 		return step.conn, step.err
 	}
 	<-s.closed
@@ -391,12 +397,17 @@ func TestAcceptLoopBacksOffOnTemporaryErrors(t *testing.T) {
 func TestAcceptLoopReturnsOnPermanentError(t *testing.T) {
 	pool := NewPool(PoolConfig{Self: idA})
 	defer pool.Close()
-	ln := newScriptedListener(acceptStep{err: errors.New("EBADF")})
+	// The failing Accept is held open so the pre-exit Err() check really runs
+	// before the loop exits; unheld, a fast loop can finish first and the check
+	// would see the final error.
+	hold := make(chan struct{})
+	ln := newScriptedListener(acceptStep{err: errors.New("EBADF"), hold: hold})
 	l := serve(ln, pool)
+	<-ln.accepts
 	if err := l.Err(); err != nil {
 		t.Errorf("Err() before the loop exited = %v", err)
 	}
-	<-ln.accepts
+	close(hold)
 	// Close would also return here, because it unblocks a loop parked in a
 	// backoff or on the next Accept. Done is the proof the loop exited on its own.
 	select {
