@@ -110,3 +110,17 @@ const (
 	MaxTasks     = 200
 	MaxTaskCount = 100
 )
+
+// Local limits on what the CC stores and re-broadcasts. Everything in the task
+// store is sent to every browser in every snapshot, once a second, so its size
+// is multiplied by MaxTasks and by the number of dashboards.
+const (
+	// maxKindLen caps a task kind. Built-in kinds are a few bytes long.
+	maxKindLen = 64
+	// maxTaskOutput caps TaskView.Output, including truncatedMark. It
+	// matches the node ledger's own cap on a stored result. Uncapped, 100
+	// echo tasks with 64KiB bodies made a 39MB snapshot.
+	maxTaskOutput = 512
+	// truncatedMark ends an output that was cut.
+	truncatedMark = "...[truncated]"
+)

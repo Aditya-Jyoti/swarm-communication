@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"swarm-net/pkg/network"
 	"swarm-net/pkg/protocol"
@@ -199,7 +200,7 @@ func (h *hub) applyResult(from protocol.NodeID, r protocol.TaskResultPayload) {
 	}
 	t.view.Worker = worker
 	t.view.OK = r.OK
-	t.view.Output = r.Output
+	t.view.Output = capOutput(r.Output)
 	t.view.DurationMS = r.DurationMS
 	detail := r.TaskID + " ok"
 	t.view.State = TaskDone
@@ -208,6 +209,20 @@ func (h *hub) applyResult(from protocol.NodeID, r protocol.TaskResultPayload) {
 		detail = r.TaskID + " failed"
 	}
 	h.event(EventTaskDone, worker, detail)
+}
+
+// capOutput shortens a worker's output to maxTaskOutput bytes, marking the
+// cut, without splitting a UTF-8 sequence (a split rune would reach the
+// browser as U+FFFD).
+func capOutput(s string) string {
+	if len(s) <= maxTaskOutput {
+		return s
+	}
+	n := maxTaskOutput - len(truncatedMark)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + truncatedMark
 }
 
 // expire forgets nodes that have been disconnected for NodeExpiry.
@@ -262,8 +277,11 @@ func (h *hub) leaders() []*nodeEntry {
 
 // submitTasks creates count tasks and sends each to a leader, round-robin.
 func (h *hub) submitTasks(m ClientMessage) ([]string, error) {
-	if m.Kind == "" {
+	switch {
+	case m.Kind == "":
 		return nil, fmt.Errorf("%w: task kind is required", ErrBadRequest)
+	case len(m.Kind) > maxKindLen:
+		return nil, fmt.Errorf("%w: task kind longer than %d bytes", ErrBadRequest, maxKindLen)
 	}
 	count := m.Count
 	switch {
