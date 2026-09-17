@@ -25,6 +25,9 @@ import (
 //     whose peer is not in the view has no address and is dropped, as is any
 //     NaN or Inf: encoding/json refuses both, and one bad value would lose the
 //     whole sample (see TelemetryPayload).
+//   - Threshold and Hysteresis are the election settings in force (Status
+//     already applies defaults and overrides). SimVersion and Flows are not
+//     part of a node's Status; SnapshotFunc fills them.
 func FromStatus(s cluster.Status) protocol.TelemetryPayload {
 	p := protocol.TelemetryPayload{
 		Node:       s.Self,
@@ -37,6 +40,8 @@ func FromStatus(s cluster.Status) protocol.TelemetryPayload {
 		Scores:     make(map[protocol.NodeAddress]float64, len(s.Scores)),
 		Dropped:    s.Dropped,
 		LedgerSize: len(s.Ledger),
+		Threshold:  s.Threshold,
+		Hysteresis: s.Hysteresis,
 	}
 	addrOf := make(map[protocol.NodeID]protocol.NodeAddress, len(s.View.Members))
 	for _, m := range s.View.Members {
@@ -64,4 +69,24 @@ func FromStatus(s cluster.Status) protocol.TelemetryPayload {
 		p.Scores[addr] = v
 	}
 	return p
+}
+
+// SnapshotFunc builds a Config.Snapshot: FromStatus(status()), plus the sim
+// version from simVersion and the flow counts from flows (typically
+// Emulation.Version and FlowRecorder.Drain). simVersion and flows may be nil.
+//
+// flows is a Drain: every call resets the counts, so each sample carries the
+// frames sent since the previous one. Use the returned func as the client's
+// only Snapshot, or samples will steal each other's counts.
+func SnapshotFunc(status func() cluster.Status, simVersion func() uint64, flows func() []protocol.FlowRecord) func() protocol.TelemetryPayload {
+	return func() protocol.TelemetryPayload {
+		p := FromStatus(status())
+		if simVersion != nil {
+			p.SimVersion = simVersion()
+		}
+		if flows != nil {
+			p.Flows = flows()
+		}
+		return p
+	}
 }

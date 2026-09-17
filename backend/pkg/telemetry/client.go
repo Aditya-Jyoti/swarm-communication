@@ -54,6 +54,11 @@ type Config struct {
 	// OnChaos receives every valid CHAOS instruction, on the Run goroutine.
 	// Invalid ones are logged and never reach it. Optional.
 	OnChaos func(Chaos)
+	// OnSim receives every SIM_CONFIG, already passed through
+	// SanitizeSimConfig, on the Run goroutine. Version filtering is the
+	// callback's job (Emulation.Apply does it): the client does not keep
+	// emulation state. Optional: nil drops SIM_CONFIG.
+	OnSim func(protocol.SimConfigPayload)
 	// SubmitTimeout bounds one SubmitTask call. Default 2s.
 	SubmitTimeout time.Duration
 	// ResultBuffer bounds TASK_RESULTs held while the link is down. Default 256.
@@ -264,7 +269,7 @@ func (c *Client) handle(peer protocol.NodeID, env *protocol.Envelope) {
 		return
 	}
 	switch env.Type {
-	case protocol.TypeTask, protocol.TypeChaos, protocol.TypePing:
+	case protocol.TypeTask, protocol.TypeChaos, protocol.TypeSimConfig, protocol.TypePing:
 	default:
 		// Unknown or unexpected types are dropped, never fatal (see
 		// protocol.MessageType's forward-compatibility policy).
@@ -323,6 +328,18 @@ func (c *Client) dispatch(ctx context.Context, pool *network.Pool, env *protocol
 		if c.cfg.OnChaos != nil {
 			c.cfg.OnChaos(ch)
 		}
+
+	case protocol.TypeSimConfig:
+		p, err := protocol.PayloadOf[protocol.SimConfigPayload](env)
+		if err != nil {
+			c.log.Warn("bad SIM_CONFIG from control center", "err", err)
+			return
+		}
+		if c.cfg.OnSim == nil {
+			return
+		}
+		c.log.Debug("sim config received", "version", p.Version, "enabled", p.Enabled)
+		c.cfg.OnSim(SanitizeSimConfig(p))
 
 	case protocol.TypePing:
 		// The CC pings so this side's read deadline is refreshed on an
