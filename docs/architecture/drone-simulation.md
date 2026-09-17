@@ -64,8 +64,8 @@ $$delay(a, b) = base + \lVert a - b \rVert \times perUnit + jitter \times u, \qu
 - The CC sends it to a node right after the node connects, and to all nodes after
   every change.
 - `enabled: false` turns the emulated delay off everywhere.
-- `threshold`: `0` means keep the node's own value; otherwise `(0, 1]`.
-- `hysteresis`: negative means keep the node's own value; `0` is legal. It sets both
+- `threshold`: `0` means use (or return to) the node's own value; otherwise `(0, 1]`.
+- `hysteresis`: negative means use (or return to) the node's own value; `0` is legal. It sets both
   the election margin and the re-home margin.
 - The CC sends `threshold: 0` and `hysteresis: -1` until an operator changes them.
 
