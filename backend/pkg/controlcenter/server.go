@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"swarm-net/pkg/geo"
 	"swarm-net/pkg/network"
 )
 
@@ -66,6 +68,16 @@ type Config struct {
 	// mutating requests and on WebSockets that send commands. Empty disables
 	// the check. Must pass CheckAPIToken. See auth.go for the threat model.
 	APIToken string
+	// SimDisabled starts the CC with the emulated latency switched off.
+	// Inverted so the zero value is the contract default (enabled).
+	SimDisabled bool
+	// SimParams is the starting latency model, clamped to geo's ranges.
+	// A pointer because the zero Params is a legal model, not "unset".
+	// Default geo.DefaultParams().
+	SimParams *geo.Params
+	// Rand returns a uniform draw in [0, 1) for randomized positions.
+	// Called only from the hub. Default math/rand/v2's Float64.
+	Rand func() float64
 	// Now is the clock. Default time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -100,6 +112,9 @@ func (c Config) withDefaults() Config {
 	if c.MaxPendingHandshakes <= 0 {
 		c.MaxPendingHandshakes = DefaultMaxPendingHandshakes
 	}
+	if c.Rand == nil {
+		c.Rand = rand.Float64
+	}
 	if c.Now == nil {
 		c.Now = time.Now
 	}
@@ -117,7 +132,7 @@ func (c Config) withDefaults() Config {
 // # Goroutine ownership
 //
 //   - The hub (Run's goroutine) is the single owner of all CC state: nodes,
-//     tasks, browsers. Everyone else talks to it by posting closures on ops
+//     tasks, browsers, the drone simulation. Everyone else talks to it by posting closures on ops
 //     (do waits for the result, post does not). One writer means no locks on
 //     that state and one answer to "who changed this node's role".
 //   - The accept loop and one goroutine per node socket (serveNode), plus
