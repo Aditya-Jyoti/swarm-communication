@@ -53,6 +53,11 @@ const (
 	// DefaultTombstoneTTL is how long a death record is kept. See sweepTombstones
 	// for how it relates to the anti-entropy repair bound.
 	DefaultTombstoneTTL = 60 * time.Second
+	// DefaultStateSyncInterval is the periodic STATE_SYNC resend. Changes are
+	// sent at once; the period only repairs a snapshot a worker missed.
+	DefaultStateSyncInterval = 2 * time.Second
+	// DefaultLedgerSize bounds the task ledger. See ledgerAppend.
+	DefaultLedgerSize = 500
 	// leaveTimeout bounds the LEAVE broadcast on shutdown. It is a real-time bound,
 	// not a synchronisation: shutdown must not wait on a peer whose send queue is
 	// full, and a LEAVE that does not get out costs the peers one failure-detector
@@ -175,6 +180,15 @@ type NodeConfig struct {
 	// saw the death. Default 60s. It must comfortably exceed the anti-entropy
 	// repair bound, (2N-1) * GossipInterval; see sweepTombstones.
 	TombstoneTTL time.Duration
+
+	// ---- Phase 4: replication and tasks ----
+
+	// StateSyncInterval is how often a leader re-sends its full STATE_SYNC to
+	// every attached worker, on top of sending one after every change.
+	// Default 2s.
+	StateSyncInterval time.Duration
+	// LedgerSize bounds the task ledger. Default 500.
+	LedgerSize int
 }
 
 func (c NodeConfig) withDefaults() NodeConfig {
@@ -225,6 +239,12 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	}
 	if c.TombstoneTTL <= 0 {
 		c.TombstoneTTL = DefaultTombstoneTTL
+	}
+	if c.StateSyncInterval <= 0 {
+		c.StateSyncInterval = DefaultStateSyncInterval
+	}
+	if c.LedgerSize <= 0 {
+		c.LedgerSize = DefaultLedgerSize
 	}
 	return c
 }
@@ -381,6 +401,8 @@ type Node struct {
 	// beat from n.leader.
 	beatSeq   map[protocol.NodeID]uint64
 	sinceBeat int
+	// Replication; see replication.go.
+	repl replica
 }
 
 type inboundFrame struct {
@@ -516,6 +538,9 @@ func (s *Status) clone() Status {
 		v.Leaders = append([]protocol.NodeID(nil), v.Leaders...)
 		out.Claims[k] = v
 	}
+	// Records are values, but Body is a byte slice: copied too, or a reader
+	// that edits a body would edit every other reader's.
+	out.Ledger = cloneLedger(s.Ledger)
 	return out
 }
 
@@ -575,6 +600,8 @@ func (n *Node) Run(ctx context.Context) error {
 	// expires, and existing tests depend on that order.
 	tickT := n.cfg.Clock.NewTicker(n.cfg.HeartbeatInterval)
 	defer tickT.Stop()
+	syncT := n.cfg.Clock.NewTicker(n.cfg.StateSyncInterval)
+	defer syncT.Stop()
 
 	// A single node must lead itself without waiting for a peer or a tick.
 	n.evaluate(ctx)
@@ -617,9 +644,15 @@ func (n *Node) Run(ctx context.Context) error {
 			n.gossipRound(ctx)
 		case <-tickT.C():
 			n.controlTick(ctx)
+		case <-syncT.C():
+			n.periodicSync(ctx)
 		case fn := <-n.calls:
 			fn()
 		}
+		// Replication is flushed once per event, after it: several changes made
+		// while handling one event (a death that detaches a worker and
+		// reassigns its tasks) leave as one snapshot, not several.
+		n.flushSync(ctx)
 	}
 }
 
@@ -638,6 +671,9 @@ func (n *Node) settle(ctx context.Context, fn func()) error {
 		if fn != nil {
 			fn()
 		}
+		// Flushed before done, so the caller sees the snapshot its events
+		// caused rather than racing the loop's own flush.
+		n.flushSync(ctx)
 		close(done)
 	}
 	select {
@@ -665,6 +701,7 @@ func (n *Node) barrier(ctx context.Context, fn func()) error {
 		if fn != nil {
 			fn()
 		}
+		n.flushSync(ctx)
 		close(done)
 	}
 	select {
@@ -1091,6 +1128,11 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		if ok {
 			n.handleHeartbeatAck(f.peer, p)
 		}
+	case protocol.TypeStateSync:
+		p, ok := payloadOrPoison[protocol.StateSyncPayload](ctx, n, f)
+		if ok {
+			n.handleStateSync(f.peer, p)
+		}
 	default:
 		// Unknown to this build, or known but not handled by the node (CHAOS and
 		// TELEMETRY belong to the Control Center link, not the mesh). Both are
@@ -1324,6 +1366,9 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		}
 		n.leader = leader
 		n.hint = ""
+		// A new attachment is a new replication session: the leader's
+		// snapshot versions say nothing about the previous leader's.
+		n.repl.held = false
 		n.log.Info("attached to leader", "leader", leader)
 		n.publish()
 		return
@@ -1573,6 +1618,12 @@ func (n *Node) selfScore() float64 {
 // answer change" -- which is what makes having several entry points safe
 // (WORKLOG 2.4).
 func (n *Node) evaluate(ctx context.Context) {
+	wasLeader := n.isLeader()
+	defer func() {
+		if now := n.isLeader(); now != wasLeader {
+			n.roleChanged(now)
+		}
+	}()
 	view := n.table.Snapshot()
 	// Election ranks on the self-reported scores in the view; affinity below
 	// ranks on local measurements. See selfScore for why they must differ.
@@ -1733,6 +1784,7 @@ func (n *Node) publish() {
 		s.Attached = append(s.Attached, id)
 	}
 	sortIDs(s.Attached)
+	s.ControlStatus = n.repl.published()
 
 	n.statusMu.Lock()
 	n.status = s

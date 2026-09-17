@@ -153,9 +153,17 @@ func TestWorkerDoesNotBeat(t *testing.T) {
 // elect node-b and node-c; node-b is closer.
 func attachedWorker(t *testing.T) *harness {
 	t.Helper()
+	return attachedWorkerWith(t, nil)
+}
+
+func attachedWorkerWith(t *testing.T, mutate func(*NodeConfig)) *harness {
+	t.Helper()
 	h := newHarness(t, "node-z", func(c *NodeConfig) {
 		phase4(c)
 		c.Election.Threshold = 0.5
+		if mutate != nil {
+			mutate(c)
+		}
 	})
 	h.hs.set(addrOf("node-b"), 1.0)
 	h.hs.set(addrOf("node-c"), 1.5)
