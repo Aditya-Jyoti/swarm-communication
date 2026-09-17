@@ -29,6 +29,7 @@
 #   E2E_NO_BUILD=1       skip --build (reuse existing images)
 #   E2E_KEEP=1           do not tear down on exit
 #   E2E_JSON=python3     force the python3 JSON path (default: jq if present)
+#   SWARM_THRESHOLD      leader fraction, passed to the stack (default 0.3)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,6 +39,9 @@ PORT="${E2E_HTTP_PORT:-18080}"
 READY_TIMEOUT="${E2E_READY_TIMEOUT:-120}"
 HEAL_TIMEOUT="${E2E_HEAL_TIMEOUT:-60}"
 TASK_TIMEOUT="${E2E_TASK_TIMEOUT:-60}"
+# Must match the stack's SWARM_THRESHOLD (docker-compose.yml passes it through).
+THRESHOLD="${SWARM_THRESHOLD:-0.3}"
+export SWARM_THRESHOLD="$THRESHOLD"
 TASKS="${E2E_TASKS:-5}"
 BASE="http://127.0.0.1:${PORT}"
 TOTAL=$((NODES + 1)) # + seed
@@ -157,14 +161,25 @@ state() { curl -fsS --max-time 3 "$BASE/api/state"; }
 
 # ------------------------------------------------------------------ steps
 
+# want_leaders N -> max(1, ceil(N * THRESHOLD)), the LeaderCount formula.
+want_leaders() {
+	awk -v n="$1" -v t="$THRESHOLD" 'BEGIN { x = n * t; c = int(x); if (c < x) c++; if (c < 1) c = 1; print c }'
+}
+
 # wait_healthy SKIP_ID WANT_LIVE TIMEOUT LABEL
+#
+# Healthy means: every expected node connected, EXACTLY the formula's number of
+# self-declared leaders, and every worker attached to one of them. Counting
+# "at least one leader" is not enough: a swarm whose mesh never formed has
+# every node leading itself, and every node is then trivially "attached".
 wait_healthy() {
 	local skip="$1" want="$2" timeout="$3" label="$4"
-	local deadline=$((SECONDS + timeout)) last="" live leaders loose s
+	local deadline=$((SECONDS + timeout)) last="" live leaders loose s wantl
+	wantl="$(want_leaders "$want")"
 	while [ "$SECONDS" -lt "$deadline" ]; do
 		if s="$(state 2>/dev/null)" && read -r live leaders loose < <(printf '%s' "$s" | q health "$skip"); then
-			last="connected=$live/$want leaders=$leaders unattached=$loose"
-			if [ "$live" -ge "$want" ] && [ "$leaders" -ge 1 ] && [ "$loose" -eq 0 ]; then
+			last="connected=$live/$want leaders=$leaders/$wantl unattached=$loose"
+			if [ "$live" -ge "$want" ] && [ "$leaders" -eq "$wantl" ] && [ "$loose" -eq 0 ]; then
 				log "$label: $last (after $((SECONDS - deadline + timeout))s)"
 				return 0
 			fi
