@@ -448,6 +448,14 @@ type TaskRecord struct {
 	State      string `json:"state"` // "pending" | "done" | "failed"
 	// Result is the worker's output, populated once State leaves "pending".
 	Result string `json:"result,omitempty"`
+	// Kind and Body are the task itself, carried while it is pending. They
+	// exist for failover: a worker promoted to leader knows its tasks only from
+	// the last snapshot, and a record without the task body cannot be
+	// re-issued. A leader may clear Body once the task completes. Both are
+	// omitempty, so a record from a build without them encodes identically,
+	// and an older decoder ignores them as unknown keys.
+	Kind string          `json:"kind,omitempty"`
+	Body json.RawMessage `json:"body,omitempty"`
 }
 
 // StateSyncPayload is a leader's full state snapshot for an attached worker.

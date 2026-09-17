@@ -30,7 +30,7 @@ func TestSyncTaskPayloadsRoundTripThroughFraming(t *testing.T) {
 				Workers: []NodeID{"node-2", "node-3"},
 				Ledger: []TaskRecord{
 					{TaskID: "t-1", AssignedTo: "node-2", State: "done", Result: "42"},
-					{TaskID: "t-2", AssignedTo: "node-3", State: "pending"},
+					{TaskID: "t-2", AssignedTo: "node-3", State: "pending", Kind: "sleep", Body: json.RawMessage(`{"ms":100}`)},
 					{TaskID: "t-3", AssignedTo: "node-2", State: "failed", Result: "boom"},
 				},
 				Version: 17,
@@ -349,6 +349,40 @@ func TestStateSyncLargeLedgerFitsInFrame(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded, want) {
 		t.Errorf("large ledger did not round-trip: got %d records, want %d", len(decoded.Ledger), len(want.Ledger))
+	}
+}
+
+// Kind and Body were added to TaskRecord in Phase 4 so a promoted leader can
+// re-issue a pending task it only knows from a snapshot. Both are omitempty: a
+// record without them encodes exactly as before, and a record from an older
+// build decodes with them empty.
+func TestTaskRecordKindAndBodyAreOptionalOnTheWire(t *testing.T) {
+	b, err := json.Marshal(TaskRecord{TaskID: "t-1", AssignedTo: "n", State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "kind") || strings.Contains(string(b), "body") {
+		t.Fatalf("empty Kind/Body leaked onto the wire: %s", b)
+	}
+
+	full := TaskRecord{TaskID: "t-2", State: "pending", Kind: "echo", Body: json.RawMessage(`{"x":1}`)}
+	if b, err = json.Marshal(full); err != nil {
+		t.Fatal(err)
+	}
+	var back TaskRecord
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, full) {
+		t.Fatalf("round trip = %+v, want %+v", back, full)
+	}
+
+	var old TaskRecord
+	if err := json.Unmarshal([]byte(`{"task_id":"t-3","assigned_to":"n","state":"pending"}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Kind != "" || old.Body != nil {
+		t.Fatalf("pre-Phase-4 record decoded with %+v", old)
 	}
 }
 
