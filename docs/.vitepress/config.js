@@ -47,7 +47,8 @@ export default withMermaid(defineConfig({
           { text: 'System Overview', link: '/architecture/overview' },
           { text: 'Repository Layout', link: '/architecture/repo-layout' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
-          { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' }
+          { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' },
+          { text: 'Control Plane Contract', link: '/architecture/control-plane' }
         ]
       },
       {
