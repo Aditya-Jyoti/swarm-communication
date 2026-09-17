@@ -316,3 +316,94 @@ func TestAppRunsOnce(t *testing.T) {
 		t.Fatalf("exit code %d, want %d", exitCode(err), exitRuntime)
 	}
 }
+
+// freeAddr reserves a loopback port and releases it, so a node can advertise a
+// dialable address before it binds. The tiny reuse race is acceptable in tests.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+// Nodes that know only the seed must still form a full mesh: the second and
+// third node learn each other from the seed and dial each other. This is the
+// regression for the Compose swarm where every node led itself because only
+// the seed was ever dialled.
+func TestNodesKnowingOnlyTheSeedFormAFullMesh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ids := []string{"alpha", "beta", "gamma"}
+	apps := make([]*app, len(ids))
+	var seed protocol.NodeAddress
+	for i, id := range ids {
+		addr := freeAddr(t)
+		cfg := loopbackConfig(id)
+		cfg.Listen = addr
+		cfg.Advertise = protocol.NodeAddress(addr)
+		if i > 0 {
+			cfg.Seeds = []protocol.NodeAddress{seed}
+		}
+		a, err := newApp(cfg, io.Discard)
+		if err != nil {
+			t.Fatalf("newApp %s: %v", id, err)
+		}
+		if i == 0 {
+			seed = cfg.Advertise
+		}
+		apps[i] = a
+	}
+	done := make(chan error, len(apps))
+	for _, a := range apps {
+		go func() { done <- a.run(ctx) }()
+	}
+
+	connected := func(a *app, id protocol.NodeID) bool {
+		for _, p := range a.pool.Peers() {
+			if p.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	waitFor(t, "beta and gamma to connect directly", func() bool {
+		return connected(apps[1], "gamma") && connected(apps[2], "beta")
+	})
+	waitFor(t, "every node to see every other alive and agree on leaders", func() bool {
+		first := apps[0].node.Status().Leaders
+		for _, a := range apps {
+			st := a.node.Status()
+			for _, id := range ids {
+				m, ok := st.View.Get(protocol.NodeID(id))
+				if !ok || m.State != cluster.StateAlive {
+					return false
+				}
+			}
+			if len(st.Leaders) != len(first) {
+				return false
+			}
+			for i := range first {
+				if st.Leaders[i] != first[i] {
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	cancel()
+	for range apps {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(testWait):
+			t.Fatal("a node did not stop after cancel")
+		}
+	}
+}

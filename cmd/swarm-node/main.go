@@ -228,7 +228,12 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		GossipInterval: cfg.GossipInterval,
 		Logger:         base,
 		OnFrame:        prober.HandleFrame,
-		OnTaskResult:   onTaskResult,
+		// Every address the node learns (HELLO KnownPeers, gossip) is dialled
+		// through the pool. Without this the mesh is a star around the seeds:
+		// the pool only records learned addresses, and a node that can reach
+		// nobody but the seed marks every other member dead and leads itself.
+		Connect:      pool.Connect,
+		OnTaskResult: onTaskResult,
 	})
 	if err != nil {
 		prober.Close()
