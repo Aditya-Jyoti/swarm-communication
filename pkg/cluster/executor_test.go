@@ -98,18 +98,20 @@ func TestDefaultExecutorSleepHonoursContext(t *testing.T) {
 	}
 }
 
-// waitForTimers blocks until clock has at least n timers registered. It polls
-// a condition owned by the clock under its own lock; the goroutine it waits
-// for has no other way to say "I am parked on the timer now".
+// waitForTimers blocks until clock has at least n timers registered: the
+// goroutine under test has reached its timer. The real-time bound is only a
+// hang guard; the wait itself is a condition variable, not a poll. (On a
+// timeout the waiting goroutine is left parked; the test has failed anyway.)
 func waitForTimers(t *testing.T, clock *FakeClock, n int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for clock.pending() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("timers = %d, want %d", clock.pending(), n)
-		}
-		// Yield rather than sleep: this is a test-only wait on another
-		// goroutine reaching a known point.
-		<-time.After(time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		clock.awaitTimers(n)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timers = %d, want %d", clock.pending(), n)
 	}
 }

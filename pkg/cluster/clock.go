@@ -69,6 +69,9 @@ type FakeClock struct {
 	now     time.Time
 	waiters []*fakeWaiter
 	seq     uint64
+	// registered is signalled (under mu) whenever a timer is added, so a test
+	// can wait for a goroutine to reach its timer without polling.
+	registered *sync.Cond
 }
 
 // fakeWaiter is one pending timer. period is zero for a one-shot After.
@@ -83,7 +86,9 @@ type fakeWaiter struct {
 
 // NewFakeClock returns a FakeClock reading start.
 func NewFakeClock(start time.Time) *FakeClock {
-	return &FakeClock{now: start}
+	f := &FakeClock{now: start}
+	f.registered = sync.NewCond(&f.mu)
+	return f
 }
 
 // Now returns the current fake time.
@@ -129,7 +134,19 @@ func (f *FakeClock) register(d, period time.Duration, ch chan time.Time) *fakeWa
 		stopped:  make(chan struct{}),
 	}
 	f.waiters = append(f.waiters, w)
+	f.registered.Broadcast()
 	return w
+}
+
+// awaitTimers blocks until at least n timers are registered. Test seam: a
+// goroutine that parks on After (a sleeping task) has no other way to say it
+// has got there, and advancing before it does would fire nothing.
+func (f *FakeClock) awaitTimers(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for len(f.waiters) < n {
+		f.registered.Wait()
+	}
 }
 
 // Advance moves the clock forward by d, firing every timer that falls due on the
