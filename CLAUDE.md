@@ -16,7 +16,7 @@ Do NOT work monolithically in the primary context window. Strictly follow this a
 ### 2.1. Agent Definitions (`.claude/agents/`)
 *   **`system-architect` (Lead & Planning):** Evaluates requirements, formulates interface contracts, maintains `docs/WORKLOG.md`, and prompts the user with clarifying architectural questions before irreversible choices are locked.
 *   **`doc-educator` (Pedagogy & Documentation):** Audits code and design decisions, dynamically determines required conceptual guides, authors comprehensive technical references, and updates the VitePress navigation.
-*   **`go-engineer` (Core Systems Implementation):** Writes idiomatic, clean Go code (`pkg/`, `cmd/`), implements network sockets, manages concurrency, and adds inline comments explaining the rationale.
+*   **`go-engineer` (Core Systems Implementation):** Writes idiomatic, clean Go code (`backend/pkg/`, `backend/cmd/`), implements network sockets, manages concurrency, and adds inline comments explaining the rationale.
 *   **`sim-engineer` (Infrastructure & Frontend):** Writes `docker-compose.yml`, GitHub Actions workflows, and the vanilla HTML/CSS/JS WebSocket dashboard.
 
 ### 2.2. Interactive Checkpoints
@@ -29,7 +29,7 @@ Maintain an append-only log covering phases, subagent execution, design decision
 
 ## 3. Core System Specifications
 
-### 3.1. Dynamic Swarm Network (`pkg/cluster/`, `pkg/network/`)
+### 3.1. Dynamic Swarm Network (`backend/pkg/cluster/`, `backend/pkg/network/`)
 *   **Node Count (N):** Arbitrary and dynamically configurable.
 *   **Transport Layer:** Native Linux network sockets (TCP) running inside isolated Docker containers on a custom bridge network.
 *   **Dynamic Leadership Threshold:**
@@ -39,9 +39,9 @@ Maintain an append-only log covering phases, subagent execution, design decision
 *   **Pluggable Health Interface:** Default to `LatencyHealthStrategy`, engineered so alternative metrics can be injected without refactoring cluster logic.
 *   **Self-Healing & Re-Election:** Goroutine-driven heartbeats trigger failovers, isolating faulty leaders and promoting the healthiest worker.
 
-### 3.2. Control Center & Live Dashboard (`cmd/control-center/`)
+### 3.2. Control Center & Live Dashboard (`backend/cmd/control-center/`)
 *   Decoupled coordinator that emits tasks via broadcast and listens for aggregated telemetry.
-*   Embedded HTTP & WebSocket server delivering a single-page, vanilla HTML/JS visualizer.
+*   HTTP API & WebSocket server (no embedded UI). The single-page, vanilla HTML/JS visualizer lives in `frontend/` and is served by the frontend nginx container, which proxies `/api/`, `/healthz` and `/ws` to the Control Center.
 
 ---
 
