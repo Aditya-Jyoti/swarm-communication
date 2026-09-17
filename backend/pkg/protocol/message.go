@@ -107,6 +107,13 @@ const (
 	// under load leaves a node permanently degraded, which would make every chaos
 	// experiment after it unreproducible.
 	TypeChaos MessageType = "CHAOS"
+
+	// TypeSimConfig is the Control Center's latency-emulation settings, sent to
+	// every node: each node's map position plus the latency model, and the
+	// election knobs the dashboard can tune live. Carries SimConfigPayload.
+	// Control plane for the same reason as CHAOS: a dropped update would leave
+	// one node emulating a different map from the rest.
+	TypeSimConfig MessageType = "SIM_CONFIG"
 )
 
 // ---------------------------------------------------------------------------
@@ -152,6 +159,7 @@ var knownTypes = map[MessageType]plane{
 	TypeLeave:           planeControl,
 	TypeStateSync:       planeControl,
 	TypeChaos:           planeControl,
+	TypeSimConfig:       planeControl,
 
 	TypeTask:       planeData,
 	TypeTaskResult: planeData,
@@ -572,7 +580,31 @@ type TelemetryPayload struct {
 	// not a partition.
 	Dropped    uint64 `json:"dropped"`
 	LedgerSize int    `json:"ledger_size"`
+	// Threshold and Hysteresis are the election settings this node is using
+	// right now, after any SIM_CONFIG override. SimVersion is the version of
+	// the last SIM_CONFIG it applied (0: none), so the dashboard can tell a
+	// node that has not caught up with a slider change yet.
+	Threshold  float64 `json:"threshold"`
+	Hysteresis float64 `json:"hysteresis"`
+	SimVersion uint64  `json:"sim_version"`
+	// Flows counts the frames this node sent since its previous sample, per
+	// destination and type. The dashboard animates them as messages moving
+	// along the links. Capped by the sender; see FlowRecord.
+	Flows []FlowRecord `json:"flows"`
 }
+
+// FlowRecord is one (destination, message type) pair a node sent Count frames
+// of during one telemetry interval. A broadcast counts once per recipient.
+type FlowRecord struct {
+	To    NodeID      `json:"to"`
+	Type  MessageType `json:"type"`
+	Count int         `json:"count"`
+}
+
+// MaxFlowRecords caps TelemetryPayload.Flows. A full mesh of N nodes has N-1
+// destinations and a handful of types per link, so this covers tens of nodes;
+// a sender over the cap keeps the busiest pairs.
+const MaxFlowRecords = 256
 
 // MarshalJSON substitutes [] for a nil Peers and {} for a nil Scores.
 //
@@ -593,6 +625,9 @@ func (p TelemetryPayload) MarshalJSON() ([]byte, error) {
 	if a.Scores == nil {
 		a.Scores = map[NodeAddress]float64{}
 	}
+	if a.Flows == nil {
+		a.Flows = []FlowRecord{}
+	}
 	return json.Marshal(a)
 }
 
@@ -606,6 +641,49 @@ func (p TelemetryPayload) MarshalJSON() ([]byte, error) {
 type ChaosPayload struct {
 	Action  string `json:"action"` // "kill" | "delay" | "clear"
 	DelayMS int    `json:"delay_ms,omitempty"`
+}
+
+// Position is a node's location in the emulated 3D airspace: X and Y on the
+// ground plane, Z the altitude. Units are abstract; the latency model turns
+// distance into milliseconds.
+type Position struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
+}
+
+// SimConfigPayload is the Control Center's full emulation state. It is a
+// snapshot, not a delta: a node replaces what it holds when Version is newer.
+//
+// A node delays each PONG it sends to peer p by the model's latency between its
+// own position and p's (see pkg/geo), so the RTT its peers MEASURE reflects map
+// distance, and election and affinity follow the map without knowing about it.
+//
+// Threshold and Hysteresis override the node's election settings when set.
+// Threshold 0 and a negative Hysteresis mean "leave the node's own setting";
+// Hysteresis 0 is a legal value ("no damping").
+type SimConfigPayload struct {
+	Version   uint64              `json:"version"`
+	Enabled   bool                `json:"enabled"`
+	Positions map[NodeID]Position `json:"positions"`
+	BaseMS    float64             `json:"base_ms"`
+	PerUnitMS float64             `json:"per_unit_ms"`
+	JitterMS  float64             `json:"jitter_ms"`
+	// Threshold is the leader fraction in (0, 1]; 0 means unchanged.
+	Threshold float64 `json:"threshold"`
+	// Hysteresis is the election and re-home margin in score units (ms under
+	// the latency strategy); negative means unchanged.
+	Hysteresis float64 `json:"hysteresis"`
+}
+
+// MarshalJSON substitutes {} for a nil Positions. See TelemetryPayload.
+func (p SimConfigPayload) MarshalJSON() ([]byte, error) {
+	type alias SimConfigPayload
+	a := alias(p)
+	if a.Positions == nil {
+		a.Positions = map[NodeID]Position{}
+	}
+	return json.Marshal(a)
 }
 
 // ---------------------------------------------------------------------------

@@ -66,8 +66,21 @@ func TestSyncTaskPayloadsRoundTripThroughFraming(t *testing.T) {
 				Scores:     map[NodeAddress]float64{"node-1:7946": 1.5, "node-3:7946": 0},
 				Dropped:    7,
 				LedgerSize: 3,
+				Threshold:  0.3,
+				Hysteresis: 0.5,
+				SimVersion: 2,
+				Flows:      []FlowRecord{{To: "node-1", Type: TypeHeartbeatAck, Count: 2}},
 			},
 			decode: func(e *Envelope) (any, error) { return PayloadOf[TelemetryPayload](e) },
+		},
+		{
+			name: "sim config",
+			typ:  TypeSimConfig,
+			payload: SimConfigPayload{
+				Version: 4, Enabled: true, BaseMS: 1, PerUnitMS: 2.5, JitterMS: 0.5, Threshold: 0.4, Hysteresis: -1,
+				Positions: map[NodeID]Position{"node-1": {X: 10, Y: 20.5, Z: 42}},
+			},
+			decode: func(e *Envelope) (any, error) { return PayloadOf[SimConfigPayload](e) },
 		},
 		{
 			name:    "chaos delay",
@@ -397,7 +410,9 @@ func TestSyncTaskWireFieldNames(t *testing.T) {
 		{StateSyncPayload{}, []string{"term", "leader", "workers", "ledger", "version"}},
 		{TaskPayload{}, []string{"task_id", "kind"}},
 		{TaskResultPayload{}, []string{"task_id", "worker", "ok", "output", "duration_ms"}},
-		{TelemetryPayload{}, []string{"node", "role", "state", "term", "leader", "degraded", "peers", "scores", "dropped", "ledger_size"}},
+		{TelemetryPayload{}, []string{"node", "role", "state", "term", "leader", "degraded", "peers", "scores", "dropped", "ledger_size", "threshold", "hysteresis", "sim_version", "flows"}},
+		{SimConfigPayload{}, []string{"version", "enabled", "positions", "base_ms", "per_unit_ms", "jitter_ms", "threshold", "hysteresis"}},
+		{FlowRecord{}, []string{"to", "type", "count"}},
 		{ChaosPayload{}, []string{"action"}},
 	}
 	for _, c := range cases {

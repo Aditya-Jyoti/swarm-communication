@@ -10,7 +10,7 @@ func TestMessageTypeTaxonomy(t *testing.T) {
 	control := []MessageType{
 		TypeHello, TypeHelloAck, TypePing, TypePong, TypeHeartbeat, TypeHeartbeatAck,
 		TypeMembershipDelta, TypeElectionResult, TypeJoinCluster, TypeJoinAck, TypeLeave,
-		TypeStateSync, TypeChaos,
+		TypeStateSync, TypeChaos, TypeSimConfig,
 	}
 	data := []MessageType{TypeTask, TypeTaskResult, TypeTelemetry}
 
