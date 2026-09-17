@@ -150,11 +150,10 @@ So the hub sends `PING` to every connected node every `KeepAlive` = 5s
 $$KeepAlive = 5s \ll IdleTimeout = 15s$$
 
 With the defaults, two lost pings still leave a margin. The inequality is the
-whole contract, and Compose breaks it: `SWARM_IDLE_TIMEOUT=5s`
-(`docker-compose.yml:26`) also applies to the node's CC link
-(`cmd/swarm-node/main.go:192`), so $KeepAlive = IdleTimeout$ and a PING that
-arrives a few milliseconds late reaps a healthy link. See the failure table
-below.
+whole contract. Compose runs the mesh with `SWARM_IDLE_TIMEOUT=5s`
+(`docker-compose.yml:26`), which would give $KeepAlive = IdleTimeout$ on the CC
+link, so the node never uses the mesh value there directly: the CC link takes
+`max(mesh, 15s)` (`uplinkIdleTimeout`, `cmd/swarm-node/main.go:123`).
 
 ### Incarnation 0 on the CC link
 
@@ -370,7 +369,7 @@ The hub goes first because WebSockets are **hijacked** connections, which
 
 | Symptom | Cause |
 |---|---|
-| Nodes briefly show "disconnected", then reconnect. Node log: `control center disconnected ... disposition=timeout` | `KeepAlive` not well under the node's `IdleTimeout`. **Happens today under Compose** (5s vs 5s). Reproduced with `-idle-timeout 5s`: one timeout in 35s. |
+| Nodes briefly show "disconnected", then reconnect. Node log: `control center disconnected ... disposition=timeout` | `KeepAlive` not well under the CC link's idle timeout. Fixed by the 15s floor in `uplinkIdleTimeout`; if it recurs, check the CC's keep-alive period. |
 | A node's mesh link flaps right after it starts | Would happen if the CC link used the real incarnation and `SWARM_CONTROL_CENTER` pointed at a peer. Incarnation 0 prevents it. |
 | Log: `control center uplink misconfigured` | `SWARM_CONTROL_CENTER` reaches a mesh node, not the CC. The node runs on without a dashboard. |
 | `POST /api/tasks` returns 503 `no connected leader` | No telemetry with `role: leader` yet, for example during the first seconds after start |

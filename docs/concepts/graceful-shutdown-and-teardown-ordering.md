@@ -168,10 +168,9 @@ sequenceDiagram
 - **`http.Server.Shutdown` last** with `shutdownGrace = 5s`
   (`cmd/control-center/main.go:37`).
 
-Note: the comment there assumes Compose's default 10s, but
-`docker-compose.yml:60` sets `stop_grace_period: 3s` for the CC. A request
-still draining after 3s is cut by `SIGKILL`. Harmless in practice (requests are
-short), but the two numbers disagree.
+Compose gives the CC `stop_grace_period: 10s` (`docker-compose.yml:62`), so
+the 5s drain always finishes before `SIGKILL`. The two numbers must stay in
+that order.
 
 ### Why kill is not graceful
 

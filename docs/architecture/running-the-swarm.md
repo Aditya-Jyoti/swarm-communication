@@ -263,7 +263,7 @@ The dashboard is compiled into the binary (`web/embed.go:20`), so
 
 | Symptom | Cause and fix |
 |---|---|
-| **Known issue:** a node flaps `node_down` / `node_up` every half minute or so, node log `control center disconnected ... disposition=timeout` | The only traffic from CC to node is a PING every 5s (`pkg/controlcenter/server.go:21`), and Compose sets the node's idle timeout to 5s, which also applies to the CC link. A PING that arrives a hair late misses the read deadline. Reproduced locally with `-idle-timeout 5s`: one timeout in 35s. Workaround: `SWARM_IDLE_TIMEOUT=15s`. |
+| A node flaps `node_down` / `node_up`, node log `control center disconnected ... disposition=timeout` | The CC link's read deadline is `max(SWARM_IDLE_TIMEOUT, 15s)` against a 5s CC PING, so this should not happen. If it does, the CC is stalled or the network is dropping packets. |
 | `bind: address already in use` on 8080 | another process holds it. `SWARM_HTTP_PORT=9090 docker compose up`. |
 | Node exits with code 2 and restarts in a loop | config error, the first log line says which. For example `idle-timeout 3s must exceed 3*probe-interval (3s)`. |
 | Dashboard empty, CC log has no `node connected` | nodes cannot reach `control-center:7000`. Check `SWARM_CONTROL_CENTER` and that all services share the `swarmnet` network. |
