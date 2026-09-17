@@ -37,6 +37,8 @@ func TestLoadDefaults(t *testing.T) {
 		GossipInterval: cluster.DefaultGossipInterval,
 		IdleTimeout:    15 * time.Second,
 		LogLevel:       slog.LevelInfo,
+
+		TelemetryInterval: time.Second,
 	}
 	if len(cfg.Seeds) != 0 || cfg.ControlCenter != "" || cfg.Version {
 		t.Fatalf("unexpected non-default fields: %+v", cfg)
@@ -60,6 +62,8 @@ func TestLoadEnv(t *testing.T) {
 		"SWARM_GOSSIP_INTERVAL": "750ms",
 		"SWARM_IDLE_TIMEOUT":    "4s",
 		"SWARM_LOG_LEVEL":       "debug",
+
+		"SWARM_TELEMETRY_INTERVAL": "250ms",
 	})
 	failHost := func() (string, error) { return "", errors.New("must not be called") }
 	cfg, err := Load(nil, env, failHost)
@@ -70,7 +74,8 @@ func TestLoadEnv(t *testing.T) {
 		cfg.ControlCenter != "cc:8080" || cfg.Threshold != 0.5 ||
 		cfg.ProbeInterval != 500*time.Millisecond || cfg.ElectionFloor != 10*time.Second ||
 		cfg.GossipInterval != 750*time.Millisecond ||
-		cfg.IdleTimeout != 4*time.Second || cfg.LogLevel != slog.LevelDebug {
+		cfg.IdleTimeout != 4*time.Second || cfg.LogLevel != slog.LevelDebug ||
+		cfg.TelemetryInterval != 250*time.Millisecond {
 		t.Fatalf("env not applied: %+v", cfg)
 	}
 	if len(cfg.Seeds) != 2 || cfg.Seeds[0] != "node2:9000" || cfg.Seeds[1] != "node3:9000" {
@@ -91,11 +96,14 @@ func TestLoadFlagsOverrideEnv(t *testing.T) {
 		"SWARM_GOSSIP_INTERVAL": "1s",
 		"SWARM_IDLE_TIMEOUT":    "1m",
 		"SWARM_LOG_LEVEL":       "error",
+
+		"SWARM_TELEMETRY_INTERVAL": "9s",
 	})
 	args := []string{
 		"-node-id=flag-id", "-listen=:2", "-advertise=flag:2", "-seeds=flag-seed:2",
 		"-control-center=flag-cc:2", "-threshold=0.9", "-probe-interval=2s",
 		"-election-floor=2m", "-gossip-interval=5s", "-idle-timeout=2m", "-log-level=warn",
+		"-telemetry-interval=3s",
 	}
 	cfg, err := Load(args, env, host("box"))
 	if err != nil {
@@ -105,7 +113,8 @@ func TestLoadFlagsOverrideEnv(t *testing.T) {
 		cfg.ControlCenter != "flag-cc:2" || cfg.Threshold != 0.9 ||
 		cfg.ProbeInterval != 2*time.Second || cfg.ElectionFloor != 2*time.Minute ||
 		cfg.GossipInterval != 5*time.Second ||
-		cfg.IdleTimeout != 2*time.Minute || cfg.LogLevel != slog.LevelWarn {
+		cfg.IdleTimeout != 2*time.Minute || cfg.LogLevel != slog.LevelWarn ||
+		cfg.TelemetryInterval != 3*time.Second {
 		t.Fatalf("flags did not override env: %+v", cfg)
 	}
 	if len(cfg.Seeds) != 1 || cfg.Seeds[0] != "flag-seed:2" {
@@ -177,6 +186,8 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"threshold nan", []string{"-threshold=NaN"}, nil, "must be in (0,1]"},
 		{"threshold garbage", []string{"-threshold=abc"}, nil, "threshold \"abc\""},
 		{"probe interval zero", []string{"-probe-interval=0s"}, nil, "probe-interval 0s must be positive"},
+		{"telemetry interval zero", []string{"-telemetry-interval=0s"}, nil, "telemetry-interval 0s must be positive"},
+		{"telemetry interval garbage", []string{"-telemetry-interval=soon"}, nil, "telemetry-interval"},
 		{"probe interval negative", []string{"-probe-interval=-1s"}, nil, "must be positive"},
 		{"probe interval garbage", []string{"-probe-interval=soon"}, nil, "probe-interval \"soon\""},
 		{"election floor zero", []string{"-election-floor=0"}, nil, "election-floor 0s must be positive"},
