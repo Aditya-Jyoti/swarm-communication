@@ -227,6 +227,36 @@ func (t *Table) SetState(id protocol.NodeID, s State) bool {
 	return true
 }
 
+// Revive records first-hand evidence that a member is alive: a completed
+// handshake with it, at the given incarnation. It reports whether anything
+// changed.
+//
+// Upsert alone cannot do this. Its equal-incarnation rule says liveness only
+// worsens, which is right for rumours -- a peer that has not heard the news must
+// not talk a dead node back to life -- but a handshake is not a rumour. A node
+// that dropped (SIGKILL, partition) and came back at the same incarnation would
+// otherwise stay dead in every table forever, and self-healing would be a
+// one-way door. The guard is that the evidence must be at least as new as what
+// the table holds: a stale PeerUp (an old socket registering late) cannot
+// resurrect a node that has since died at a higher incarnation.
+func (t *Table) Revive(id protocol.NodeID, incarnation int64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	m, ok := t.members[id]
+	if !ok || incarnation < m.Incarnation {
+		return false
+	}
+	if m.State == StateAlive && m.Incarnation == incarnation {
+		return false
+	}
+	m.State = StateAlive
+	m.Incarnation = incarnation
+	t.members[id] = m
+	t.version++
+	return true
+}
+
 // Remove drops a member outright. Used for a voluntary LEAVE, where there is no
 // rumour to outlive.
 func (t *Table) Remove(id protocol.NodeID) bool {

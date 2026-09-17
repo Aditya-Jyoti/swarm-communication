@@ -534,14 +534,31 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 	changed := false
 	switch ev.Kind {
 	case network.PeerUp:
+		// A known member keeps its role: a leader that reconnects is still the
+		// leader until the next evaluate says otherwise, and demoting it here
+		// would broadcast a spurious leader change.
+		role := RoleWorker
+		if m, ok := n.table.Snapshot().Get(id); ok {
+			role = m.Role
+		}
 		changed = n.table.Upsert(Member{
 			ID:          id,
 			Addr:        ev.Peer.Advertise,
 			Incarnation: ev.Peer.Incarnation,
-			Role:        RoleWorker,
+			Role:        role,
 			State:       StateAlive,
 		})
+		// A completed handshake is first-hand evidence of life, which Upsert's
+		// rumour rule cannot express; see Table.Revive. Without this, a peer that
+		// dropped and reconnected at the same incarnation stays dead forever.
+		if n.table.Revive(id, ev.Peer.Incarnation) {
+			changed = true
+		}
 		n.log.Info("peer up", "peer", id, "addr", ev.Peer.Advertise, "incarnation", ev.Peer.Incarnation)
+		// Hand the newcomer our whole view so it can refute anything stale we
+		// or our peers believe about it, and learn who else is here. Sent before
+		// evaluate so a refutation is already on its way when we elect.
+		n.sendView(ctx, id)
 	case network.PeerDown:
 		delete(n.attached, id)
 		switch {
@@ -555,20 +572,58 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 			// the pool will not redial it in a loop, so for membership purposes
 			// the peer is unusable. Logged distinctly: an operator seeing this
 			// wants to check for a version skew, not a crash.
-			changed = n.table.SetState(id, StateDead)
-			n.log.Warn("peer speaking an incompatible protocol; treating as dead", "peer", id, "err", ev.Err)
+			changed = n.markDead(id, "incompatible protocol", ev.Err)
 		default:
 			// PeerDied, Timeout, and the unclassified Other all mean the link is
 			// gone without a goodbye. Phase 4 refines this with heartbeat-based
 			// suspicion; until then a vanished peer is dead.
-			changed = n.table.SetState(id, StateDead)
-			n.log.Warn("peer down", "peer", id, "disposition", ev.Disposition, "err", ev.Err)
+			changed = n.markDead(id, "link lost ("+ev.Disposition.String()+")", ev.Err)
 		}
 	default:
 		return
 	}
 	if changed {
 		n.membershipChanged(ctx)
+	}
+}
+
+// markDead is the single place a peer is declared dead. Every caller goes
+// through it so that Phase 4 can insert a suspicion step (suspect first, dead
+// after K missed beats) without hunting for SetState calls. It reports whether
+// the table changed; the caller decides whether to re-evaluate.
+func (n *Node) markDead(id protocol.NodeID, reason string, err error) bool {
+	delete(n.attached, id)
+	changed := n.table.SetState(id, StateDead)
+	if changed {
+		n.log.Warn("peer marked dead", "peer", id, "reason", reason, "err", err)
+	}
+	return changed
+}
+
+// sendView sends our full membership view to one peer as a MEMBERSHIP_DELTA.
+// A full view is just a large delta under Table.Upsert's merge rule, which is
+// what makes this the right shape for both a welcome and (in 3b) anti-entropy.
+func (n *Node) sendView(ctx context.Context, to protocol.NodeID) {
+	view := n.table.Snapshot()
+	records := make([]protocol.MemberRecord, 0, len(view.Members))
+	for _, m := range view.Members {
+		records = append(records, protocol.MemberRecord{
+			ID:          m.ID,
+			Advertise:   m.Addr,
+			Incarnation: m.Incarnation,
+			Role:        m.Role.String(),
+			State:       m.State.String(),
+		})
+	}
+	env, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, n.cfg.Self, to, protocol.MembershipDeltaPayload{
+		Members:     records,
+		ViewVersion: view.Version,
+	})
+	if err != nil {
+		return
+	}
+	if err := n.cfg.Transport.Send(ctx, to, env); err != nil {
+		n.log.Warn("view send failed", "peer", to, "err", err)
 	}
 }
 
@@ -632,9 +687,7 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 func payloadOrPoison[T any](ctx context.Context, n *Node, f inboundFrame) (T, bool) {
 	p, err := protocol.PayloadOf[T](f.env)
 	if err != nil {
-		n.log.Warn("malformed payload; marking peer dead", "peer", f.peer, "type", f.env.Type, "err", err)
-		delete(n.attached, f.peer)
-		if n.table.SetState(f.peer, StateDead) {
+		if n.markDead(f.peer, "malformed "+string(f.env.Type)+" payload", err) {
 			n.membershipChanged(ctx)
 		}
 		var zero T

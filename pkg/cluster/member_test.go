@@ -317,3 +317,44 @@ func TestConcurrentTableAccess(t *testing.T) {
 		t.Errorf("Size = %d, want 8", got)
 	}
 }
+
+func TestRevive(t *testing.T) {
+	tests := []struct {
+		name        string
+		seed        *Member
+		incarnation int64
+		want        bool
+		wantState   State
+		wantInc     int64
+	}{
+		{"unknown member", nil, 1, false, StateAlive, 0},
+		{"dead at equal incarnation revives", &Member{ID: "x", State: StateDead, Incarnation: 3}, 3, true, StateAlive, 3},
+		{"suspect at equal incarnation revives", &Member{ID: "x", State: StateSuspect, Incarnation: 3}, 3, true, StateAlive, 3},
+		{"newer incarnation revives and updates", &Member{ID: "x", State: StateDead, Incarnation: 3}, 5, true, StateAlive, 5},
+		{"stale evidence cannot resurrect", &Member{ID: "x", State: StateDead, Incarnation: 3}, 2, false, StateDead, 3},
+		{"already alive is a no-op", &Member{ID: "x", State: StateAlive, Incarnation: 3}, 3, false, StateAlive, 3},
+		{"alive at newer incarnation is a change", &Member{ID: "x", State: StateAlive, Incarnation: 3}, 4, true, StateAlive, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := NewTable()
+			if tt.seed != nil {
+				tb.Upsert(*tt.seed)
+			}
+			before := tb.Snapshot().Version
+			if got := tb.Revive("x", tt.incarnation); got != tt.want {
+				t.Fatalf("Revive = %v, want %v", got, tt.want)
+			}
+			if tt.seed == nil {
+				return
+			}
+			m, _ := tb.Snapshot().Get("x")
+			if m.State != tt.wantState || m.Incarnation != tt.wantInc {
+				t.Fatalf("member = %+v, want state %s incarnation %d", m, tt.wantState, tt.wantInc)
+			}
+			if changed := tb.Snapshot().Version != before; changed != tt.want {
+				t.Fatalf("version changed = %v, want %v", changed, tt.want)
+			}
+		})
+	}
+}

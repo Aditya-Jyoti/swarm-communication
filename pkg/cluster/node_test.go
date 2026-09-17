@@ -673,6 +673,74 @@ func TestPeerDownFailureTriggersReelection(t *testing.T) {
 	}
 }
 
+func TestPeerReconnectAtSameIncarnationRevives(t *testing.T) {
+	h := threeNodes(t, "node-a")
+	requireIDs(t, "Leaders", h.status().Leaders, ids("node-b"))
+
+	h.peerDown("node-b", network.DispositionPeerDied)
+	st := h.status()
+	if m, _ := st.View.Get("node-b"); m.State != StateDead {
+		t.Fatalf("node-b = %+v, want dead", m)
+	}
+	requireIDs(t, "Leaders after death", st.Leaders, ids("node-a"))
+
+	// Same incarnation: the container was partitioned, not restarted.
+	h.peerUp("node-b", 1)
+	st = h.status()
+	m, _ := st.View.Get("node-b")
+	if m.State != StateAlive || m.Incarnation != 1 {
+		t.Fatalf("node-b after reconnect = %+v, want alive at 1", m)
+	}
+	// The newcomer is handed our full view so it can refute anything stale.
+	views := h.tr.sentOf(protocol.TypeMembershipDelta)
+	if len(views) == 0 || views[len(views)-1].to != "node-b" {
+		t.Fatalf("no view sent to the reconnecting peer: %+v", views)
+	}
+	p, err := protocol.PayloadOf[protocol.MembershipDeltaPayload](views[len(views)-1].env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Members) != 3 {
+		t.Fatalf("view carried %d members, want 3", len(p.Members))
+	}
+
+	// Probed and electable again.
+	h.probeRound()
+	st = h.status()
+	if got := st.Scores["node-b"]; got != 1.0 {
+		t.Fatalf("node-b not probed after revive: score=%v", got)
+	}
+	requireIDs(t, "Leaders after revive", st.Leaders, ids("node-b"))
+	if st.Leader != "node-b" {
+		t.Fatalf("worker did not re-home to the revived leader: %s", st)
+	}
+}
+
+func TestStalePeerUpCannotResurrectNewerDeath(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.peerUp("node-b", 5)
+	h.peerDown("node-b", network.DispositionTimeout)
+	h.peerUp("node-b", 3) // an old socket registering late
+	if m, _ := h.status().View.Get("node-b"); m.State != StateDead || m.Incarnation != 5 {
+		t.Fatalf("node-b = %+v, want still dead at 5", m)
+	}
+}
+
+func TestPeerUpPreservesRole(t *testing.T) {
+	h := threeNodes(t, "node-a")
+	requireIDs(t, "Leaders", h.status().Leaders, ids("node-b"))
+	term := h.status().Term
+	// A duplicate PeerUp (replacement connection) must not demote the leader.
+	h.peerUp("node-b", 1)
+	st := h.status()
+	if m, _ := st.View.Get("node-b"); m.Role != RoleLeader {
+		t.Fatalf("node-b role = %s after PeerUp, want leader", m.Role)
+	}
+	if st.Term != term {
+		t.Fatalf("term moved %d -> %d on a duplicate PeerUp", term, st.Term)
+	}
+}
+
 func TestPeerDownDispositions(t *testing.T) {
 	tests := []struct {
 		name  string
