@@ -339,6 +339,13 @@ type Node struct {
 	// chaosDelay is the injected reply delay in nanoseconds. Atomic: written by
 	// SetChaosDelay from any goroutine, read by the loop and by Status.
 	chaosDelay atomic.Int64
+	// submits carries SubmitTask calls to the loop. taskDone carries finished
+	// tasks back from their goroutines; it is buffered to maxInflightTasks,
+	// the most that can be running, so a finishing task never waits on a busy
+	// loop. taskWG joins the task goroutines on shutdown.
+	submits  chan submitReq
+	taskDone chan taskOutcome
+	taskWG   sync.WaitGroup
 
 	// running flips once, when Run starts. stopped is closed when Run returns;
 	// Handler selects on it so a control-plane send cannot outlive the loop.
@@ -409,6 +416,12 @@ type Node struct {
 	sinceBeat int
 	// Replication; see replication.go.
 	repl replica
+	// Tasks; see tasks.go.
+	tasks taskState
+	// runCtx is Run's context. Goroutines the loop starts (tasks, delayed
+	// replies) are bound to it rather than to whatever context the current
+	// handler was given, which in tests may be a settle caller's.
+	runCtx context.Context
 }
 
 type inboundFrame struct {
@@ -453,6 +466,8 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		dataIn:        make(chan inboundFrame, cfg.QueueDepth),
 		probeCh:       make(chan probeRound),
 		calls:         make(chan func()),
+		submits:       make(chan submitReq),
+		taskDone:      make(chan taskOutcome, maxInflightTasks),
 		stopped:       make(chan struct{}),
 		incarnation:   cfg.Incarnation,
 		attached:      make(map[protocol.NodeID]struct{}),
@@ -591,6 +606,7 @@ func (n *Node) Run(ctx context.Context) error {
 		return ErrAlreadyRunning
 	}
 	defer close(n.stopped)
+	n.runCtx = ctx
 
 	probeT := n.cfg.Clock.NewTicker(n.cfg.ProbeInterval)
 	defer probeT.Stop()
@@ -652,6 +668,10 @@ func (n *Node) Run(ctx context.Context) error {
 			n.controlTick(ctx)
 		case <-syncT.C():
 			n.periodicSync(ctx)
+		case o := <-n.taskDone:
+			n.handleTaskOutcome(ctx, o)
+		case req := <-n.submits:
+			req.reply <- n.submit(ctx, req.task)
 		case fn := <-n.calls:
 			fn()
 		}
@@ -726,7 +746,12 @@ func (n *Node) barrier(ctx context.Context, fn func()) error {
 }
 
 // drain handles everything already queued, then waits for an in-flight probe
-// round if there is one, and repeats until nothing is pending. Loop goroutine only.
+// round or running task if there is one, and repeats until nothing is pending.
+// Loop goroutine only.
+//
+// Waiting for tasks makes settle deterministic for task tests, with the same
+// caveat as probes: a task parked on the Clock (a sleep) only finishes once the
+// test advances the clock, so such a test advances before it settles.
 func (n *Node) drain(ctx context.Context) {
 	for {
 		select {
@@ -747,15 +772,33 @@ func (n *Node) drain(ctx context.Context) {
 			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
 			continue
+		case o := <-n.taskDone:
+			n.handleTaskOutcome(ctx, o)
+			continue
+		case req := <-n.submits:
+			req.reply <- n.submit(ctx, req.task)
+			continue
 		default:
 		}
-		if !n.probing {
+		if !n.probing && n.tasks.inflight == 0 {
 			return
 		}
+		// A nil channel is never ready, so each wait is armed only when
+		// there is something to wait for.
+		var probeCh chan probeRound
+		if n.probing {
+			probeCh = n.probeCh
+		}
+		var taskCh chan taskOutcome
+		if n.tasks.inflight > 0 {
+			taskCh = n.taskDone
+		}
 		select {
-		case r := <-n.probeCh:
+		case r := <-probeCh:
 			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
+		case o := <-taskCh:
+			n.handleTaskOutcome(ctx, o)
 		case <-ctx.Done():
 			return
 		}
@@ -775,6 +818,9 @@ func (n *Node) shutdown() {
 	}
 	n.probeWG.Wait()
 	n.bgWG.Wait()
+	// Task goroutines were started with Run's context, which is done, and the
+	// Executor contract requires them to honour it.
+	n.taskWG.Wait()
 	n.publish()
 }
 
@@ -896,6 +942,7 @@ func (n *Node) markDead(ctx context.Context, id protocol.NodeID, reason string, 
 	if changed {
 		n.log.Warn("peer marked dead", "peer", id, "reason", reason, "err", err)
 		n.pushRecord(ctx, id)
+		n.reassignFrom(ctx, id)
 	}
 	return changed
 }
@@ -918,6 +965,7 @@ func (n *Node) markLeft(ctx context.Context, id protocol.NodeID) bool {
 	if changed {
 		n.log.Info("peer left", "peer", id)
 		n.pushRecord(ctx, id)
+		n.reassignFrom(ctx, id)
 	}
 	return changed
 }
@@ -1138,6 +1186,16 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		p, ok := payloadOrPoison[protocol.StateSyncPayload](ctx, n, f)
 		if ok {
 			n.handleStateSync(f.peer, p)
+		}
+	case protocol.TypeTask:
+		p, ok := payloadOrPoison[protocol.TaskPayload](ctx, n, f)
+		if ok {
+			n.handleTask(ctx, f.peer, p)
+		}
+	case protocol.TypeTaskResult:
+		p, ok := payloadOrPoison[protocol.TaskResultPayload](ctx, n, f)
+		if ok {
+			n.handleTaskResult(f.peer, p)
 		}
 	default:
 		// Unknown to this build, or known but not handled by the node (CHAOS and
@@ -1376,6 +1434,7 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		// snapshot versions say nothing about the previous leader's.
 		n.repl.held = false
 		n.log.Info("attached to leader", "leader", leader)
+		n.handOff(ctx)
 		n.publish()
 		return
 	}

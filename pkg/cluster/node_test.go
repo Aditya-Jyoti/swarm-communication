@@ -1190,8 +1190,9 @@ func TestUnknownAndUnhandledTypesAreDropped(t *testing.T) {
 	h.frame("node-b", protocol.MessageType("FROBNICATE"), nil) // second: the once-logged path
 	// Known, but a Control Center frame the node leaves to cmd.
 	h.frame("node-b", protocol.TypeChaos, protocol.ChaosPayload{Action: "kill"})
-	// Data-plane frames travel the other queue and are owned by Phase 5.
-	h.frame("node-b", protocol.TypeTask, protocol.TaskPayload{TaskID: "t1", Kind: "noop"})
+	// Data-plane frames travel the other queue; TELEMETRY is for the Control
+	// Center, not the mesh.
+	h.frame("node-b", protocol.TypeTelemetry, protocol.TelemetryPayload{Node: "node-b"})
 	after := h.status()
 	if after.View.Version != before.View.Version || after.Term != before.Term {
 		t.Fatalf("unhandled frames changed state: %s -> %s", before, after)

@@ -9,15 +9,19 @@ import (
 )
 
 // This file is the Phase 4/5 contract between pkg/cluster and its callers
-// (pkg/telemetry, cmd/swarm-node). The signatures are fixed; the bodies are
-// filled in by the Phase 4 implementation.
-
-// ErrNotImplemented is returned by contract stubs that have no body yet.
-var ErrNotImplemented = errors.New("cluster: not implemented")
+// (pkg/telemetry, cmd/swarm-node). The signatures are fixed. The machinery
+// behind them is in tasks.go, replication.go and heartbeat.go.
 
 // ErrNoLeader is returned by SubmitTask when this node is detached: it is not a
 // leader and has no leader to forward to.
 var ErrNoLeader = errors.New("cluster: no leader to accept task")
+
+// ErrStopped is returned by SubmitTask once the node's loop has exited.
+var ErrStopped = errors.New("cluster: node stopped")
+
+// ErrNoTaskID is returned by SubmitTask for a task without a TaskID: the ledger,
+// duplicate suppression and the Control Center all key on it.
+var ErrNoTaskID = errors.New("cluster: task has no ID")
 
 // TaskExecutor runs one task on a worker. It must honour ctx and must not
 // touch node state; it is called on its own goroutine.
@@ -29,8 +33,37 @@ type TaskExecutor func(ctx context.Context, t protocol.TaskPayload) protocol.Tas
 // attached worker (or executed locally when none is attached). On a worker: the
 // task is forwarded to its leader. Detached: ErrNoLeader. Safe to call from any
 // goroutine; the work happens on the loop.
+//
+// It returns once the loop has accepted the task (recorded and assigned, or
+// forwarded), not when the task finishes; the result arrives through
+// NodeConfig.OnTaskResult on whichever node leads it. A task ID the leader
+// already holds is ignored and reported as success: submissions are
+// idempotent. It blocks until Run is running, ctx is done (ctx.Err()), or the
+// loop has exited (ErrStopped).
 func (n *Node) SubmitTask(ctx context.Context, t protocol.TaskPayload) error {
-	return ErrNotImplemented
+	if t.TaskID == "" {
+		return ErrNoTaskID
+	}
+	// The caller keeps its buffer; the node keeps a copy.
+	if t.Body != nil {
+		t.Body = append([]byte(nil), t.Body...)
+	}
+	req := submitReq{task: t, reply: make(chan error, 1)}
+	select {
+	case n.submits <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.stopped:
+		return ErrStopped
+	}
+	// The loop replies before handling anything else, so this cannot outlive
+	// it; ctx is still honoured in case the caller has a deadline.
+	select {
+	case err := <-req.reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // SetChaosDelay records an injected reply delay (CHAOS "delay"; 0 clears it).

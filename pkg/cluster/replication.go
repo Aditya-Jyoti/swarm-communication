@@ -298,5 +298,6 @@ func (n *Node) roleChanged(leading bool) {
 		n.log.Info("promoted; adopting replicated ledger", "records", len(n.repl.ledger), "version", n.repl.version)
 		n.repl.dirty = true
 	}
+	n.tasksRoleChanged(leading)
 	n.publish()
 }

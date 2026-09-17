@@ -159,6 +159,7 @@ func (n *Node) controlTick(ctx context.Context) {
 	switch {
 	case n.isLeader():
 		n.beat(ctx)
+		n.reissueIfDue(ctx)
 	case n.leader != "":
 		n.checkLeaderSilence(ctx)
 	}

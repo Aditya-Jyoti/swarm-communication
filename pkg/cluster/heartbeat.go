@@ -176,6 +176,7 @@ func (n *Node) sendDelayed(ctx context.Context, peer protocol.NodeID, env *proto
 		return
 	}
 	timer := n.cfg.Clock.After(d)
+	ctx = n.runCtx // the goroutine outlives this handler; bind it to Run
 	n.bgWG.Add(1)
 	go func() {
 		defer n.bgWG.Done()

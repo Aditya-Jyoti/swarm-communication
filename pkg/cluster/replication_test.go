@@ -130,6 +130,7 @@ func TestTermChangeIsSynced(t *testing.T) {
 
 func TestNoSyncWithoutWorkers(t *testing.T) {
 	h := leaderWith(t)
+	h.step(hbEvery) // past the boot-time promotion's re-issue tick
 	h.onLoop(func(n *Node) { n.ledgerAppend(rec("t-1", taskPending)) })
 	h.step(DefaultStateSyncInterval)
 	if got := h.tr.sentOf(protocol.TypeStateSync); len(got) != 0 {
