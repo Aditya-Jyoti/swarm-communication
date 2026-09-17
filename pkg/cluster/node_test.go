@@ -307,6 +307,20 @@ func (h *harness) frame(from protocol.NodeID, t protocol.MessageType, payload an
 	return env
 }
 
+// report delivers a peer's self-announcement (a MEMBERSHIP_DELTA carrying its own
+// record and score), which is how a peer becomes electable.
+func (h *harness) report(id protocol.NodeID, incarnation int64, score float64) {
+	h.t.Helper()
+	h.reportRole(id, incarnation, score, RoleWorker)
+}
+
+func (h *harness) reportRole(id protocol.NodeID, incarnation int64, score float64, role Role) {
+	h.t.Helper()
+	h.frame(id, protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: id, Advertise: addrOf(id), Incarnation: incarnation, Role: role.String(), State: "alive", Score: score,
+	}}})
+}
+
 // probeRound fires the probe ticker and waits for the round to be applied.
 func (h *harness) probeRound() {
 	h.t.Helper()
@@ -447,8 +461,9 @@ func TestSingleNodeElectsItself(t *testing.T) {
 	}
 }
 
-// threeNodes builds a swarm where self is the median and node-b is the clear
-// winner, then runs one probe round.
+// threeNodes builds a swarm where node-b reports the best score, node-c the
+// worst, and self's local RTTs make it the median (2.0), then runs one probe
+// round so self has reported that median.
 func threeNodes(t *testing.T, self protocol.NodeID) *harness {
 	t.Helper()
 	h := newHarness(t, self, nil)
@@ -456,6 +471,8 @@ func threeNodes(t *testing.T, self protocol.NodeID) *harness {
 	h.hs.set(addrOf("node-c"), 3.0)
 	h.peerUp("node-b", 1)
 	h.peerUp("node-c", 1)
+	h.report("node-b", 1, 1.0)
+	h.report("node-c", 1, 3.0)
 	h.probeRound()
 	return h
 }
@@ -474,9 +491,15 @@ func TestThreeNodesElectLeaderCountAndWorkerJoins(t *testing.T) {
 	if st.Role != RoleLeader && st.Leader != "node-b" {
 		t.Fatalf("worker not provisionally attached to node-b: %s", st)
 	}
-	// Self is scored as the median of its peers.
+	// Self is scored as the median of its peers, and reports it.
 	if got := st.Scores["node-z"]; got != 2.0 {
 		t.Fatalf("self score = %v, want median 2.0", got)
+	}
+	if got := st.Reported["node-z"]; got != 2.0 {
+		t.Fatalf("self reported = %v, want 2.0", got)
+	}
+	if st.Reported["node-b"] != 1.0 || st.Reported["node-c"] != 3.0 {
+		t.Fatalf("Reported = %v", st.Reported)
 	}
 	if got := st.Missed["node-b"]; got != 0 {
 		t.Fatalf("Missed[node-b] = %d, want 0", got)
@@ -494,12 +517,17 @@ func TestThreeNodesElectLeaderCountAndWorkerJoins(t *testing.T) {
 		t.Fatalf("JOIN payload = %+v", p)
 	}
 
-	// Roles are applied in the table for every member.
-	if m, _ := st.View.Get("node-b"); m.Role != RoleLeader {
-		t.Fatalf("node-b role = %s, want leader", m.Role)
+	// Our own role is written from the result; peers' roles are their claims,
+	// and node-b has only ever claimed worker.
+	if st.Role != RoleWorker {
+		t.Fatalf("self role = %s, want worker", st.Role)
 	}
-	if m, _ := st.View.Get("node-c"); m.Role != RoleWorker {
-		t.Fatalf("node-c role = %s, want worker", m.Role)
+	if m, _ := st.View.Get("node-b"); m.Role != RoleWorker {
+		t.Fatalf("node-b role = %s before it claims leadership, want worker", m.Role)
+	}
+	h.reportRole("node-b", 1, 1.0, RoleLeader)
+	if m, _ := h.status().View.Get("node-b"); m.Role != RoleLeader {
+		t.Fatalf("node-b role = %s after claiming leadership, want leader", m.Role)
 	}
 
 	// The ACK confirms attachment.
@@ -581,8 +609,10 @@ func TestJoinClusterRejectedByWorkerWithHint(t *testing.T) {
 }
 
 func TestJoinAckRejectionFollowsHint(t *testing.T) {
-	// Four nodes at threshold 0.5 elect two leaders: node-b (1.0) and node-c (1.5).
-	// Self scores the median 1.5 and loses the tie to node-c on ID.
+	// Four nodes at threshold 0.5 elect two leaders. Reported: node-b 1.0,
+	// node-c 1.0, node-d 10, self the median of its local RTTs (1.5) -- so b and
+	// c win the seats by more than the hysteresis margin. Locally node-b is the
+	// closest leader, so affinity picks it first.
 	h := newHarness(t, "node-z", func(c *NodeConfig) { c.Election.Threshold = 0.5 })
 	h.hs.set(addrOf("node-b"), 1.0)
 	h.hs.set(addrOf("node-c"), 1.5)
@@ -590,6 +620,9 @@ func TestJoinAckRejectionFollowsHint(t *testing.T) {
 	h.peerUp("node-b", 1)
 	h.peerUp("node-c", 1)
 	h.peerUp("node-d", 1)
+	h.report("node-b", 1, 1.0)
+	h.report("node-c", 1, 1.0)
+	h.report("node-d", 1, 10.0)
 	h.probeRound()
 
 	st := h.status()
@@ -624,6 +657,8 @@ func TestJoinSendFailureLeavesNodeDetached(t *testing.T) {
 	h.tr.failSend("node-b", network.ErrUnknownPeer)
 	h.peerUp("node-b", 1)
 	h.peerUp("node-c", 1)
+	h.report("node-b", 1, 1.0)
+	h.report("node-c", 1, 3.0)
 	h.probeRound()
 	if st := h.status(); st.Leader != "" {
 		t.Fatalf("Leader = %q after a failed JOIN send, want detached", st.Leader)
@@ -729,6 +764,7 @@ func TestStalePeerUpCannotResurrectNewerDeath(t *testing.T) {
 func TestPeerUpPreservesRole(t *testing.T) {
 	h := threeNodes(t, "node-a")
 	requireIDs(t, "Leaders", h.status().Leaders, ids("node-b"))
+	h.reportRole("node-b", 1, 1.0, RoleLeader)
 	term := h.status().Term
 	// A duplicate PeerUp (replacement connection) must not demote the leader.
 	h.peerUp("node-b", 1)
@@ -826,6 +862,7 @@ func TestMembershipDeltaMergesAndIgnoresStale(t *testing.T) {
 func TestDeadRumourAboutSelfBumpsIncarnation(t *testing.T) {
 	h := newHarness(t, "node-a", func(c *NodeConfig) { c.Incarnation = 5 })
 	h.peerUp("node-b", 1)
+	base := len(h.tr.broadcastOf(protocol.TypeMembershipDelta)) // the self-election announcement
 	self := func(inc int64, state string) protocol.MembershipDeltaPayload {
 		return protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{ID: "node-a", Advertise: addrOf("node-a"), Incarnation: inc, Role: "worker", State: state}}}
 	}
@@ -840,7 +877,7 @@ func TestDeadRumourAboutSelfBumpsIncarnation(t *testing.T) {
 	if st := h.status(); st.Incarnation != 5 {
 		t.Fatalf("Incarnation = %d after an alive rumour, want 5", st.Incarnation)
 	}
-	if len(h.tr.broadcastOf(protocol.TypeMembershipDelta)) != 0 {
+	if len(h.tr.broadcastOf(protocol.TypeMembershipDelta)) != base {
 		t.Fatal("re-announced without cause")
 	}
 
@@ -854,7 +891,7 @@ func TestDeadRumourAboutSelfBumpsIncarnation(t *testing.T) {
 	if m.State != StateAlive || m.Incarnation != 8 || m.Role != RoleLeader {
 		t.Fatalf("self record = %+v, want alive leader at 8", m)
 	}
-	ann := h.tr.broadcastOf(protocol.TypeMembershipDelta)
+	ann := h.tr.broadcastOf(protocol.TypeMembershipDelta)[base:]
 	if len(ann) != 1 {
 		t.Fatalf("re-announcements = %d, want 1", len(ann))
 	}
@@ -1066,6 +1103,8 @@ func TestDemotedLeaderDropsAttached(t *testing.T) {
 	// Scores arrive; node-b is clearly best and self is the median.
 	h.hs.set(addrOf("node-b"), 1.0)
 	h.hs.set(addrOf("node-c"), 3.0)
+	h.report("node-b", 1, 1.0)
+	h.report("node-c", 1, 3.0)
 	h.probeRound()
 	st := h.status()
 	requireIDs(t, "Leaders", st.Leaders, ids("node-b"))
@@ -1362,5 +1401,399 @@ func TestSettleHonoursContext(t *testing.T) {
 	ran := false
 	if err := h.node.settle(h.ctx, func() { ran = true }); err != nil || !ran {
 		t.Fatalf("settle(fn) = %v, ran=%v", err, ran)
+	}
+}
+
+// ---- self-reported scores and convergence ----
+
+func TestSelfScoreIsGossipedWhenItMovesBeyondHysteresis(t *testing.T) {
+	h := newHarness(t, "node-a", nil) // Election.Hysteresis 0.1 in baseConfig
+	h.hs.set(addrOf("node-b"), 1.0)
+	h.peerUp("node-b", 1)
+	// The only announcement so far is the role change from electing itself.
+	base := len(h.tr.broadcastOf(protocol.TypeMembershipDelta))
+	if base != 1 {
+		t.Fatalf("announcements before any probe = %d, want 1 (self-election)", base)
+	}
+	announced := func() []*protocol.Envelope { return h.tr.broadcastOf(protocol.TypeMembershipDelta)[base:] }
+
+	h.probeRound() // self: 0 -> 1.0, announced
+	ann := announced()
+	if len(ann) != 1 {
+		t.Fatalf("announcements = %d, want 1", len(ann))
+	}
+	p, _ := protocol.PayloadOf[protocol.MembershipDeltaPayload](ann[0])
+	if len(p.Members) != 1 || p.Members[0].ID != "node-a" || p.Members[0].Score != 1.0 {
+		t.Fatalf("announcement = %+v", p)
+	}
+	if got := h.status().Reported["node-a"]; got != 1.0 {
+		t.Fatalf("Reported[self] = %v, want 1.0", got)
+	}
+
+	h.probeRound() // unchanged: silent
+	h.hs.set(addrOf("node-b"), 1.05)
+	h.probeRound() // moved by less than the margin: silent, table unchanged
+	if n := len(announced()); n != 1 {
+		t.Fatalf("announcements after a sub-margin wobble = %d, want 1", n)
+	}
+	if got := h.status().Reported["node-a"]; got != 1.0 {
+		t.Fatalf("Reported[self] = %v after a sub-margin wobble, want 1.0 retained", got)
+	}
+
+	h.hs.set(addrOf("node-b"), 5.0)
+	h.probeRound()
+	ann = announced()
+	if len(ann) != 2 {
+		t.Fatalf("announcements after a real move = %d, want 2", len(ann))
+	}
+	p, _ = protocol.PayloadOf[protocol.MembershipDeltaPayload](ann[1])
+	if p.Members[0].Score != 5.0 {
+		t.Fatalf("announced score = %v, want 5.0", p.Members[0].Score)
+	}
+}
+
+func TestUnmeasuredReportOnTheWireStaysIneligible(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.peerUp("node-b", 1)
+	h.report("node-b", 1, math.NaN()) // MarshalJSON turns this into -1 on the wire
+	st := h.status()
+	if got := st.Reported["node-b"]; !math.IsNaN(got) {
+		t.Fatalf("Reported[node-b] = %v, want NaN (unmeasured)", got)
+	}
+	requireIDs(t, "Leaders", st.Leaders, ids("node-a"))
+
+	// A later report with a real score makes it electable, and a relayed
+	// record without a score does not erase that report.
+	h.report("node-b", 1, 0.5)
+	h.hs.set(addrOf("node-b"), 0.5)
+	h.probeRound() // self reports 0.5 too; node-a wins the tie on ID
+	h.frame("node-c", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 1, Role: "worker", State: "alive", Score: protocol.UnmeasuredScore,
+	}}})
+	if got := h.status().Reported["node-b"]; got != 0.5 {
+		t.Fatalf("a scoreless relay erased node-b's report: %v", got)
+	}
+}
+
+// meshHub routes envelopes between real Nodes in-process: Send calls the
+// target's Handler on the caller's goroutine, exactly as a reader goroutine
+// would, so the whole exchange is driven by settle rather than by time.
+type meshHub struct {
+	mu    sync.Mutex
+	nodes map[protocol.NodeID]*Node
+}
+
+type meshEndpoint struct {
+	self   protocol.NodeID
+	hub    *meshHub
+	events chan network.PeerEvent
+
+	mu        sync.Mutex
+	broadcast []*protocol.Envelope
+	sent      []sentEnv
+}
+
+func (e *meshEndpoint) Self() protocol.NodeID { return e.self }
+
+func (e *meshEndpoint) Send(_ context.Context, to protocol.NodeID, env *protocol.Envelope) error {
+	e.hub.mu.Lock()
+	target := e.hub.nodes[to]
+	e.hub.mu.Unlock()
+	if target == nil {
+		return network.ErrUnknownPeer
+	}
+	e.mu.Lock()
+	e.sent = append(e.sent, sentEnv{to: to, env: env})
+	e.mu.Unlock()
+	target.Handler()(e.self, env)
+	return nil
+}
+
+func (e *meshEndpoint) Broadcast(_ context.Context, env *protocol.Envelope) int {
+	e.hub.mu.Lock()
+	targets := make([]*Node, 0, len(e.hub.nodes))
+	for id, n := range e.hub.nodes {
+		if id != e.self {
+			targets = append(targets, n)
+		}
+	}
+	e.hub.mu.Unlock()
+	e.mu.Lock()
+	e.broadcast = append(e.broadcast, env)
+	e.mu.Unlock()
+	for _, n := range targets {
+		n.Handler()(e.self, env)
+	}
+	return len(targets)
+}
+
+func (e *meshEndpoint) Peers() []network.PeerInfo        { return nil }
+func (e *meshEndpoint) Events() <-chan network.PeerEvent { return e.events }
+
+func (e *meshEndpoint) lastElectionResult(t *testing.T) protocol.ElectionResultPayload {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := len(e.broadcast) - 1; i >= 0; i-- {
+		if e.broadcast[i].Type == protocol.TypeElectionResult {
+			p, err := protocol.PayloadOf[protocol.ElectionResultPayload](e.broadcast[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+	}
+	t.Fatal("no ELECTION_RESULT broadcast")
+	return protocol.ElectionResultPayload{}
+}
+
+func (e *meshEndpoint) countSent(typ protocol.MessageType) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, s := range e.sent {
+		if s.env.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+type meshNode struct {
+	id    protocol.NodeID
+	node  *Node
+	ep    *meshEndpoint
+	hs    *fakeHealth
+	clock *FakeClock
+}
+
+// quiesce settles every node repeatedly until no node has queued input or a
+// round in flight. Each settle can enqueue frames on other nodes, so one pass
+// is not enough; the bound is generous and the loop exits early in practice.
+func quiesce(t *testing.T, ctx context.Context, nodes []*meshNode) {
+	t.Helper()
+	for pass := 0; pass < 64; pass++ {
+		for _, m := range nodes {
+			if err := m.node.settle(ctx, nil); err != nil {
+				t.Fatalf("settle %s: %v", m.id, err)
+			}
+		}
+		idle := true
+		for _, m := range nodes {
+			if len(m.node.ctrlIn) != 0 || len(m.node.dataIn) != 0 {
+				idle = false
+			}
+		}
+		if idle {
+			return
+		}
+	}
+	t.Fatal("mesh did not quiesce")
+}
+
+// Three real nodes with ASYMMETRIC local measurements. Ranking on local RTTs
+// would have n2 elect n3 (its closest peer) while n1 and n3 elect differently;
+// ranking on self-reported medians makes all three agree on n2, and the
+// affinity JOINs are accepted because the node they target believes it leads.
+func TestThreeRealNodesConvergeOnSelfReportedScores(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := &meshHub{nodes: make(map[protocol.NodeID]*Node)}
+
+	local := map[protocol.NodeID]map[protocol.NodeID]float64{
+		"n1": {"n2": 10, "n3": 10}, // n1 reports 10
+		"n2": {"n1": 1, "n3": 2},   // n2 reports 1.5, but locally sees n1 as closest
+		"n3": {"n1": 1, "n2": 9},   // n3 reports 5, and locally sees n1 as closest
+	}
+	var nodes []*meshNode
+	for _, id := range []protocol.NodeID{"n1", "n2", "n3"} {
+		ep := &meshEndpoint{self: id, hub: hub, events: make(chan network.PeerEvent, 16)}
+		hs := newFakeHealth()
+		for peer, s := range local[id] {
+			hs.set(addrOf(peer), s)
+		}
+		clock := NewFakeClock(epoch)
+		cfg := baseConfig(id, nil, hs, clock)
+		cfg.Transport = ep
+		cfg.Incarnation = 1 // must match what PeerUp reports, as a real HELLO would
+		n, err := NewNode(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := &meshNode{id: id, node: n, ep: ep, hs: hs, clock: clock}
+		nodes = append(nodes, m)
+		done := make(chan struct{})
+		go func() { defer close(done); _ = n.Run(ctx) }()
+		t.Cleanup(func() { cancel(); <-done })
+		if err := n.settle(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hub.mu.Lock()
+	for _, m := range nodes {
+		hub.nodes[m.id] = m.node
+	}
+	hub.mu.Unlock()
+
+	// Full mesh: every node sees every other come up.
+	for _, m := range nodes {
+		for _, peer := range nodes {
+			if peer.id != m.id {
+				m.ep.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{ID: peer.id, Advertise: addrOf(peer.id), Incarnation: 1}}
+			}
+		}
+	}
+	quiesce(t, ctx, nodes)
+
+	// Every node booted alone and elected itself. Before any measurement all
+	// three report 0 and all three claim leadership; the claims are the
+	// incumbency input to hysteresis, and being the same on every node they
+	// collapse to the deterministic tie-break everywhere: n1.
+	for _, m := range nodes {
+		requireIDs(t, string(m.id)+" initial Leaders", m.node.Status().Leaders, ids("n1"))
+	}
+
+	// Two probe rounds each; every node announces its median and the swarm
+	// re-elects on the reported scores. The second round is what a real
+	// deployment has anyway, and it retries any JOIN that landed on n2 before
+	// n2 had processed its own promotion.
+	for round := 0; round < 2; round++ {
+		for _, m := range nodes {
+			m.clock.Advance(probeEvery)
+			if err := m.node.settle(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		quiesce(t, ctx, nodes)
+	}
+
+	wantReported := map[protocol.NodeID]float64{"n1": 10, "n2": 1.5, "n3": 5}
+	for _, m := range nodes {
+		st := m.node.Status()
+		requireIDs(t, string(m.id)+" Leaders", st.Leaders, ids("n2"))
+		for id, want := range wantReported {
+			if got := st.Reported[id]; got != want {
+				t.Errorf("%s: Reported[%s] = %v, want %v", m.id, id, got, want)
+			}
+		}
+		if m.id == "n2" {
+			if st.Role != RoleLeader || st.Leader != "n2" {
+				t.Errorf("n2: %s, want leader", st)
+			}
+			requireIDs(t, "n2 Attached", st.Attached, ids("n1", "n3"))
+		} else {
+			if st.Role != RoleWorker || st.Leader != "n2" {
+				t.Errorf("%s: %s, want worker attached to n2", m.id, st)
+			}
+		}
+		// No rejection storm: a handful of JOINs at most, not thousands.
+		if joins := m.ep.countSent(protocol.TypeJoinCluster); joins > 3 {
+			t.Errorf("%s sent %d JOINs", m.id, joins)
+		}
+		// Roles converged too: every view shows n2 as the only claimant.
+		requireIDs(t, string(m.id)+" View.Leaders", st.View.Leaders(), ids("n2"))
+	}
+
+	// The election result every node announced is byte-identical apart from
+	// the local term counter.
+	var first []byte
+	for _, m := range nodes {
+		p := m.ep.lastElectionResult(t)
+		p.Term = 0
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil {
+			first = b
+		} else if string(b) != string(first) {
+			t.Errorf("%s announced %s, n1 announced %s", m.id, b, first)
+		}
+	}
+}
+
+func TestConnectHookCalledOncePerNewAddress(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		dialed []protocol.NodeAddress
+	)
+	h := newHarness(t, "node-a", func(c *NodeConfig) {
+		c.Connect = func(addr protocol.NodeAddress) {
+			mu.Lock()
+			defer mu.Unlock()
+			dialed = append(dialed, addr)
+		}
+	})
+	got := func() []protocol.NodeAddress {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]protocol.NodeAddress(nil), dialed...)
+	}
+
+	// The seed's HELLO lists who it knows: ourselves, itself, and two strangers.
+	h.tr.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 1,
+		KnownPeers: []protocol.NodeAddress{addrOf("node-a"), addrOf("node-b"), addrOf("node-c"), addrOf("node-d"), ""},
+	}}
+	h.settle()
+	if want := []protocol.NodeAddress{addrOf("node-c"), addrOf("node-d")}; fmt.Sprint(got()) != fmt.Sprint(want) {
+		t.Fatalf("dialed = %v, want %v", got(), want)
+	}
+
+	// The same HELLO again, and node-c actually connecting: nothing new.
+	h.tr.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 1,
+		KnownPeers: []protocol.NodeAddress{addrOf("node-c"), addrOf("node-d")},
+	}}
+	h.peerUp("node-c", 1)
+	if len(got()) != 2 {
+		t.Fatalf("dialed = %v after repeats, want 2 entries", got())
+	}
+
+	// Gossip naming a new alive member dials it; a dead one, a known one and a
+	// blank address do not.
+	h.frame("node-b", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{
+		{ID: "node-e", Advertise: addrOf("node-e"), Incarnation: 1, State: "alive"},
+		{ID: "node-f", Advertise: addrOf("node-f"), Incarnation: 1, State: "dead"},
+		{ID: "node-c", Advertise: addrOf("node-c"), Incarnation: 1, State: "alive"},
+		{ID: "node-g", Advertise: "", Incarnation: 1, State: "alive"},
+	}})
+	if want := []protocol.NodeAddress{addrOf("node-c"), addrOf("node-d"), addrOf("node-e")}; fmt.Sprint(got()) != fmt.Sprint(want) {
+		t.Fatalf("dialed = %v, want %v", got(), want)
+	}
+}
+
+func TestNoConnectHookIsFine(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.tr.events <- network.PeerEvent{Kind: network.PeerUp, Peer: network.PeerInfo{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 1, KnownPeers: []protocol.NodeAddress{addrOf("node-c")},
+	}}
+	h.settle()
+}
+
+func TestRelayedRoleIsNotBelieved(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.peerUp("node-b", 1)
+	h.peerUp("node-c", 1)
+	// node-c claims leadership itself: believed.
+	h.reportRole("node-c", 1, 0.5, RoleLeader)
+	if m, _ := h.status().View.Get("node-c"); m.Role != RoleLeader {
+		t.Fatalf("first-hand claim ignored: %+v", m)
+	}
+	// node-b relays a stale view saying node-c is a worker: not believed, but
+	// the rest of the record (state, score) merges as usual.
+	h.frame("node-b", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-c", Advertise: addrOf("node-c"), Incarnation: 1, Role: "worker", State: "alive", Score: 0.7,
+	}}})
+	m, _ := h.status().View.Get("node-c")
+	if m.Role != RoleLeader || m.Score != 0.7 {
+		t.Fatalf("relayed record: %+v, want role leader kept and score 0.7 merged", m)
+	}
+	// A relay about a member we have never heard of introduces it as a worker.
+	h.frame("node-b", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-d", Advertise: addrOf("node-d"), Incarnation: 1, Role: "leader", State: "alive", Score: 0.1,
+	}}})
+	if m, _ := h.status().View.Get("node-d"); m.Role != RoleWorker {
+		t.Fatalf("relayed leader claim believed for a new member: %+v", m)
 	}
 }

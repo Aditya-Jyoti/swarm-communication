@@ -86,6 +86,12 @@ type NodeConfig struct {
 	// on the reader goroutine; if it returns true the frame is consumed and the
 	// node never sees it.
 	OnFrame func(peer protocol.NodeID, env *protocol.Envelope) bool
+	// Connect is called, on the loop goroutine, for every peer address the node
+	// learns about (HELLO's KnownPeers, a MEMBERSHIP_DELTA naming a new member)
+	// and has not seen before -- at most once per address. cmd wires it to
+	// Pool.Connect, which is how the mesh grows from a single seed. It must not
+	// block. Optional.
+	Connect func(protocol.NodeAddress)
 }
 
 func (c NodeConfig) withDefaults() NodeConfig {
@@ -125,7 +131,13 @@ type Status struct {
 	Leader  protocol.NodeID
 	Leaders []protocol.NodeID
 	View    View
-	Scores  map[protocol.NodeID]float64
+	// Scores are this node's LOCAL measurements of each peer (and its own
+	// self-score), used for affinity: which leader is closest to me is a question
+	// only I can answer.
+	Scores map[protocol.NodeID]float64
+	// Reported are the peers' SELF-REPORTED scores, learned from gossip, which
+	// election ranks on: the one input every observer agrees about.
+	Reported map[protocol.NodeID]float64
 	// Missed counts consecutive failed probes per peer; reset on success.
 	Missed   map[protocol.NodeID]int
 	Degraded bool
@@ -194,9 +206,16 @@ type Node struct {
 	leaders     []protocol.NodeID
 	leader      protocol.NodeID
 	// hint is a leader named by a JOIN_ACK rejection; consumed by the next evaluate.
-	hint      protocol.NodeID
-	attached  map[protocol.NodeID]struct{}
-	scores    map[protocol.NodeID]float64
+	hint     protocol.NodeID
+	attached map[protocol.NodeID]struct{}
+	// local is my measured score per peer, plus my own self-score. Affinity only.
+	local map[protocol.NodeID]float64
+	// reported is each member's self-reported score as of the last evaluate,
+	// derived from the table (the table is the source of truth; this is the
+	// published copy). Election only.
+	reported map[protocol.NodeID]float64
+	// dialed records addresses handed to cfg.Connect, so each is dialled once.
+	dialed    map[protocol.NodeAddress]struct{}
 	missed    map[protocol.NodeID]int
 	claims    map[protocol.NodeID]protocol.ElectionResultPayload
 	highWater int
@@ -254,7 +273,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		stopped:       make(chan struct{}),
 		incarnation:   cfg.Incarnation,
 		attached:      make(map[protocol.NodeID]struct{}),
-		scores:        make(map[protocol.NodeID]float64),
+		local:         make(map[protocol.NodeID]float64),
+		reported:      make(map[protocol.NodeID]float64),
+		dialed:        make(map[protocol.NodeAddress]struct{}),
 		missed:        make(map[protocol.NodeID]int),
 		claims:        make(map[protocol.NodeID]protocol.ElectionResultPayload),
 		unknownLogged: make(map[protocol.MessageType]struct{}),
@@ -265,7 +286,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		Incarnation: cfg.Incarnation,
 		Role:        RoleWorker,
 		State:       StateAlive,
+		Score:       0, // alone, a node must be able to lead; see selfScore
 	})
+	n.dialed[cfg.Advertise] = struct{}{}
 	n.publish()
 	return n, nil
 }
@@ -310,6 +333,10 @@ func (s *Status) clone() Status {
 	out.Scores = make(map[protocol.NodeID]float64, len(s.Scores))
 	for k, v := range s.Scores {
 		out.Scores[k] = v
+	}
+	out.Reported = make(map[protocol.NodeID]float64, len(s.Reported))
+	for k, v := range s.Reported {
+		out.Reported[k] = v
 	}
 	out.Missed = make(map[protocol.NodeID]int, len(s.Missed))
 	for k, v := range s.Missed {
@@ -403,7 +430,7 @@ func (n *Node) Run(ctx context.Context) error {
 		case <-probeT.C():
 			n.startProbeRound(ctx)
 		case r := <-n.probeCh:
-			n.applyProbeRound(r)
+			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
 		case <-floorT.C():
 			n.evaluate(ctx)
@@ -491,7 +518,7 @@ func (n *Node) drain(ctx context.Context) {
 			n.handleFrame(ctx, f)
 			continue
 		case r := <-n.probeCh:
-			n.applyProbeRound(r)
+			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
 			continue
 		default:
@@ -501,7 +528,7 @@ func (n *Node) drain(ctx context.Context) {
 		}
 		select {
 		case r := <-n.probeCh:
-			n.applyProbeRound(r)
+			n.applyProbeRound(ctx, r)
 			n.evaluate(ctx)
 		case <-ctx.Done():
 			return
@@ -537,9 +564,9 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 		// A known member keeps its role: a leader that reconnects is still the
 		// leader until the next evaluate says otherwise, and demoting it here
 		// would broadcast a spurious leader change.
-		role := RoleWorker
+		role, score := RoleWorker, health.ScoreUnavailable()
 		if m, ok := n.table.Snapshot().Get(id); ok {
-			role = m.Role
+			role, score = m.Role, m.Score
 		}
 		changed = n.table.Upsert(Member{
 			ID:          id,
@@ -547,7 +574,12 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 			Incarnation: ev.Peer.Incarnation,
 			Role:        role,
 			State:       StateAlive,
+			Score:       score,
 		})
+		n.dialed[ev.Peer.Advertise] = struct{}{}
+		for _, addr := range ev.Peer.KnownPeers {
+			n.connect(addr)
+		}
 		// A completed handshake is first-hand evidence of life, which Upsert's
 		// rumour rule cannot express; see Table.Revive. Without this, a peer that
 		// dropped and reconnected at the same incarnation stays dead forever.
@@ -587,6 +619,25 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 	}
 }
 
+// connect hands a newly learned address to cfg.Connect, once. This is how a
+// node that knows one seed ends up connected to the whole mesh: the seed's
+// HELLO lists who it knows, and every MEMBERSHIP_DELTA names members' addresses.
+func (n *Node) connect(addr protocol.NodeAddress) {
+	if addr == "" || n.cfg.Connect == nil {
+		return
+	}
+	if _, seen := n.dialed[addr]; seen {
+		return
+	}
+	if _, known := n.Resolve(addr); known {
+		n.dialed[addr] = struct{}{}
+		return
+	}
+	n.dialed[addr] = struct{}{}
+	n.log.Info("learned peer address; connecting", "addr", addr)
+	n.cfg.Connect(addr)
+}
+
 // markDead is the single place a peer is declared dead. Every caller goes
 // through it so that Phase 4 can insert a suspicion step (suspect first, dead
 // after K missed beats) without hunting for SetState calls. It reports whether
@@ -607,13 +658,7 @@ func (n *Node) sendView(ctx context.Context, to protocol.NodeID) {
 	view := n.table.Snapshot()
 	records := make([]protocol.MemberRecord, 0, len(view.Members))
 	for _, m := range view.Members {
-		records = append(records, protocol.MemberRecord{
-			ID:          m.ID,
-			Advertise:   m.Addr,
-			Incarnation: m.Incarnation,
-			Role:        m.Role.String(),
-			State:       m.State.String(),
-		})
+		records = append(records, memberRecord(m))
 	}
 	env, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, n.cfg.Self, to, protocol.MembershipDeltaPayload{
 		Members:     records,
@@ -706,18 +751,73 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 			n.refuteIfNeeded(ctx, from, rec)
 			continue
 		}
+		score := health.ScoreUnavailable()
+		if rec.Measured() {
+			score = rec.Score
+		}
+		// A role is only believed first-hand: the sender speaking about itself.
+		// Relayed roles are whatever the relay knew when it last looked, and a
+		// full view sent at connect time routinely predates the announcements
+		// that changed them; applying one would erase an incumbency on this
+		// node alone and split the election. A member's role therefore moves
+		// only when that member says so, and otherwise keeps what we hold.
+		role := RoleWorker
+		if existing, ok := n.table.Snapshot().Get(rec.ID); ok {
+			role = existing.Role
+		}
+		if rec.ID == from {
+			role = ParseRole(rec.Role)
+		}
+		// Dial before merging: once the record is in the table, Resolve knows
+		// the address and connect would take it for an existing peer.
+		if ParseState(rec.State) == StateAlive {
+			n.connect(rec.Advertise)
+		}
 		if n.table.Upsert(Member{
 			ID:          rec.ID,
 			Addr:        rec.Advertise,
 			Incarnation: rec.Incarnation,
-			Role:        ParseRole(rec.Role),
+			Role:        role,
 			State:       ParseState(rec.State),
+			Score:       score,
 		}) {
 			changed = true
 		}
 	}
 	if changed {
 		n.membershipChanged(ctx)
+	}
+}
+
+// memberRecord is the wire form of m. Score is passed through as-is; the
+// record's MarshalJSON turns an invalid score into the unmeasured sentinel.
+func memberRecord(m Member) protocol.MemberRecord {
+	return protocol.MemberRecord{
+		ID:          m.ID,
+		Advertise:   m.Addr,
+		Incarnation: m.Incarnation,
+		Role:        m.Role.String(),
+		State:       m.State.String(),
+		Score:       m.Score,
+	}
+}
+
+// announceSelf broadcasts this node's own record: its incarnation, role, and
+// self-reported score. It is the one message that carries the score election
+// needs, so it goes out on every change that matters (a refutation, a score
+// move beyond the hysteresis margin) and is otherwise silent.
+func (n *Node) announceSelf(ctx context.Context) {
+	view := n.table.Snapshot()
+	self, ok := view.Get(n.cfg.Self)
+	if !ok {
+		return
+	}
+	env, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, n.cfg.Self, "", protocol.MembershipDeltaPayload{
+		Members:     []protocol.MemberRecord{memberRecord(self)},
+		ViewVersion: view.Version,
+	})
+	if err == nil {
+		n.cfg.Transport.Broadcast(ctx, env)
 	}
 }
 
@@ -741,22 +841,10 @@ func (n *Node) refuteIfNeeded(ctx context.Context, from protocol.NodeID, rec pro
 		Incarnation: n.incarnation,
 		Role:        self.Role,
 		State:       StateAlive,
+		Score:       self.Score,
 	})
 	n.log.Warn("refuting rumour about self", "from", from, "rumour", rec.State, "incarnation", n.incarnation)
-
-	env, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, n.cfg.Self, "", protocol.MembershipDeltaPayload{
-		Members: []protocol.MemberRecord{{
-			ID:          n.cfg.Self,
-			Advertise:   n.cfg.Advertise,
-			Incarnation: n.incarnation,
-			Role:        self.Role.String(),
-			State:       StateAlive.String(),
-		}},
-		ViewVersion: n.table.Snapshot().Version,
-	})
-	if err == nil {
-		n.cfg.Transport.Broadcast(ctx, env)
-	}
+	n.announceSelf(ctx)
 	n.publish()
 }
 
@@ -882,7 +970,7 @@ func (n *Node) startProbeRound(ctx context.Context) {
 
 // applyProbeRound folds a finished round into scores using the call shape
 // mandated in WORKLOG 3.4. Loop goroutine only.
-func (n *Node) applyProbeRound(r probeRound) {
+func (n *Node) applyProbeRound(ctx context.Context, r probeRound) {
 	n.probing = false
 	for id, res := range r.results {
 		switch {
@@ -890,31 +978,68 @@ func (n *Node) applyProbeRound(r probeRound) {
 			// Shutdown or a superseded round: not a fact about the peer. The old
 			// score stands.
 		case res.err != nil:
-			n.scores[id] = health.ScoreUnavailable()
+			n.local[id] = health.ScoreUnavailable()
 			n.missed[id]++
 			n.log.Debug("probe failed", "peer", id, "missed", n.missed[id], "err", res.err)
 		default:
-			n.scores[id] = res.score
+			n.local[id] = res.score
 			n.missed[id] = 0
 		}
 	}
-	n.scores[n.cfg.Self] = n.selfScore()
+	n.updateSelfScore(ctx)
 }
 
-// selfScore is the score this node gives itself in its own election.
+// updateSelfScore recomputes the self-reported score and, if it moved by more
+// than the election hysteresis, records it and gossips it. The margin is the
+// rate limit: a score that wobbles by less than the amount that could change an
+// election is not worth a broadcast to every peer. At most one announcement per
+// probe round follows from this being called once per round.
+func (n *Node) updateSelfScore(ctx context.Context) {
+	next := n.selfScore()
+	n.local[n.cfg.Self] = next
+	prev := health.ScoreUnavailable()
+	if m, ok := n.table.Snapshot().Get(n.cfg.Self); ok {
+		prev = m.Score
+	}
+	margin := n.cfg.Election.withDefaults().Hysteresis
+	if health.IsValidScore(prev) && health.IsValidScore(next) && abs(next-prev) < margin {
+		return
+	}
+	if n.table.SetScore(n.cfg.Self, next) {
+		n.announceSelf(ctx)
+	}
+}
+
+func abs(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
+// selfScore is the score this node reports about itself: the median of its
+// valid local round trips to its peers.
 //
-// A node cannot probe itself over the mesh, and the two obvious substitutes are
-// both wrong: 0 makes every node win its own election (each thinks it is the
-// best leader, and the swarm disagrees N ways), and NaN makes a node never
-// eligible in its own view while every peer may elect it. The median of the
-// valid peer scores is a placeholder that puts self in the middle of the pack, so
-// the local result tracks what peers are likely to compute rather than being
-// biased either way. It is a heuristic, not a measurement, and Phase 4 should
-// replace it with a peer-reported score for self (a HEARTBEAT_ACK carries one).
-// With no scored peers it is 0: a node alone must be able to lead.
+// # Why election runs on self-reported scores, not measured ones
+//
+// A round trip is a fact about a pair, not about a node: A's RTT to B is not
+// C's RTT to B. Elect is documented as giving every node the same answer from
+// the same view, and that only holds if its inputs are the same on every node.
+// Ranking on locally measured RTTs breaks it outright -- three nodes elect three
+// different leader sets, workers JOIN nodes that do not believe they are
+// leaders, and the rejections loop forever. The cheapest input that IS the same
+// everywhere is one each node computes about itself and gossips: this median.
+// It is a heuristic (a node with one slow link and one fast link reports the
+// average), but it is a symmetric heuristic, and symmetry is the property the
+// election needs. Affinity, by contrast, is meant to be observer-relative --
+// "which leader is closest to ME" -- so it keeps using the local map.
+//
+// With no valid local RTTs it is 0: a node alone must be able to lead, and 0 is
+// the value every node reports at start-up, so the first election everywhere is
+// the deterministic lowest-ID tie-break.
 func (n *Node) selfScore() float64 {
 	var valid []float64
-	for id, s := range n.scores {
+	for id, s := range n.local {
 		if id != n.cfg.Self && health.IsValidScore(s) {
 			valid = append(valid, s)
 		}
@@ -940,14 +1065,26 @@ func (n *Node) selfScore() float64 {
 // (WORKLOG 2.4).
 func (n *Node) evaluate(ctx context.Context) {
 	view := n.table.Snapshot()
-	res := Elect(view, n.scores, n.cfg.Election)
+	// Election ranks on the self-reported scores in the view; affinity below
+	// ranks on local measurements. See selfScore for why they must differ.
+	n.reported = view.Scores()
+	res := Elect(view, n.reported, n.cfg.Election)
 
-	for _, m := range view.Members {
-		role := RoleWorker
-		if contains(res.Leaders, m.ID) {
-			role = RoleLeader
-		}
-		n.table.SetRole(m.ID, role)
+	// Only OUR OWN role is written from the local result. Peers' roles in the
+	// table are their own claims, learned from their announcements, and that is
+	// deliberate: hysteresis protects incumbents, so "who is an incumbent" must
+	// be the same fact on every node or the election is not symmetric. Every
+	// node boots alone and elects itself; if each then treated its own local
+	// result as incumbency, near-equal scores (a loopback Docker network) would
+	// leave every node protecting itself forever, N leaders for N nodes. With
+	// claimed roles, N bootstrap claimants collapse to the deterministic
+	// tie-break everywhere. A role change is announced so peers learn it.
+	myRole := RoleWorker
+	if contains(res.Leaders, n.cfg.Self) {
+		myRole = RoleLeader
+	}
+	if n.table.SetRole(n.cfg.Self, myRole) {
+		n.announceSelf(ctx)
 	}
 
 	if !equalIDs(res.Leaders, n.leaders) {
@@ -980,12 +1117,12 @@ func (n *Node) evaluate(ctx context.Context) {
 		for id := range n.attached {
 			delete(n.attached, id)
 		}
-		best, ok := ChooseLeader(n.scores, res.Leaders)
+		best, ok := ChooseLeader(n.local, res.Leaders)
 		if n.hint != "" && contains(res.Leaders, n.hint) {
 			best, ok = n.hint, true
 		}
 		n.hint = ""
-		if ok && ShouldRehome(n.leader, best, n.scores, res.Leaders, n.cfg.Rehome) {
+		if ok && ShouldRehome(n.leader, best, n.local, res.Leaders, n.cfg.Rehome) {
 			n.join(ctx, best)
 		}
 	}
@@ -1003,7 +1140,7 @@ func (n *Node) evaluate(ctx context.Context) {
 func (n *Node) join(ctx context.Context, leader protocol.NodeID) {
 	env, err := protocol.NewEnvelope(protocol.TypeJoinCluster, n.cfg.Self, leader, protocol.JoinClusterPayload{
 		Worker: n.cfg.Self,
-		Score:  n.scores[leader],
+		Score:  n.local[leader],
 	})
 	if err != nil {
 		return
@@ -1015,7 +1152,7 @@ func (n *Node) join(ctx context.Context, leader protocol.NodeID) {
 		n.leader = ""
 		return
 	}
-	n.log.Info("joining leader", "leader", leader, "score", n.scores[leader])
+	n.log.Info("joining leader", "leader", leader, "score", n.local[leader])
 	n.leader = leader
 }
 
@@ -1037,7 +1174,8 @@ func (n *Node) publish() {
 		Leader:      n.leader,
 		Leaders:     append([]protocol.NodeID(nil), n.leaders...),
 		View:        view,
-		Scores:      make(map[protocol.NodeID]float64, len(n.scores)),
+		Scores:      make(map[protocol.NodeID]float64, len(n.local)),
+		Reported:    make(map[protocol.NodeID]float64, len(n.reported)),
 		Missed:      make(map[protocol.NodeID]int, len(n.missed)),
 		Degraded:    n.degraded,
 		HighWater:   n.highWater,
@@ -1045,8 +1183,11 @@ func (n *Node) publish() {
 		Claims:      make(map[protocol.NodeID]protocol.ElectionResultPayload, len(n.claims)),
 		Dropped:     n.dropped.Load(),
 	}
-	for id, v := range n.scores {
+	for id, v := range n.local {
 		s.Scores[id] = v
+	}
+	for id, v := range n.reported {
+		s.Reported[id] = v
 	}
 	for id, v := range n.missed {
 		s.Missed[id] = v

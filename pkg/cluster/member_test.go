@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"math"
 	"reflect"
 	"sync"
 	"testing"
@@ -356,5 +357,64 @@ func TestRevive(t *testing.T) {
 				t.Fatalf("version changed = %v, want %v", changed, tt.want)
 			}
 		})
+	}
+}
+
+func TestUpsertScoreOnlyChangeBumpsVersionNotLiveness(t *testing.T) {
+	tb := NewTable()
+	tb.Upsert(Member{ID: "x", Incarnation: 2, State: StateDead, Role: RoleLeader, Score: math.NaN()})
+	v0 := tb.Snapshot().Version
+
+	// A score at equal incarnation is applied, the version moves, and the
+	// member is not resurrected by the record's "alive".
+	if !tb.Upsert(Member{ID: "x", Incarnation: 2, State: StateAlive, Role: RoleLeader, Score: 1.5}) {
+		t.Fatal("score-only change reported as no change")
+	}
+	m, _ := tb.Snapshot().Get("x")
+	if m.Score != 1.5 || m.State != StateDead || m.Role != RoleLeader {
+		t.Fatalf("member = %+v, want score 1.5, still dead, still leader", m)
+	}
+	if tb.Snapshot().Version == v0 {
+		t.Fatal("version did not move on a score change")
+	}
+
+	// Same score again: no change.
+	if tb.Upsert(Member{ID: "x", Incarnation: 2, State: StateDead, Role: RoleLeader, Score: 1.5}) {
+		t.Fatal("identical record reported as a change")
+	}
+	// A record with no score preserves the one we hold.
+	if tb.Upsert(Member{ID: "x", Incarnation: 2, State: StateDead, Role: RoleLeader, Score: math.NaN()}) {
+		t.Fatal("scoreless record reported as a change")
+	}
+	if m, _ := tb.Snapshot().Get("x"); m.Score != 1.5 {
+		t.Fatalf("scoreless record erased the score: %v", m.Score)
+	}
+	// A newer incarnation overwrites everything, including a missing score.
+	tb.Upsert(Member{ID: "x", Incarnation: 3, State: StateAlive, Score: math.NaN()})
+	if m, _ := tb.Snapshot().Get("x"); !math.IsNaN(m.Score) || m.State != StateAlive {
+		t.Fatalf("restart did not reset the record: %+v", m)
+	}
+}
+
+func TestSetScoreAndViewScores(t *testing.T) {
+	tb := NewTable()
+	if tb.SetScore("nobody", 1) {
+		t.Fatal("SetScore on an unknown member reported a change")
+	}
+	tb.Upsert(Member{ID: "a", Score: math.NaN()})
+	tb.Upsert(Member{ID: "b", Score: 2})
+	if tb.SetScore("a", math.NaN()) {
+		t.Fatal("NaN over NaN reported as a change")
+	}
+	if !tb.SetScore("a", 0.5) || tb.SetScore("a", 0.5) {
+		t.Fatal("SetScore change detection is wrong")
+	}
+	m, _ := tb.Snapshot().Get("a")
+	if m.Score != 0.5 || m.State != StateAlive {
+		t.Fatalf("member = %+v", m)
+	}
+	scores := tb.Snapshot().Scores()
+	if scores["a"] != 0.5 || scores["b"] != 2 || len(scores) != 2 {
+		t.Fatalf("Scores() = %v", scores)
 	}
 }
