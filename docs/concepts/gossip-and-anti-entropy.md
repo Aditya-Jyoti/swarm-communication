@@ -1,170 +1,221 @@
 ---
 title: "Gossip and Anti-Entropy"
-description: "Epidemic dissemination, why convergence takes O(log N) rounds, push deltas versus periodic full-view repair, the incarnation merge rule that makes both the same operation, SWIM suspicion and refutation, and why gossip converges but never agrees."
+description: "How this swarm spreads membership: push-on-change for first-hand deaths, shuffled round-robin anti-entropy for repair, the N x T_gossip bound, why a full view is just a large delta, and why gossip converges but never agrees."
 outline: deep
 ---
 
 # Gossip and Anti-Entropy
 
-Membership in this swarm is not stored anywhere. Every node holds its own belief about who is in
-the swarm, and the beliefs converge because nodes tell each other what they know. That is
-gossip. It is the discovery mechanism chosen in `docs/WORKLOG.md` section 2.2, it is what
-`MEMBERSHIP_DELTA` carries, and it is the reason two nodes can hold different $N$ at the
-instant they each run an election.
+No node holds the membership list. Every node holds its own *belief*, and the beliefs converge
+because nodes keep telling each other what they know. That is gossip. It is what
+`MEMBERSHIP_DELTA` carries, and it is why two nodes can hold different $N$ at the moment they
+each run an election.
 
-This page covers the mechanism, the arithmetic of how fast it converges, the merge rule that
-makes it correct, and the one thing it does not do.
+This page covers the two ways a record travels in Phase 3b, the repair bound, and the one thing
+gossip does not give you. The merge rule that makes it all safe has its own page:
+[Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
 
 ---
 
 ## Core Mental Model
 
-### Epidemics
+### Two paths, two jobs
 
-A rumour spreads through a population the way an infection does. Each round, every node that
-knows the rumour tells $f$ random peers (the *fanout*). Nodes that already know it ignore the
-repeat. With $N$ nodes and fanout $f$, the number of infected nodes grows roughly as
-$(1+f)^r$ until saturation, so the number of rounds to reach everyone is
+| Path | Sends | To | When | Job |
+|---|---|---|---|---|
+| **Push** (`pushRecord`) | one record | every connected peer | this node saw a death or departure first-hand | fast |
+| **Anti-entropy** (`gossipRound`) | the full view | ONE alive peer | every $T_{gossip}$ (default 2 s) | repair |
 
-$$r \approx \log_{1+f} N + c$$
-
-where $c$ is a small constant covering the tail (the last few uninfected nodes take longer,
-because random peer selection keeps hitting nodes that already know). For $N = 20$ and $f = 3$,
-that is about 3 rounds. For $N = 1000$, about 6. The point is not the exact number; it is that
-the exponent is on $N$, so doubling the swarm adds one round, not double the rounds.
-
-| $N$ | $f = 1$ | $f = 2$ | $f = 3$ |
-|---|---|---|---|
-| 10 | ~4 | ~3 | ~2 |
-| 20 | ~5 | ~3 | ~3 |
-| 100 | ~7 | ~5 | ~4 |
-| 1000 | ~10 | ~7 | ~5 |
-
-Rounds to reach every node, approximately. Real convergence is a distribution around these.
-
-### Push deltas and pull repair
-
-Two things travel over gossip, and they are different messages for different reasons:
-
-| Mode | Carries | Triggered by | Purpose |
-|---|---|---|---|
-| **Push delta** | the records that just changed | an event: join, suspect, death, role change | fast propagation of new facts |
-| **Anti-entropy** | the full local view | a timer | repair of anything a delta missed |
-
-Deltas are fast but lossy: a dropped frame, a node that was partitioned when the delta went out,
-or a queue that shed a message under backpressure all leave a hole. Anti-entropy is the
-periodic full-view exchange that fills holes. Its name is literal: it reduces the disorder
-between two views.
+A push is fast but lossy: a dropped frame or a full send queue leaves a hole. Anti-entropy is
+the slow, reliable sweep that fills holes. The name is literal: it reduces the disorder between
+two views.
 
 ```mermaid
 sequenceDiagram
     participant A as node-a
     participant B as node-b
     participant C as node-c
-    Note over A: detects node-x dead
-    A->>B: MEMBERSHIP_DELTA [x dead, inc 7]
-    A-xC: MEMBERSHIP_DELTA (dropped)
-    B->>C: MEMBERSHIP_DELTA [x dead, inc 7]
-    Note over C: learned via B, one round late
-    Note over A,C: later, on the anti-entropy timer
+    Note over A: PeerDown for node-x
+    Note over A: markDead records x dead at inc 8
+    A->>B: MEMBERSHIP_DELTA [x dead 8] push
+    A-xC: MEMBERSHIP_DELTA [x dead 8] push lost
+    Note over B: merged. B does NOT re-push
+    Note over A,C: later, A gossip tick picks C
     A->>C: MEMBERSHIP_DELTA [full view]
-    Note over C: every record merges, nothing changes
+    Note over C: x dead 8 merges. Hole repaired
 ```
 
-### Why a full view is just a large delta
+### Epidemics, and why they barely apply here
 
-`MembershipDeltaPayload` at `pkg/protocol/message.go:352` is the only membership message. There
-is no separate snapshot type. The comment at `pkg/protocol/message.go:348` fixes the semantics:
-a delta "asserts facts about the members it names and says nothing about members it omits", so
-the receiver must *merge*, never *replace*.
+Classic gossip (Demers et al., 1987) assumes a node can only reach a few random peers per
+round. A rumour then spreads like an infection, in about $\log_{1+f} N$ rounds for fanout $f$.
 
-That works only because the merge is per record and idempotent. `Table.Upsert` at
-`pkg/cluster/member.go:165` applies one rule to every record regardless of how many arrive:
+This swarm is a **full mesh** (every node holds a connection to every other). One broadcast
+reaches everyone in one hop, so there is no infection curve to climb. What the full mesh does
+*not* remove is loss. That is the only reason anti-entropy exists here: not to spread news,
+but to repair news that did not arrive.
 
-```go
-// pkg/cluster/member.go:177
-case m.Incarnation > existing.Incarnation:
-	// full overwrite, including a return to alive
-case m.Incarnation < existing.Incarnation:
-	return false
-default:
-	// equal incarnation: state may only worsen
-	if m.State < existing.State {
-		m.State = existing.State
-	}
-	...
-}
-```
+### Only first-hand deaths are pushed
 
-Merging a record you already hold returns `false` and changes nothing. Merging a full view is
-therefore $N$ independent upserts, most of which are no-ops. A delta with one record and a
-full view with fifty go through the same code path, and the sender never has to know which the
-receiver needs.
+`pushRecord` fires from `markDead` and `markLeft` only
+(`pkg/cluster/node.go:696`, `pkg/cluster/node.go:717`). A record merged from someone else's
+delta is not re-pushed.
+
+| Rule | Frames per death |
+|---|---|
+| push on first-hand observation | about $N$ per observer |
+| push on every receipt too | about $N^2$ per observer, most of them no-ops |
+
+In a full mesh the original broadcast already reached everyone, so re-pushing buys nothing
+except $N^2$ traffic. A crash that *every* node observes still costs about $N^2$ frames (each
+observer broadcasts once), which the comment at `pkg/cluster/node.go:732` accepts because
+deaths are rare.
+
+### A full view is just a large delta
+
+There is no snapshot message. `MembershipDeltaPayload` (`pkg/protocol/message.go:390`) is
+the only membership payload, and its comment (`pkg/protocol/message.go:386`) says a delta
+"asserts facts about the members it names and says nothing about members it omits". The
+receiver merges; it never replaces.
+
+That works because `Table.Upsert` (`pkg/cluster/member.go:212`) is per record and
+idempotent. Merging a record you already hold returns `false`. So a full view of 50 is 50
+independent upserts, most of them no-ops, and the welcome view (`pkg/cluster/node.go:639`),
+the gossip view and a one-record push all run through the same code.
 
 ---
 
 ## Under the Hood
 
-### The merge rule as a lattice
+### One gossip round
 
-The reason gossip converges rather than oscillates is that the merge is a *join* on a partial
-order. For each node, the order is:
+```go
+// pkg/cluster/node.go:799 (abridged)
+func (n *Node) gossipRound(ctx context.Context) {
+	view := n.table.Snapshot()
+	if view.Version != n.gossipVersion {
+		n.gossipVersion = view.Version
+		if !n.sameGossipSet(view) {
+			n.gossipNext = len(n.gossipOrder) // force a redraw below
+		}
+	}
+	if n.gossipNext >= len(n.gossipOrder) {
+		// rebuild gossipOrder from the alive peers, excluding self
+		n.cfg.Shuffle(n.gossipOrder)
+		n.gossipNext = 0
+	}
+	if len(n.gossipOrder) == 0 {
+		return
+	}
+	peer := n.gossipOrder[n.gossipNext]
+	n.gossipNext++
+	n.sendView(ctx, peer, view)
+}
+```
 
-1. Higher `Incarnation` beats lower, unconditionally.
-2. At equal `Incarnation`, `alive < suspect < dead`; the merge takes the max.
+It runs on the node's single event loop, from its own ticker
+(`pkg/cluster/node.go:441`, handled at `pkg/cluster/node.go:481`). No lock is held across the
+send, and there is no extra goroutine.
 
-Any two views merged in any order, any number of times, reach the same result. That is the
-property (associative, commutative, idempotent) that lets a node receive the same rumour from
-five peers, in five different orders, interleaved with older rumours, and end up with one
-answer.
+### Peer selection: shuffled round-robin, k = 1
 
-The comment at `pkg/cluster/member.go:163` names what breaks without rule 2: two nodes with
-different beliefs at the same incarnation would each "correct" the other forever. Rule 2 makes
-one direction of correction impossible.
+```mermaid
+flowchart LR
+    T[gossip tick] --> V{table version changed?}
+    V -->|no| C{cursor at end?}
+    V -->|yes| S{alive set changed?}
+    S -->|no| C
+    S -->|yes| R[force redraw]
+    R --> C
+    C -->|yes| D[rebuild alive list and Shuffle]
+    C -->|no| P[pick order at cursor]
+    D --> P
+    P --> F[sendView full view to that peer]
+```
 
-Defect 2 in `docs/WORKLOG.md` section 4.3 is the practical lesson: the clamp at
-`pkg/cluster/member.go:187` runs *before* role and address are compared. A record that arrives
-to change a role carries whatever `State` its sender believed, and if the clamp were after the
-role comparison, that stale `alive` would resurrect a buried node. The order of the two checks
-is the correctness argument, not a style choice.
+| Choice | Why |
+|---|---|
+| one peer per round ($k = 1$) | a full view is $O(N)$ bytes. $k$ peers per round costs $k$ times that |
+| a permutation, not a random pick | a random pick has no bound: by chance a peer can go unvisited for many rounds |
+| shuffled, not ID order | ID order makes every node target the same peer on the same tick |
+| redraw only when the *alive set* changes | most version bumps are score reports. Redrawing on each would keep resetting the cursor and quietly turn the permutation back into random selection |
 
-### Incarnation: who is allowed to say "I am alive"
+`Shuffle` is a config seam (`pkg/cluster/node.go:101`), defaulting to `math/rand/v2`
+(`pkg/cluster/node.go:143`). Tests inject a deterministic one.
 
-`Incarnation` (`pkg/cluster/member.go:81`, wire form at `pkg/protocol/message.go:334`)
-increases when a node restarts. Only a higher incarnation can move a record from dead back to
-alive, and only the node itself ever issues a higher incarnation for itself. So:
+### The repair bound
 
-| Claim | Who can make it | How |
+Let $P$ be the number of alive peers, so $P = N - 1$. One cycle of the permutation takes $P$
+rounds, and every alive peer is visited once in it. A lost death push is repaired within
+
+$$
+t_{repair} \le N \times T_{gossip}
+$$
+
+The bound holds for a death because the death itself changes the alive set, which forces a
+fresh permutation on the next tick. The peer that missed the push is then at most $P$ rounds
+away, plus up to one tick of waiting for that first round.
+
+Two caveats worth knowing:
+
+- **A lost update that does not change the alive set** (for example a self-announcement) gets
+  no fresh permutation. A peer visited first in one cycle and last in the next waits
+  $2P - 1$ rounds, so its worst case is nearly $2N \times T_{gossip}$.
+- **Continuous churn** keeps forcing redraws, and a peer can keep landing late in each new
+  permutation. The bound assumes the alive set settles.
+
+| $N$ | $T_{gossip}$ | $N \times T_{gossip}$ |
 |---|---|---|
-| "X is suspect" | anyone whose detector fired | delta at X's current incarnation, state suspect |
-| "X is dead" | anyone whose suspicion expired | delta at X's current incarnation, state dead |
-| "X is alive after all" | only X | delta at a *higher* incarnation |
+| 10 | 2 s | 20 s |
+| 50 | 2 s | 100 s |
+| 50 | 200 ms | 10 s |
 
-This is SWIM's refutation mechanism (Das, Gupta, Motivala, 2002). A node hears a rumour that it
-is suspect, bumps its own incarnation, and gossips itself alive. Every peer's `Upsert` accepts
-the higher incarnation and drops the rumour. The accused clears its own name; nobody else needs
-to vote.
+This is a *repair* bound, not the normal path. Normally the push arrives in milliseconds.
+Tune it with `SWARM_GOSSIP_INTERVAL` or `-gossip-interval` (`cmd/swarm-node/config.go:60`).
 
-The version counter in `View` (`pkg/cluster/member.go:94`) and `ViewVersion` on the wire
-(`pkg/protocol/message.go:357`) are *not* part of this order. They are per-sender monotonic
-counters for detecting a stale local snapshot, and the comment on the wire field says they
-cannot be compared across nodes. Only `Incarnation` orders claims about a given node.
+### Receiving a view: one snapshot, binary search
 
-### Suspicion buys accuracy without a longer timeout
+```go
+// pkg/cluster/node.go:947, 971-977
+before := n.table.Snapshot()
+for _, rec := range p.Members {
+	// ...
+	role := RoleWorker
+	if i, ok := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID); ok {
+		role = before.Members[i].Role
+	}
+	if rec.ID == from {
+		role = ParseRole(rec.Role)
+	}
+	// ... Upsert
+}
+```
 
-A detector that goes straight from alive to dead has to be conservative, because there is no
-undo. SWIM inserts a *suspect* state between them (`pkg/cluster/member.go:44`), which is a
-public accusation with a deadline. During that window the accused can refute. That lets the
-detector fire *earlier* with the same false-positive cost, because a false positive is now
-corrected by the victim in one gossip round instead of by the accuser waiting longer. The
-trade is covered from the detector's side in [Failure Detectors](/concepts/failure-detectors).
+Before commit `4012bf2`, the handler took a `Snapshot` (copy and sort of the whole table) *per
+record*. Under anti-entropy every delta is a full view, so that was $O(N^2 \log N)$ on the event
+loop. `BenchmarkHandleMembershipDelta` (`pkg/cluster/bench_test.go:184`), steady state:
 
-### Voluntary departure is a removal, not a rumour
+| $N$ | before | after |
+|---|---|---|
+| 100 | 817 us, 100 allocs | 14.7 us, 1 alloc |
+| 1000 | 125 ms, 1000 allocs | 211 us, 1 alloc |
 
-`LEAVE` (`pkg/protocol/message.go:95`) calls `Table.Remove` (`pkg/cluster/member.go:232`),
-which deletes the record outright rather than marking it dead. A dead record has to stay in the
-table so that a lower-incarnation rumour arriving late is recognised and dropped. A node that
-left on purpose has no rumour to outlive, so its record can go.
+The binary search is valid only because `Snapshot` sorts by ID
+(`pkg/cluster/member.go:417`). `View.Get` scans instead, because it cannot assume an arbitrary
+`View` is sorted.
+
+### What gossip can and cannot repair
+
+A receiver believes a **role** only from the member itself, that is when `rec.ID == from`
+(`pkg/cluster/node.go:975`). Relayed roles are ignored. State, incarnation, address and score
+merge from anyone.
+
+| Field in a gossiped record | Repaired by anti-entropy? |
+|---|---|
+| death of a third node | yes |
+| the *sender's own* role and score | yes, the view includes the sender's own record |
+| a third node's role | **no** -- only that node's own announcement moves it |
+| a third node's score | yes, relayed scores merge (`TestThreeNodesConvergeThroughGossipAlone`) |
 
 ---
 
@@ -172,75 +223,86 @@ left on purpose has no rumour to outlive, so its record can go.
 
 ### Gossip converges. It does not agree.
 
-This is the sentence the whole page exists to justify. After enough rounds, every node's view is
-the same. But at any given instant, two nodes may hold different views, and there is no moment
-at which any node *knows* that everyone else holds the same view it does. Convergence is a
-property of the limit; agreement is a property of a moment, and gossip has none.
+After enough rounds every view is the same. But at any given instant two views may differ, and
+no node ever *knows* that everyone holds its view. Convergence is a property of the limit.
+Agreement is a property of a moment, and gossip has no such moment.
 
-`Elect` at `pkg/cluster/election.go:107` runs against a `View` snapshot
-(`pkg/cluster/member.go:245`). Two nodes with different views compute different `Result.Size`
-values and may compute different leader sets. Nothing reconciles those results; the
-`ELECTION_RESULT` message (`pkg/protocol/message.go:84`) publishes them so the disagreement is
-visible on the dashboard, and the next gossip round makes the views converge, after which the
-next election converges too. That is eventually consistent leadership, and it is the reason
-[Split-Brain and Quorum](/concepts/split-brain-and-quorum) is a separate page: quorum reasoning
-needs an agreed $n$, and gossip only ever offers a converging one.
+`Elect` (`pkg/cluster/election.go:112`) runs on a `View` snapshot and sizes itself from
+`view.Alive()` (`pkg/cluster/election.go:115`). Two nodes with different views can compute
+different leader sets. `ELECTION_RESULT` (`pkg/protocol/message.go:85`) makes that visible,
+and the next gossip round makes the views, and then the elections, converge. Quorum reasoning
+needs an *agreed* $n$ -- see [Split-Brain and Quorum](/concepts/split-brain-and-quorum).
 
 ### Where the mechanism lives
 
-- `HelloPayload.KnownPeers` (`pkg/protocol/message.go:263`) seeds a joining node's first
-  view, so a node only needs one seed address to bootstrap into the rest.
-- Unknown message types are ignored, not rejected (`pkg/protocol/message.go:29`). A rolling
-  upgrade adds a message type; gossip must not fail on the old nodes.
-- `Table.Snapshot` (`pkg/cluster/member.go:245`) returns an ID-sorted copy. Election
-  determinism depends on this order, so the view a node gossips and the view it elects from are
-  the same bytes.
+| What | Where |
+|---|---|
+| gossip interval default (2 s) | `pkg/cluster/node.go:29` |
+| config fields `GossipInterval`, `Shuffle` | `pkg/cluster/node.go:98`, `pkg/cluster/node.go:101` |
+| welcome view on every `PeerUp` | `pkg/cluster/node.go:639` |
+| first-hand death push | `pkg/cluster/node.go:735` |
+| full view send | `pkg/cluster/node.go:753` |
+| departure kept as a dead record | `pkg/cluster/node.go:712` |
+| self-rumour refutation | `pkg/cluster/node.go:1044` |
+| bootstrap seed list in `HELLO` | `pkg/protocol/message.go:264` |
+| unknown message types are ignored, not fatal | `pkg/protocol/message.go:30` |
+
+Tests: `pkg/cluster/gossip_test.go` covers one-visit-per-cycle, redraw-only-on-set-change,
+push of first-hand deaths only, and the dropped-push repair over real nodes.
 
 ---
 
 ## Common Failure Modes & Edge Cases
 
-### The oscillating node
+### The immortal alive record
 
-Symptom: a node flips alive/dead/alive/dead in every peer's log, indefinitely. Cause: a merge
-rule that lets equal-incarnation state improve, or a node that does not bump its incarnation on
-restart. `TestAtEqualIncarnationStateOnlyWorsens` in `pkg/cluster/member_test.go` pins the
-first; the second presents as a restarted node that stays dead in everyone's view until they
-happen to probe it.
+Symptom: a killed node keeps coming back to "alive" in every view, round after round. Cause: a
+death recorded at the victim's *current* incarnation loses to a newer "alive" still circulating,
+and anti-entropy re-asserts that record every round. Fixed by bumping the incarnation on death.
+The full interleaving is on
+[Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
 
-### The immortal rumour
+### The departed node that re-joins by echo
 
-Symptom: a node that restarted is still marked dead by one peer, and no delta fixes it. Cause:
-the restarted node's incarnation is *not higher* than the one the rumour carried. Incarnation
-must be strictly monotonic per node across restarts, which is why it is a start timestamp
-(`pkg/protocol/message.go:259`) and not a counter that resets to zero.
+Symptom: a node that sent `LEAVE` reappears as alive a few seconds later, although its process
+is gone. Cause: deleting the record on `LEAVE`. The next peer that had not heard the `LEAVE`
+gossips its old "alive" record, and with nothing to outrank it, `Upsert` inserts it as new.
+This is why `markLeft` keeps a dead record (`pkg/cluster/node.go:712`) and `Table.Remove`
+(`pkg/cluster/member.go:390`) is no longer called by the node.
 
 ### Replace instead of merge
 
-Symptom: a node's view shrinks to whatever the last delta named, and every other member vanishes
-until anti-entropy repairs it. Cause: a receiver treated `MEMBERSHIP_DELTA` as a snapshot. The
-payload comment at `pkg/protocol/message.go:348` forbids this. The tell is a membership count
-that drops to 1 or 2 on every delta and recovers on the anti-entropy tick.
+Symptom: a node's member count drops to 1 or 2 on every push, then recovers on a gossip tick.
+Cause: treating `MEMBERSHIP_DELTA` as a complete view. A one-record push then evicts
+everyone it did not name.
 
-### Election on a half-converged view
+### Gossip that looks random
 
-Symptom: two leader sets announced for a few hundred milliseconds after a node joins or dies.
-Cause: none, this is the design. The views differ for $O(\log N)$ rounds. What would be a bug
-is a node acting *irreversibly* on that transient result, which is why tasks must be
-re-issuable -- see [Idempotence and Hysteresis](/concepts/idempotence-and-hysteresis).
+Symptom: under steady score reporting, some peer is occasionally not repaired for far longer
+than $N \times T_{gossip}$. Cause: redrawing the permutation on every table version change
+instead of on alive-set changes. `TestGossipRedrawsOnlyWhenAlivePeersChange` pins this.
 
-### Fanout too low for the loss rate
+### The event loop stalls on large views
 
-Symptom: membership converges in the demo but not under a chaos run that drops frames. Cause:
-with $f = 1$ a single dropped delta breaks the only infection path from that sender. Anti-entropy
-still repairs it, but at its timer period rather than in $O(\log N)$ rounds. Raise $f$ or
-shorten the anti-entropy interval; both cost bandwidth proportional to $N \cdot f$.
+Symptom: at a few hundred nodes, heartbeats and probe results queue up behind membership
+handling, and nodes start timing each other out. Cause: per-record snapshots or linear
+lookups in the delta handler. One `MEMBERSHIP_DELTA` at $N = 1000$ used to take 125 ms of loop
+time.
+
+### Interval too long for the swarm size
+
+Symptom: after a partition heals, some nodes disagree on who is dead for minutes. Cause:
+$N \times T_{gossip}$ grew with $N$ and nobody retuned. The cost of shortening $T_{gossip}$ is
+one full view ($O(N)$ bytes) per node per tick, so total bytes per second grow as
+$N^2 / T_{gossip}$.
 
 ---
 
 ## See Also
 
-- [Failure Detectors](/concepts/failure-detectors) -- who decides a node is suspect in the first
+- [Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation) -- the merge
+  rule, and why death bumps the incarnation.
+- [Failure Detectors](/concepts/failure-detectors) -- who decides a node is dead in the first
   place.
 - [Split-Brain and Quorum](/concepts/split-brain-and-quorum) -- why a converging $n$ is not an
   agreed $n$.
