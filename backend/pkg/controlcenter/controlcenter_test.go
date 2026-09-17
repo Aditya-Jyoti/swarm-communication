@@ -145,6 +145,35 @@ func (n *fakeNode) next(want protocol.MessageType) *protocol.Envelope {
 	}
 }
 
+// waitClosed reads until the CC closes the link. Only SIM_CONFIG may arrive
+// first: the CC sends one on every connect. A read timeout (testWait) fails.
+func (n *fakeNode) waitClosed() {
+	n.t.Helper()
+	for {
+		env, err := n.dec.ReadFrame()
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				n.t.Fatalf("%s: link still open", n.id)
+			}
+			return
+		}
+		if env.Type != protocol.TypeSimConfig {
+			n.t.Fatalf("%s: got %s while waiting for close", n.id, env.Type)
+		}
+	}
+}
+
+// simConfig waits for the next SIM_CONFIG.
+func (n *fakeNode) simConfig() protocol.SimConfigPayload {
+	n.t.Helper()
+	p, err := protocol.PayloadOf[protocol.SimConfigPayload](n.next(protocol.TypeSimConfig))
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	return p
+}
+
 // --- browser -------------------------------------------------------------------
 
 type browser struct {
@@ -431,7 +460,8 @@ func TestNodeLifecycle(t *testing.T) {
 		Connected: true, LastSeenMS: v.LastSeenMS, Dropped: 2, LedgerSize: 4,
 	}
 	gotCore := v
-	gotCore.Peers, gotCore.Scores = nil, nil
+	gotCore.Peers, gotCore.Scores, gotCore.Flows = nil, nil, nil
+	gotCore.Pos = protocol.Position{}
 	if !reflect.DeepEqual(gotCore, want) || len(v.Peers) != 1 || v.Scores["x:7946"] != 0.4 {
 		t.Fatalf("view = %+v", v)
 	}
@@ -458,9 +488,7 @@ func TestNewestLinkWinsSilently(t *testing.T) {
 	fresh := dialNode(t, cc, "node-1")
 
 	// The CC closes the superseded socket.
-	if _, err := old.dec.ReadFrame(); err == nil {
-		t.Fatal("old link still open")
-	}
+	old.waitClosed()
 	// Telemetry on the new link lands, and no node_down was emitted between.
 	fresh.telemetry("leader", "alive")
 	b.until("leader_change without node_down", func(m wsMsg, _ []byte) bool {
@@ -737,9 +765,7 @@ func TestShutdownClosesBrowsersAndNodes(t *testing.T) {
 			break
 		}
 	}
-	if _, err := n.dec.ReadFrame(); err == nil {
-		t.Fatal("node link still open after shutdown")
-	}
+	n.waitClosed()
 	// Requests after shutdown fail fast instead of hanging.
 	if _, err := cc.srv.submitTasks(context.Background(), ClientMessage{Kind: "echo"}); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("submit after stop = %v", err)

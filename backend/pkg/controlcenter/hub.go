@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"swarm-net/pkg/geo"
 	"swarm-net/pkg/network"
 	"swarm-net/pkg/protocol"
 	"swarm-net/pkg/telemetry"
@@ -34,6 +35,8 @@ type nodeEntry struct {
 	tel       protocol.TelemetryPayload
 	lastSeen  time.Time
 	downSince time.Time
+	// flowsAt is when tel.Flows arrived; the snapshot hides older flows.
+	flowsAt time.Time
 }
 
 // taskEntry is one task. Hub-owned.
@@ -58,15 +61,24 @@ type hub struct {
 	rr       uint64
 	clients  map[*wsClient]struct{}
 	pingSeq  uint64
+	sim      simState
+	// killed holds the IDs the CC sent CHAOS kill to. A killed node's link
+	// dropping is the expected outcome, not a failure, and the dashboard
+	// shows it as such until the entry expires or the ID reconnects.
+	killed map[protocol.NodeID]struct{}
 }
 
 func newHub(s *Server) *hub {
-	return &hub{
+	h := &hub{
 		s:        s,
 		nodes:    make(map[protocol.NodeID]*nodeEntry),
 		taskByID: make(map[string]*taskEntry),
 		clients:  make(map[*wsClient]struct{}),
+		sim:      newSimState(s.cfg),
+		killed:   make(map[protocol.NodeID]struct{}),
 	}
+	h.bumpSim() // version 0 would never be "newer" than what a node holds
+	return h
 }
 
 // run is the hub loop. It returns when ctx is cancelled, after dropping every
@@ -96,6 +108,12 @@ func (h *hub) run(ctx context.Context) {
 			op(h)
 		case <-snap.C:
 			h.expire()
+			// The tick doubles as the coalescing window for joins: at most
+			// one position broadcast per SnapshotInterval, however many
+			// nodes arrived in it.
+			if h.sim.dirty {
+				h.broadcastSim()
+			}
 			h.broadcast(h.snapshotBytes())
 		case <-keep.C:
 			h.keepAlive()
@@ -113,10 +131,20 @@ func (h *hub) onConnUp(l *nodeLink) {
 		n = &nodeEntry{id: l.id, tel: defaultTelemetry(l.id)}
 		h.nodes[l.id] = n
 	}
+	if _, wasKilled := h.killed[l.id]; wasKilled {
+		// Same ID, new process (e.g. `docker compose up` again): treat it
+		// as new rather than carry the dead one's last report over.
+		delete(h.killed, l.id)
+		n.tel = defaultTelemetry(l.id)
+		n.flowsAt = time.Time{}
+	}
 	old := n.link
 	n.link = l
 	n.lastSeen = h.now()
 	n.downSince = time.Time{}
+	// After the link is registered, so the send has somewhere to go. A
+	// replacing link needs the config too: it is a new process.
+	defer h.simJoin(n)
 	if old != nil {
 		// Newest wins. The old link's connDown will find it is no longer
 		// current and stay silent, so the dashboard sees no flap.
@@ -135,8 +163,12 @@ func (h *hub) onConnDown(l *nodeLink, d network.Disposition, err error) {
 	}
 	n.link = nil
 	n.downSince = h.now()
-	h.s.log.Info("node disconnected", "peer", l.id, "disposition", d, "err", err)
-	h.event(EventNodeDown, l.id, d.String())
+	detail := d.String()
+	if _, killed := h.killed[l.id]; killed {
+		detail = "killed"
+	}
+	h.s.log.Info("node disconnected", "peer", l.id, "disposition", d, "killed", detail == "killed", "err", err)
+	h.event(EventNodeDown, l.id, detail)
 }
 
 func (h *hub) onFrame(l *nodeLink, env *protocol.Envelope) {
@@ -177,8 +209,14 @@ func (h *hub) applyTelemetry(n *nodeEntry, p protocol.TelemetryPayload) {
 	if p.State == "" {
 		p.State = "alive"
 	}
+	// The sender caps flows, but the CC re-broadcasts them to every browser
+	// every second, so it enforces the cap itself rather than trust it.
+	if len(p.Flows) > protocol.MaxFlowRecords {
+		p.Flows = p.Flows[:protocol.MaxFlowRecords]
+	}
 	prev := n.tel
 	n.tel = p
+	n.flowsAt = h.now()
 	if prev.Role != p.Role {
 		h.event(EventLeaderChange, n.id, prev.Role+" -> "+p.Role)
 	}
@@ -231,6 +269,7 @@ func (h *hub) expire() {
 	for id, n := range h.nodes {
 		if n.link == nil && now.Sub(n.downSince) >= h.s.cfg.NodeExpiry {
 			delete(h.nodes, id)
+			delete(h.killed, id)
 		}
 	}
 }
@@ -359,6 +398,12 @@ func (h *hub) chaos(m ClientMessage) error {
 		return err
 	}
 	h.sendAsync(n.link, env)
+	if c.Action == telemetry.ChaosKill {
+		// Marked even though the send is asynchronous and may fail: the
+		// operator asked for this node to die, and if it does not, the
+		// mark only matters once its link drops anyway.
+		h.killed[n.id] = struct{}{}
+	}
 	detail := string(c.Action)
 	if c.Action == telemetry.ChaosDelay {
 		detail += " " + c.Delay.String()
@@ -416,6 +461,7 @@ func (h *hub) snapshot() Snapshot {
 	s := Snapshot{
 		Type:     TypeSnapshot,
 		AtUnixMS: now.UnixMilli(),
+		Sim:      h.simView(),
 		Nodes:    make([]NodeView, 0, len(h.nodes)),
 		Tasks:    make([]TaskView, 0, len(h.tasks)),
 	}
@@ -433,6 +479,17 @@ func (h *hub) snapshot() Snapshot {
 			LedgerSize: n.tel.LedgerSize,
 			Peers:      n.tel.Peers,
 			Scores:     n.tel.Scores,
+			Pos:        h.positionOf(n.id),
+			Threshold:  n.tel.Threshold,
+			Hysteresis: n.tel.Hysteresis,
+			SimVersion: n.tel.SimVersion,
+			Flows:      n.tel.Flows,
+		}
+		if _, killed := h.killed[n.id]; killed && n.link == nil {
+			v.State = NodeStateKilled
+		}
+		if now.Sub(n.flowsAt) > flowTTL || v.Flows == nil {
+			v.Flows = []protocol.FlowRecord{}
 		}
 		// The browser does peers.length and Object.entries(scores); null
 		// would throw.
@@ -449,6 +506,16 @@ func (h *hub) snapshot() Snapshot {
 		s.Tasks = append(s.Tasks, t.view)
 	}
 	return s
+}
+
+// positionOf is id's position. Every listed node has one (simJoin runs on
+// connect), unless makeRoom had to drop it; the default is the right answer
+// then too.
+func (h *hub) positionOf(id protocol.NodeID) protocol.Position {
+	if p, ok := h.sim.positions[id]; ok {
+		return p
+	}
+	return geo.DefaultPosition(id)
 }
 
 func (h *hub) snapshotBytes() []byte {

@@ -20,7 +20,8 @@ const maxRequestBytes = 64 << 10
 // (frontend/, served by nginx), so the CC only says where it is and which
 // routes it owns. Plain text keeps it readable with a bare curl.
 const rootText = `swarm-net control center API; dashboard is served by the frontend
-routes: GET /healthz, GET /api/state, POST /api/tasks, POST /api/chaos, GET /ws
+routes: GET /healthz, GET /api/state, POST /api/tasks, POST /api/chaos,
+        GET /api/sim, POST /api/sim, GET /ws
 `
 
 // Handler returns the HTTP routes from the contract.
@@ -33,6 +34,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/tasks", s.guardMutation(s.handleTasks))
 	mux.HandleFunc("POST /api/chaos", s.guardMutation(s.handleChaos))
+	mux.HandleFunc("GET /api/sim", s.handleGetSim)
+	mux.HandleFunc("POST /api/sim", s.guardMutation(s.handlePostSim))
 	mux.HandleFunc("GET /ws", s.handleWS)
 	mux.HandleFunc("GET /", handleRoot)
 	return mux
@@ -86,6 +89,40 @@ func (s *Server) handleChaos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleGetSim(w http.ResponseWriter, r *http.Request) {
+	var v SimView
+	if !s.do(r.Context(), func(h *hub) { v = h.simView() }) {
+		writeError(w, ErrUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) handlePostSim(w http.ResponseWriter, r *http.Request) {
+	m, err := decodeClientMessage(w, r, TypeSim)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	v, err := s.updateSim(r.Context(), m)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) updateSim(ctx context.Context, m ClientMessage) (SimView, error) {
+	var (
+		v   SimView
+		err error
+	)
+	if !s.do(ctx, func(h *hub) { v, err = h.updateSim(m) }) {
+		return SimView{}, ErrUnavailable
+	}
+	return v, err
+}
+
 func (s *Server) submitTasks(ctx context.Context, m ClientMessage) ([]string, error) {
 	var (
 		ids []string
@@ -118,7 +155,20 @@ func decodeClientMessage(w http.ResponseWriter, r *http.Request, want string) (C
 	if m.Type != want {
 		return m, fmt.Errorf("%w: type %q, want %q", ErrBadRequest, m.Type, want)
 	}
-	return m, nil
+	return m, checkFields(m)
+}
+
+// checkFields rejects fields that belong to a different message type. They
+// all share ClientMessage, so DisallowUnknownFields cannot catch
+// {"type":"task","base_ms":5} on its own.
+func checkFields(m ClientMessage) error {
+	switch {
+	case m.Type == TypeSim && m.hasCommandFields():
+		return fmt.Errorf("%w: sim message carries task or chaos fields", ErrBadRequest)
+	case m.Type != TypeSim && m.hasSimFields():
+		return fmt.Errorf("%w: %s message carries sim fields", ErrBadRequest, m.Type)
+	}
+	return nil
 }
 
 // decodeStrict reads exactly one ClientMessage: unknown fields and anything
@@ -268,11 +318,16 @@ func (s *Server) readWS(ctx context.Context, c *websocket.Conn, canCommand bool)
 			s.log.Debug("ignoring malformed dashboard message", "err", err)
 			continue
 		}
-		switch m.Type {
-		case TypeTask:
+		switch err = checkFields(m); {
+		case err != nil:
+		case m.Type == TypeTask:
 			_, err = s.submitTasks(ctx, m)
-		case TypeChaos:
+		case m.Type == TypeChaos:
 			err = s.chaos(ctx, m)
+		case m.Type == TypeSim:
+			// The browser learns the outcome from the sim event and the
+			// next snapshot, like every other command.
+			_, err = s.updateSim(ctx, m)
 		default:
 			err = fmt.Errorf("%w: unknown message type %q", ErrBadRequest, m.Type)
 		}
