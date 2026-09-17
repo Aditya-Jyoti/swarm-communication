@@ -113,10 +113,13 @@ func (f *fakeTransport) failSend(to protocol.NodeID, err error) {
 // block parks until ctx ends and then reports cancellation, which is what a real
 // strategy does when the round is cancelled under it.
 type fakeHealth struct {
-	mu       sync.Mutex
-	scores   map[protocol.NodeAddress]float64
-	errs     map[protocol.NodeAddress]error
-	block    map[protocol.NodeAddress]bool
+	mu     sync.Mutex
+	scores map[protocol.NodeAddress]float64
+	errs   map[protocol.NodeAddress]error
+	block  map[protocol.NodeAddress]bool
+	// gate holds a probe of the target until the channel is closed, then lets it
+	// report its configured result. Unlike block, the outcome is a real sample.
+	gate     map[protocol.NodeAddress]chan struct{}
 	retained []map[protocol.NodeAddress]struct{}
 	calls    int
 }
@@ -126,6 +129,7 @@ func newFakeHealth() *fakeHealth {
 		scores: make(map[protocol.NodeAddress]float64),
 		errs:   make(map[protocol.NodeAddress]error),
 		block:  make(map[protocol.NodeAddress]bool),
+		gate:   make(map[protocol.NodeAddress]chan struct{}),
 	}
 }
 
@@ -135,6 +139,17 @@ func (h *fakeHealth) EvaluateScore(ctx context.Context, target protocol.NodeAddr
 	h.mu.Lock()
 	h.calls++
 	blocked := h.block[target]
+	gate := h.gate[target]
+	h.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return health.ScoreUnavailable(), fmt.Errorf("%w: %w", health.ErrProbeCanceled, ctx.Err())
+		}
+	}
+	h.mu.Lock()
 	err := h.errs[target]
 	score, ok := h.scores[target]
 	h.mu.Unlock()
@@ -175,6 +190,15 @@ func (h *fakeHealth) stall(addr protocol.NodeAddress) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.block[addr] = true
+}
+
+// hold gates probes of addr until the returned func is called.
+func (h *fakeHealth) hold(addr protocol.NodeAddress) (release func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ch := make(chan struct{})
+	h.gate[addr] = ch
+	return func() { close(ch) }
 }
 
 func (h *fakeHealth) lastRetained() map[protocol.NodeAddress]struct{} {
@@ -1187,6 +1211,95 @@ func TestSelfScoreMedian(t *testing.T) {
 	h.probeRound()
 	if got := h.status().Scores["node-a"]; got != 3.5 {
 		t.Fatalf("median of {4,1,3,10} = %v, want 3.5", got)
+	}
+}
+
+// MEDIUM-2: peers that have gone must stop counting towards the self-score, and
+// their per-peer entries must not accumulate.
+func TestDepartedPeersStopSkewingSelfScore(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.hs.set(addrOf("node-b"), 1.0)
+	h.peerUp("node-b", 1)
+
+	// Ten slow workers join, are measured, and drag the median up.
+	var slow []protocol.NodeID
+	for i := 0; i < 10; i++ {
+		id := protocol.NodeID(fmt.Sprintf("slow-%02d", i))
+		slow = append(slow, id)
+		h.hs.set(addrOf(id), 50.0)
+		h.peerUp(id, 1)
+	}
+	h.probeRound()
+	if got := h.status().Scores["node-a"]; got != 50.0 {
+		t.Fatalf("self score with ten slow peers = %v, want 50", got)
+	}
+
+	// Half leave politely, half vanish: both kinds of departure must prune.
+	for i, id := range slow {
+		if i%2 == 0 {
+			h.frame(id, protocol.TypeLeave, protocol.LeavePayload{Reason: "scale-down"})
+		} else {
+			h.peerDown(id, network.DispositionPeerDied)
+		}
+	}
+	st := h.status()
+	for _, id := range slow {
+		if _, ok := st.Scores[id]; ok {
+			t.Fatalf("Scores still holds departed %s: %v", id, st.Scores)
+		}
+		if _, ok := st.Missed[id]; ok {
+			t.Fatalf("Missed still holds departed %s: %v", id, st.Missed)
+		}
+	}
+	if _, ok := st.Scores["node-b"]; !ok {
+		t.Fatal("a live peer was pruned")
+	}
+	if _, ok := st.Scores["node-a"]; !ok {
+		t.Fatal("the self entry was pruned")
+	}
+
+	// The next self-report is the median over the one peer still here.
+	h.probeRound()
+	if got := h.status().Scores["node-a"]; got != 1.0 {
+		t.Fatalf("self score after departures = %v, want 1.0", got)
+	}
+}
+
+// A probe result for a peer that died while the probe was in flight must not
+// re-insert the entry that the death just pruned.
+func TestInFlightProbeOfDeadPeerIsDiscarded(t *testing.T) {
+	h := newHarness(t, "node-a", nil)
+	h.hs.set(addrOf("node-b"), 1.0)
+	h.hs.fail(addrOf("node-c"), health.ErrUnreachable) // a real failure, not a cancel
+	release := h.hs.hold(addrOf("node-c"))
+	h.peerUp("node-b", 1)
+	h.peerUp("node-c", 1)
+
+	h.clock.Advance(probeEvery)
+	h.barrier() // the round is in flight: node-c's probe is held at the gate
+
+	// Deliver the death on the loop goroutine, deterministically ahead of the
+	// round's result. Pushing it on the events channel would race the result in
+	// the loop's select.
+	if err := h.node.barrier(h.ctx, func() {
+		h.node.handlePeerEvent(h.ctx, network.PeerEvent{
+			Kind: network.PeerDown, Peer: network.PeerInfo{ID: "node-c"}, Disposition: network.DispositionPeerDied,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	h.settle() // waits for the round to be applied
+
+	st := h.status()
+	if _, ok := st.Scores["node-c"]; ok {
+		t.Fatalf("dead peer's in-flight result was recorded: %v", st.Scores)
+	}
+	if _, ok := st.Missed["node-c"]; ok {
+		t.Fatalf("dead peer's in-flight result was counted: %v", st.Missed)
+	}
+	if got := st.Scores["node-b"]; got != 1.0 {
+		t.Fatalf("live peer's result from the same round = %v, want 1.0", got)
 	}
 }
 

@@ -697,12 +697,42 @@ func (n *Node) sendView(ctx context.Context, to protocol.NodeID) {
 }
 
 // membershipChanged is the single path after any table mutation: bound the health
-// history to the live set, then re-evaluate.
+// history and the per-peer maps to the live set, then re-evaluate.
 func (n *Node) membershipChanged(ctx context.Context) {
+	view := n.table.Snapshot()
 	if r, ok := n.cfg.Health.(HealthRetainer); ok {
-		r.Retain(n.table.Snapshot().Addresses())
+		r.Retain(view.Addresses())
 	}
+	n.pruneLocal(view)
 	n.evaluate(ctx)
+}
+
+// pruneLocal drops local and missed entries for every peer that is not alive in
+// view. Self is kept: its local entry is the previous self-score.
+//
+// Without this both maps only ever grow. Worse than the memory, selfScore takes
+// its median over n.local, and an entry for a peer that has left is never
+// re-probed (probe rounds target alive members only), so it never turns NaN
+// and never drops out: ten short-lived slow workers would skew this node's
+// self-report, and therefore every election in the swarm, for good. A peer that
+// comes back is simply measured afresh on the next round.
+func (n *Node) pruneLocal(view View) {
+	alive := make(map[protocol.NodeID]struct{}, len(view.Members))
+	for _, m := range view.Members {
+		if m.State == StateAlive {
+			alive[m.ID] = struct{}{}
+		}
+	}
+	for id := range n.local {
+		if _, ok := alive[id]; !ok && id != n.cfg.Self {
+			delete(n.local, id)
+		}
+	}
+	for id := range n.missed {
+		if _, ok := alive[id]; !ok {
+			delete(n.missed, id)
+		}
+	}
 }
 
 // ---- inbound frames ----
@@ -997,7 +1027,15 @@ func (n *Node) startProbeRound(ctx context.Context) {
 // mandated in WORKLOG 3.4. Loop goroutine only.
 func (n *Node) applyProbeRound(ctx context.Context, r probeRound) {
 	n.probing = false
+	view := n.table.Snapshot()
 	for id, res := range r.results {
+		// A round outlives the membership it was started from. A peer that died
+		// or left while its probe was in flight has already been pruned by
+		// membershipChanged; writing its result now would re-insert exactly the
+		// stale entry pruneLocal exists to remove.
+		if m, ok := view.Get(id); !ok || m.State != StateAlive {
+			continue
+		}
 		switch {
 		case health.IsCancellation(res.err):
 			// Shutdown or a superseded round: not a fact about the peer. The old
