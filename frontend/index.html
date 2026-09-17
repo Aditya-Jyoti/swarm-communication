@@ -155,6 +155,13 @@
         </label>
         <div id="pos-sliders" class="sliders"></div>
         <p id="sim-msg" class="form-msg" role="status" aria-live="polite"></p>
+        <h3>Blender</h3>
+        <p class="eff">Build a 3D project from this swarm, and edit it from either side.
+          The add-on polls the same feed this page uses, so a slider change here moves
+          the drone in Blender, and "Push positions" there moves it here.</p>
+        <pre class="cmd"><code>python3 blender/make_swarm_scene.py
+blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json</code></pre>
+        <p class="eff">See <code>blender/README.md</code>.</p>
       </details>
     </section>
 
