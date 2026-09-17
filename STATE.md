@@ -1,7 +1,7 @@
 # Project State
 
-Handover snapshot, written 2026-09-17 (session 6). The decision record is `docs/WORKLOG.md`,
-current through section 8.
+Handover snapshot, written 2026-09-17 (session 7). The decision record is `docs/WORKLOG.md`,
+current through section 9.
 
 All 5 phases are done. The repo was then split into `backend/` and `frontend/`, and the docs
 were simplified (WORKLOG 7). Docs site: <https://aditya-jyoti.github.io/swarm-communication/>
@@ -9,7 +9,25 @@ were simplified (WORKLOG 7). Docs site: <https://aditya-jyoti.github.io/swarm-co
 The user has waived phase-gate reviews: the lead picks defaults, records them in the worklog,
 and runs work in parallel worktree agents.
 
-## Latest feature: drone simulation (WORKLOG 8)
+## Latest feature: Blender scene tooling (WORKLOG 9)
+
+- `blender/make_swarm_scene.py` turns `GET /api/state` into one self-describing
+  `swarm-scene/1` JSON document: drones in both unit systems, clusters, links with measured
+  RTT and predicted one-way delay, per-link traffic, a legend and a `write_back` section.
+  `--scale`, `--frames`/`--interval` (timeline), `--out`.
+- `blender/swarm-scene.json` is a committed example from a live 6-drone swarm.
+- `blender/swarm_blender.py` is a Blender 4.x add-on and a headless CLI: a pure core with no
+  `bpy` plus a thin `bpy` layer, live sync by polling `/api/state`, push-back with
+  `POST /api/sim`, and CHAOS kill of the selected drone.
+- Editing works both ways through `/api/sim`. Positions in swarm units are the truth; metres
+  are a rendering. Sync updates objects (matched by the `swarm_id` custom property) rather
+  than rebuilding, so selection, parenting and extra materials survive.
+- No `/api/scene` endpoint and no JS copy of the schema: the add-on imports the generator, so
+  there is one implementation. The cost is that generating a file needs Python 3 on the host.
+- The dashboard's Advanced panel shows the two commands. Reference: `blender/README.md` and
+  `docs/architecture/blender-scene.md` (parallel docs branch).
+
+## Previous feature: drone simulation (WORKLOG 8)
 
 - Each node is a drone at a 3D position (`backend/pkg/geo`). The CC owns positions and the
   latency model and pushes them as a versioned `SIM_CONFIG` snapshot.
@@ -46,7 +64,8 @@ with flags. See `docs/architecture/running-the-swarm.md`.
 
 ## Verification
 
-Run by the lead at `c6252a0` (WORKLOG 8.6).
+Run by the lead at `c6252a0` (WORKLOG 8.6), plus the Blender checks at `627ce33`
+(WORKLOG 9.5).
 
 | Check | Result |
 |---|---|
@@ -54,6 +73,9 @@ Run by the lead at `c6252a0` (WORKLOG 8.6).
 | `scripts/e2e.sh` through the frontend port | PASS, including kill-stays-down and sim-change steps |
 | Live geometry check | workers on nearest leader, leaders are the most central drones, about 2 ms RTT per unit |
 | Frontend | 80 jsdom checks, plus a headless-browser run |
+| `python3 blender/test_swarm_blender.py` | 26 pure-core tests pass |
+| Blender generator against the live swarm | 6 drones, 2 leaders, 15 links; `--frames` records a timeline; a link predicted 151.06 ms one-way and measured 152.0 ms RTT |
+| The `bpy` half of `swarm_blender.py` | **NOT VERIFIED.** Blender is not installed here. |
 | `npm run docs:check` (Node 22) | re-run after the parallel docs branch merges |
 
 ## Open items
@@ -89,17 +111,25 @@ Run by the lead at `c6252a0` (WORKLOG 8.6).
 12. Flow counts include frames queued but lost on a dying connection.
 13. The CC position map is capped at 4096 entries.
 14. Emulated latency affects only PONGs, so heartbeat timing ignores distance (by design).
+15. **The `bpy` half of `blender/swarm_blender.py` is unverified.** Blender is not installed
+    here. Someone with Blender 4.x must confirm the build, the sync timer, push-back and the
+    CHAOS kill button.
+16. The scene generator needs Python 3 on the host (accepted cost of one implementation).
+17. A scene file is a snapshot. A timeline has to be recorded deliberately with `--frames`.
+18. A very large swarm makes `blender/swarm-scene.json` big, since links grow with $N^2$.
 
 ## Suggested next session
 
 1. Offer the user frontend auth (nginx basic auth) or a return to `127.0.0.1` while
    `BIND_ADDR=0.0.0.0` is in use. The API token alone does not protect the proxied API.
-2. Merge the parallel docs branch (drone-simulation final, network emulation, 3D projection,
-   hash mixing), then run `npm run docs:check`.
+2. Merge the parallel docs branch (drone-simulation final, blender-scene, network emulation,
+   3D projection, hash mixing), then run `npm run docs:check`.
 3. Decide whether to add peer authentication to the node protocol.
 4. The user decides on MEDIUM-1 and on a tombstone TTL that grows with N.
 5. `doc-educator`: pages for the concepts nominated in WORKLOG 6.10 and 7.9.
 6. Optional: count flows only when a frame is actually written, to fix item 12.
+7. Get the `bpy` half of the Blender add-on opened once on a machine with Blender 4.x
+   (item 15). Until then, treat it as untested code.
 
 ## Tooling notes
 
@@ -122,3 +152,6 @@ Run by the lead at `c6252a0` (WORKLOG 8.6).
   together.
 - Killed drones do not restart. Run `docker compose up -d` before re-running checks by hand.
 - A semicolon in a Mermaid label silently cuts off the rest of the label.
+- **Blender is NOT installed on this machine.** Only the pure core of
+  `blender/swarm_blender.py` can be tested here (`python3 blender/test_swarm_blender.py`).
+  Anything importing `bpy` is unverifiable without a Blender 4.x install.
