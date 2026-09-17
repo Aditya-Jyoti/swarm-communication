@@ -24,8 +24,10 @@ const (
 	DefaultProbeInterval = 1 * time.Second
 	DefaultElectionFloor = 30 * time.Second
 	// DefaultGossipInterval is the anti-entropy period. With one peer per round
-	// (k=1) a full cycle over N peers takes N * 2s: this is the repair bound for
-	// anything push-on-change lost, not the normal dissemination path.
+	// (k=1) a full cycle over N peers takes N * 2s. A lost push is repaired
+	// within about two cycles in the worst case (a peer visited first in one
+	// permutation and last in the next); this is the repair path, not the
+	// normal dissemination path.
 	DefaultGossipInterval = 2 * time.Second
 	// DefaultProbeTimeout is twice the strategy's own per-probe budget. See
 	// NodeConfig.ProbeTimeout for why the node's budget must be the looser one.
@@ -782,7 +784,9 @@ func (n *Node) sendView(ctx context.Context, to protocol.NodeID, view View) {
 // permutation is redrawn when it is exhausted. A uniformly random pick each
 // round would be simpler but gives no bound: by chance some peer goes unvisited
 // for many rounds. A permutation guarantees every alive peer hears our view
-// once per N rounds, so a lost push is repaired within N * GossipInterval. The
+// once per permutation of N rounds, so a lost push is repaired within at most 2N-1 rounds
+// (first in one permutation, last in the next), and within N when the loss
+// itself changed the alive set, since that forces a fresh permutation. The
 // shuffle, rather than ID order, keeps the swarm from all targeting the same
 // peer at once. A redraw at the wrap may put the last peer first again; that
 // costs one redundant send and nothing else.
