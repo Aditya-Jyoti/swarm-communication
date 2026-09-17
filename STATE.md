@@ -82,16 +82,18 @@ Run by the lead at `c6252a0` (WORKLOG 8.6).
    `-cpu 1` under load after any pool change.
 10. The convergence-test flake is fixed (WORKLOG 7.11): the simulator is now deterministic and a
    stale JOIN_ACK bug is fixed.
-11. **LAN exposure.** The user runs with `BIND_ADDR=0.0.0.0` locally. Without
-    `SWARM_CC_API_TOKEN`, the chaos and sim API is open to anyone on the LAN.
+11. **LAN exposure.** The user runs with `BIND_ADDR=0.0.0.0` locally, so the chaos and sim
+    API is open to anyone on the LAN. `SWARM_CC_API_TOKEN` does NOT help here: nginx adds
+    it to every proxied request. Real protection needs auth at the frontend (e.g. nginx
+    basic auth) or a return to `127.0.0.1`.
 12. Flow counts include frames queued but lost on a dying connection.
 13. The CC position map is capped at 4096 entries.
 14. Emulated latency affects only PONGs, so heartbeat timing ignores distance (by design).
 
 ## Suggested next session
 
-1. Ask the user to set `SWARM_CC_API_TOKEN` (or go back to `127.0.0.1`) while
-   `BIND_ADDR=0.0.0.0` is in use.
+1. Offer the user frontend auth (nginx basic auth) or a return to `127.0.0.1` while
+   `BIND_ADDR=0.0.0.0` is in use. The API token alone does not protect the proxied API.
 2. Merge the parallel docs branch (drone-simulation final, network emulation, 3D projection,
    hash mixing), then run `npm run docs:check`.
 3. Decide whether to add peer authentication to the node protocol.
