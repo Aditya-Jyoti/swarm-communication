@@ -1,4 +1,5 @@
-# Gates the Go module: formatting, vet, and the test suite under the race detector.
+# Gates the Go module (backend/): formatting, vet, and the test suite under the race
+# detector. A second job builds the backend and frontend images and validates Compose.
 #
 # Deploy Docs builds the curriculum and nothing else, so until this workflow existed
 # the Go suite was never run by CI at all. The three steps are ordered cheapest-first
@@ -27,24 +28,32 @@ concurrency:
 jobs:
   go:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The Go module lives in backend/ (module path is still swarm-net).
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: backend/go.mod
           cache: true
+          cache-dependency-path: backend/go.sum
 
       - name: Check gofmt
         # gofmt -l prints offending files and exits 0, so the exit status has to be
         # synthesised from the output.
         run: |
-          unformatted=$(gofmt -l pkg cmd)
+          unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
             echo "These files are not gofmt-clean:"
             echo "$unformatted"
             exit 1
           fi
+
+      - name: Build
+        run: go build ./...
 
       - name: Vet
         run: go vet ./...
@@ -52,11 +61,11 @@ jobs:
       - name: Test with race detector
         run: go test -race -count=2 ./...
 
-  # Builds both runtime images and validates the Compose file, so a Dockerfile
-  # or compose edit that breaks `docker compose up` fails here instead of on an
-  # engineer's laptop. Images are built but never pushed. The full e2e run
-  # (scripts/e2e.sh) is not part of CI yet: it needs ~a minute of cluster time
-  # and is run by hand after merges.
+  # Builds the two backend images and the frontend image, and validates the
+  # Compose file, so a Dockerfile, nginx or compose edit that breaks
+  # `docker compose up` fails here instead of on an engineer's laptop. Images
+  # are built but never pushed. The full e2e run (scripts/e2e.sh) is not part of
+  # CI yet: it needs ~a minute of cluster time and is run by hand after merges.
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -64,30 +73,49 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Every variable in docker-compose.yml has a default, so the file must
+      # validate with no .env at all, and with the documented .env.example.
       - name: Validate docker-compose.yml
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose --env-file .env.example config --quiet
 
       - name: Build node image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: backend
           target: node
           push: false
           tags: swarm-net/node:ci
-          cache-from: type=gha,scope=swarm-net
-          cache-to: type=gha,scope=swarm-net,mode=max
+          cache-from: type=gha,scope=swarm-net-backend
+          cache-to: type=gha,scope=swarm-net-backend,mode=max
 
       - name: Build control-center image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: backend
           target: control-center
           push: false
           tags: swarm-net/control-center:ci
-          cache-from: type=gha,scope=swarm-net
+          cache-from: type=gha,scope=swarm-net-backend
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: false
+          load: true
+          tags: swarm-net/frontend:ci
+          cache-from: type=gha,scope=swarm-net-frontend
+          cache-to: type=gha,scope=swarm-net-frontend,mode=max
+
+      # `nginx -t` through the image entrypoint renders the template first, so
+      # this checks the config exactly as the container will run it.
+      - name: Check nginx config
+        run: docker run --rm swarm-net/frontend:ci nginx -t
 
       - name: Check dashboard and scripts parse
         run: |
-          node --check web/static/app.js
+          node --check frontend/app.js
           bash -n scripts/e2e.sh
-          sh -n deploy/node-entrypoint.sh
+          sh -n backend/deploy/node-entrypoint.sh
