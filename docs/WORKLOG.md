@@ -1468,3 +1468,67 @@ Nominated for `doc-educator` (page being written in parallel):
 | Page | Why |
 |---|---|
 | `architecture/blender-scene` | The reference for `swarm-scene/1`: every section, both editing directions, and why measured RTT and predicted one-way delay differ |
+
+---
+
+## 2026-09-18 -- The flaky end-to-end test: a browser registered after its own upgrade
+
+### 10.1 The report
+
+`TestRunEndToEnd` (`backend/cmd/control-center`) failed once on a 2-core GitHub Actions runner:
+
+```
+--- FAIL: TestRunEndToEnd (10.01s)
+    main_test.go:253: ws read: failed to get reader: context deadline exceeded
+```
+
+Not reproducible on an idle 8-core box, even at `-count=12 -cpu 1,2`.
+
+### 10.2 Reproduction (the method of 6.11 / 7.11)
+
+Build the race test binary, pin it to two cores with `taskset -c 0,1`, and run it against
+busy-loop processes on the same two cores, four test processes at a time. That produced
+**4 failures in 280 runs**, with the CI message exactly.
+
+### 10.3 Root cause: a production ordering bug, not a test race
+
+The failing runs were instrumented to log the hub's client count at every event. They all show
+the same thing:
+
+```
+node connected                peer=node-1
+PROBE event kind=node_up      clients=0 ops_depth=0
+PROBE event kind=leader_change clients=0 ops_depth=0
+PROBE addClient               clients_before=0 nodes=1 ops_depth=0   <- 9 ms later
+```
+
+The hub was idle (`ops_depth=0`, parked in its select), the node was connected, snapshots kept
+flowing. `handleWS` answered the WebSocket upgrade **first** and only then asked the hub to add
+the browser to the client set. Everything the hub emitted in that window went to a set that did
+not contain this browser yet, and the CC never replays an event: a snapshot carries state, not
+history. The dashboard's event feed silently lost a `leader_change`.
+
+### 10.4 The fix
+
+`handleWS` registers the browser with the hub before calling `websocket.Accept`. Once the
+browser holds the `101`, it is in the client set. If registration fails (the hub is stopping)
+the upgrade never happens and the request gets a plain `503` it can retry, instead of a socket
+that closes immediately. A failed `Accept` removes the browser again.
+
+### 10.5 Verification
+
+| | runs | failures |
+|---|---|---|
+| before | 280 (120 instrumented + 160 plain) | 4, all `ws read: ... context deadline exceeded` |
+| after | 320 | 0 |
+
+`TestBrowserRegisteredBeforeUpgrade` pins the ordering with no timing in it: a
+`ResponseWriter` whose `Hijack` records the hub's client count at the instant
+coder/websocket takes the socket over. It fails deterministically without the fix
+(`hub held 0 browsers when the upgrade was written, want 1`).
+
+### 10.6 Lesson worth teaching
+
+A subscribe-then-stream feed has to subscribe before it acknowledges the subscription.
+Acknowledging first leaves a window whose length is a scheduling accident -- 1 ms on an idle
+box, 9 ms on a loaded 2-core runner -- and anything emitted in it is gone.
