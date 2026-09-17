@@ -11,7 +11,7 @@ The short version: nodes elect the same leaders only if they hold the same membe
 When two nodes disagree on the leaders, compare their tables, not the election.
 
 ```bash
-curl -s localhost:8080/api/state | jq -r '.nodes[] | .id as $n
+curl -s 127.0.0.1:8080/api/state | jq -r '.nodes[] | .id as $n
   | .peers[] | select(.id=="node-2") | "\($n) seq=\(.seq) score=\(.score)"'
 ```
 

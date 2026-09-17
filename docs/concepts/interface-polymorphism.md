@@ -45,7 +45,7 @@ var _ HealthStrategy = (*LatencyHealthStrategy)(nil)
 
 ```mermaid
 flowchart LR
-    C[pkg/cluster] -->|calls| I[HealthStrategy]
+    C[backend/pkg/cluster] -->|calls| I[HealthStrategy]
     L[LatencyHealthStrategy] -.->|satisfies| I
     X[future strategy] -.->|satisfies| I
 ```

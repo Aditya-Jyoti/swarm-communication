@@ -25,7 +25,9 @@ flowchart LR
 | `node` | normal nodes | `NODE_REPLICAS`, scalable | no |
 
 Everything runs on one private Docker bridge network. Only the frontend port leaves it. nginx
-forwards `/api/`, `/healthz` and `/ws` to `control-center:8080`.
+forwards `/api/`, `/healthz` and `/ws` to `control-center:8080`, and answers
+`/frontend-healthz` itself. Every service drops all capabilities, sets `no-new-privileges` and
+runs with a read-only root filesystem.
 
 Total nodes = 1 seed + the `node` replicas.
 
@@ -38,7 +40,7 @@ docker compose logs -f node
 docker compose down
 ```
 
-Open `http://localhost:8080` (or your `FRONTEND_PORT`).
+Open the dashboard at `http://127.0.0.1:8080` (your `BIND_ADDR` and `FRONTEND_PORT`).
 
 ## Configure with .env
 
@@ -55,7 +57,11 @@ local values stay local. Common ones:
 | `SWARM_GOSSIP_INTERVAL` | how often a full membership table is sent |
 | `SWARM_TELEMETRY_INTERVAL` | how often nodes report to the CC |
 | `SWARM_IDLE_TIMEOUT` | silence before a link is declared dead. Must exceed 3 x the probe interval. |
+| `SWARM_ELECTION_FLOOR` | periodic re-election, on top of event-driven ones |
 | `SWARM_LOG_LEVEL` | `debug`, `info`, `warn` or `error` |
+| `CC_HTTP_PORT` | host port for the CC, only if you uncomment its `ports:` block |
+| `SWARM_IMAGE_TAG`, `SWARM_VERSION` | image tag and the version baked into the binaries |
+| `GO_VERSION`, `ALPINE_VERSION`, `NGINX_VERSION` | base image versions |
 
 See `.env.example` for the full list and defaults.
 
@@ -109,12 +115,12 @@ From the dashboard, per node:
 | Clear | removes the delay |
 | Kill (click twice) | the process exits. Compose restarts it as a new incarnation. |
 
-The same through the API:
+The same through the API, via the frontend port:
 
 ```bash
-curl -s -d '{"node":"node-2","action":"delay","delay_ms":300}' localhost:8080/api/chaos
-curl -s -d '{"kind":"echo","body":{"x":1}}' localhost:8080/api/tasks
-curl -s localhost:8080/api/state | jq '.nodes[] | {id, role, leader, connected}'
+curl -s -d '{"node":"node-2","action":"delay","delay_ms":300}' 127.0.0.1:8080/api/chaos
+curl -s -d '{"kind":"echo","body":{"x":1}}' 127.0.0.1:8080/api/tasks
+curl -s 127.0.0.1:8080/api/state | jq '.nodes[] | {id, role, leader, connected}'
 ```
 
 To keep a node down, use Docker directly. Compose does not restart a container you killed:

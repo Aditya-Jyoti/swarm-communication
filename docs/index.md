@@ -67,7 +67,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. Scale with `docker compose up -d --scale node=11`.
+Open the dashboard (served by the frontend container) at `http://127.0.0.1:8080`. Scale with `docker compose up -d --scale node=11`.
 To test self-healing, run `scripts/e2e.sh`. It kills a leader and waits for the swarm to recover.
 
 More: [Running the Swarm](/architecture/running-the-swarm).

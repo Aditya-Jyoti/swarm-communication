@@ -17,13 +17,15 @@ A **user-defined** bridge (one you declare in Compose) adds a built-in DNS serve
 
 ```mermaid
 flowchart TD
-    B[browser on host] -->|"published port 8080"| CC[control-center]
+    B[browser on host] -->|"published port 8080"| F[frontend]
     subgraph swarmnet [bridge swarmnet]
-        CC
+        F
+        CC[control-center]
         S[seed]
         N1[node-1]
         N2[node-2]
     end
+    F -->|"proxy to control-center:8080"| CC
     N1 -->|"dial seed:7000 by name"| S
     N2 -->|"dial seed:7000 by name"| S
 ```
@@ -32,8 +34,9 @@ flowchart TD
 
 - **One user-defined bridge.** Every container joins `swarmnet` (driver `bridge`) in the
   Compose file, so names like `seed` and `swarm-net-node-3` resolve through Docker DNS.
-- **Only the Control Center is published** (host port 8080). Node-to-node traffic stays on the
-  bridge, so latency probes measure the real path, not a proxy hop.
+- **Only the frontend is published** (host port 8080, bound to `127.0.0.1` by default). nginx
+  forwards API and WebSocket calls to `control-center:8080` over the bridge. Node-to-node
+  traffic stays on the bridge, so latency probes measure the real path, not a proxy hop.
 - **Peers are dialed by name on every attempt.** `dialOnce` in `backend/pkg/network/dial.go`
   passes the `host:port` string to `DialContext` each time. A restarted container gets a new
   IP, and a cached IP could point at nothing, or at another node.

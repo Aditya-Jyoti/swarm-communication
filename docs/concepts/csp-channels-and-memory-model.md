@@ -52,7 +52,7 @@ flowchart LR
 - **Receiving from a closed channel in a loop.** It is always ready and returns zero values. Set
   the channel variable to `nil` to disable that case.
 - **Goroutine leaks on a blocked send.** Buffer result channels to the number of senders.
-- **Skipping the race detector.** Run `go test -race ./...`.
+- **Skipping the race detector.** Run `cd backend && go test -race ./...`.
 
 ## Further reading
 
