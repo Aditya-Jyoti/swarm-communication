@@ -93,12 +93,25 @@ func DefaultPosition(id protocol.NodeID) protocol.Position {
 	// Three independent 21-bit fields of one 64-bit hash, one per axis.
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(id))
-	v := h.Sum64()
+	v := mix64(h.Sum64())
 	const mask = 1<<21 - 1
 	unit := func(shift uint) float64 { return float64((v>>shift)&mask) / mask }
 	// Keep a margin so no drone sits exactly on the edge of the airspace.
 	place := func(u float64) float64 { return 5 + u*(Size-10) }
 	return protocol.Position{X: place(unit(0)), Y: place(unit(21)), Z: place(unit(42))}
+}
+
+// mix64 is the splitmix64 finalizer. FNV-1a alone barely spreads names that
+// differ only in their last byte ("node-1" vs "node-5"): the change reaches a
+// few low bits and a band near bit 40, so such drones would share an axis or
+// even a whole position. The finalizer spreads every input bit over all 64.
+func mix64(z uint64) uint64 {
+	z ^= z >> 30
+	z *= 0xbf58476d1ce4e5b9
+	z ^= z >> 27
+	z *= 0x94d049bb133111eb
+	z ^= z >> 31
+	return z
 }
 
 func clamp(v, lo, hi float64) float64 {

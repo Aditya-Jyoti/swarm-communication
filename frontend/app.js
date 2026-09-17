@@ -221,7 +221,7 @@
   }
 
   // Mirror of geo.DefaultPosition (backend/pkg/geo/geo.go): FNV-1a 64 of the
-  // id, three 21-bit fields, each mapped to [5, 95]. Used only when a node
+  // id, the splitmix64 finalizer, three 21-bit fields, each mapped to [5, 95]. Used only when a node
   // reports no position, so the picture matches what the backend would pick.
   var MASK21 = (1 << 21) - 1;
   function defaultPos(id) {
@@ -235,6 +235,12 @@
       for (var i = 0; i < bytes.length; i++) {
         hv = ((hv ^ BigInt(bytes.charCodeAt(i))) * prime) & m64;
       }
+      // splitmix64 finalizer, as geo.mix64.
+      hv ^= hv >> BigInt(30);
+      hv = (hv * BigInt("0xbf58476d1ce4e5b9")) & m64;
+      hv ^= hv >> BigInt(27);
+      hv = (hv * BigInt("0x94d049bb133111eb")) & m64;
+      hv ^= hv >> BigInt(31);
       var field = function (shift) { return Number((hv >> BigInt(shift)) & BigInt(MASK21)) / MASK21; };
       ux = field(0); uy = field(21); uz = field(42);
     } else {

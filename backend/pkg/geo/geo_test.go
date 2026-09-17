@@ -1,6 +1,7 @@
 package geo
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -52,6 +53,46 @@ func TestClampRejectsNaNAndNegatives(t *testing.T) {
 	pos := ClampPosition(protocol.Position{X: -1, Y: math.Inf(1), Z: 250})
 	if pos.X != 0 || pos.Y != Size || pos.Z != Size {
 		t.Errorf("ClampPosition = %+v", pos)
+	}
+}
+
+// Names that differ only in a trailing digit, as Compose replicas do, must
+// still spread across the airspace on every axis.
+func TestDefaultPositionSpreadsSimilarNames(t *testing.T) {
+	var pos []protocol.Position
+	for i := 1; i <= 12; i++ {
+		pos = append(pos, DefaultPosition(protocol.NodeID(fmt.Sprintf("swarm-net-node-%d", i))))
+	}
+	for i := range pos {
+		for j := i + 1; j < len(pos); j++ {
+			if d := Distance(pos[i], pos[j]); d < 3 {
+				t.Errorf("node-%d and node-%d are %.2f apart: %+v %+v", i+1, j+1, d, pos[i], pos[j])
+			}
+		}
+	}
+	axes := []func(protocol.Position) float64{
+		func(p protocol.Position) float64 { return p.X },
+		func(p protocol.Position) float64 { return p.Y },
+		func(p protocol.Position) float64 { return p.Z },
+	}
+	for a, get := range axes {
+		lo, hi := Size, 0.0
+		for _, p := range pos {
+			lo, hi = min(lo, get(p)), max(hi, get(p))
+		}
+		if hi-lo < 40 {
+			t.Errorf("axis %d spans only %.1f units across 12 drones", a, hi-lo)
+		}
+	}
+}
+
+// TestDefaultPositionGolden pins exact values; frontend/app.js mirrors this
+// function and must produce the same numbers.
+func TestDefaultPositionGolden(t *testing.T) {
+	got := DefaultPosition("swarm-net-node-1")
+	want := protocol.Position{X: 43.078932, Y: 19.334290, Z: 75.466986}
+	if math.Abs(got.X-want.X) > 1e-6 || math.Abs(got.Y-want.Y) > 1e-6 || math.Abs(got.Z-want.Z) > 1e-6 {
+		t.Errorf("DefaultPosition(swarm-net-node-1) = %+v, want %+v (update frontend/app.js too)", got, want)
 	}
 }
 
