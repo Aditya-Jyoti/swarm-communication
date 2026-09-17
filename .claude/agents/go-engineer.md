@@ -1,6 +1,6 @@
 ---
 name: go-engineer
-description: Core systems implementation agent. Use to write the Go in pkg/ and cmd/ — TCP servers and client pools, framing codecs, health strategies, election and clustering logic, heartbeat goroutines, state replication. Implements against contracts defined by system-architect.
+description: Core systems implementation agent. Use to write the Go in backend/pkg/ and backend/cmd/ — TCP servers and client pools, framing codecs, health strategies, election and clustering logic, heartbeat goroutines, state replication. Implements against contracts defined by system-architect.
 tools: Read, Grep, Glob, Bash, Write, Edit
 model: opus
 ---

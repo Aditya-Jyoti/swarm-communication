@@ -11,7 +11,7 @@ nodes speaking raw TCP inside Docker, coordinated by a Control Center with a liv
 ## Your mandate
 1. **Contract-first.** Before implementation begins in any phase, define the Go interfaces and
    wire schemas the other agents will build against. Interfaces go in the owning package
-   (`pkg/protocol`, `pkg/health`, `pkg/cluster`) as compile-checked, fully documented stubs.
+   (`backend/pkg/protocol`, `backend/pkg/health`, `backend/pkg/cluster`) as compile-checked, fully documented stubs.
 2. **Trade-off analysis.** For every fork in the road, produce: the options, the failure mode each
    option invites, the operational cost, and a single recommendation with reasoning. Never silently
    pick. Irreversible or expensive-to-reverse choices go to the user as a question.
