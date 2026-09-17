@@ -1354,3 +1354,117 @@ Nominated for `doc-educator` (pages being written in parallel):
 | Concept: network emulation | Why in-process PONG delay instead of `tc netem`, and what it cannot model |
 | Concept: 3D projection | Orbit camera, perspective divide, depth sort in plain JS |
 | Concept: hash mixing | Why FNV-1a alone clusters similar names, and what a finalizer fixes |
+
+---
+
+## 2026-09-17 -- Blender scene file: one document, two editors
+
+This entry covers `69115f2..627ce33`. The tooling is `blender/`, and its reference page is
+`docs/architecture/blender-scene.md` (being written in parallel by `doc-educator`).
+Phase-gate reviews stay waived, so the lead picked the defaults below and records them here.
+
+### 9.1 The request
+
+**Request (user, 2026-09-17):**
+
+> "give me one state file that i can use to generate a blender project to simulate this in
+> real life and using the frontend it should edit the blender project as well."
+
+Two demands in one sentence: **one** file that is enough to build the scene, and a link
+between the dashboard and that scene that survives in both directions.
+
+### 9.2 Agents and commits
+
+| Agent | Work | Commits |
+|---|---|---|
+| `go-engineer` | Scene generator, Blender add-on and CLI, 26 pure-core tests | `69115f2` |
+| `sim-engineer` | Advanced panel gains a Blender section with the two commands | `627ce33` |
+| `system-architect` | This entry, `README.md`, `STATE.md` | this branch |
+
+### 9.3 The pipeline
+
+```mermaid
+flowchart LR
+    CC[control-center] -->|"GET /api/state"| GEN[make_swarm_scene.py]
+    GEN -->|"swarm-scene/1 JSON"| FILE[blender/swarm-scene.json]
+    FILE --> ADDON[swarm_blender.py]
+    CC -->|"GET /api/state, live sync poll"| ADDON
+    ADDON --> SCENE[Blender collection Swarm]
+    SCENE -->|"Push positions, POST /api/sim"| CC
+    UI[Dashboard Advanced panel] -->|"POST /api/sim"| CC
+```
+
+The write-back arrow is the answer to the second half of the request: the dashboard and
+Blender edit the same thing, the running swarm, through the same endpoint. Neither edits the
+other's document.
+
+### 9.4 Decisions
+
+**D1. The interchange format is one JSON document, not a `.blend`.**
+
+| Option | Failure mode it invites | Cost | Outcome |
+|---|---|---|---|
+| Backend emits a `.blend` | Binary, version-locked to one Blender release, not diffable, not reviewable | High: a Blender dependency in the backend | Rejected |
+| A Blender importer that speaks `/api/state` directly | The importer re-derives the scene schema, so the schema lives nowhere and drifts | Medium | Rejected |
+| One self-describing `swarm-scene/1` JSON | A snapshot can go stale; the reader must convert it | Low | **Chosen** |
+
+The document carries positions in both unit systems, clusters, links with **measured** RTT
+and **predicted** one-way delay, per-link message counts, a legend matching the dashboard,
+and a `write_back` section naming the exact requests that change the swarm. Every section
+carries a `_doc`, so the file explains itself without the docs site.
+
+**D2. No `/api/scene` endpoint and no JS copy of the schema. The add-on imports the generator.**
+
+| Option | Failure mode it invites | Cost | Outcome |
+|---|---|---|---|
+| A Go endpoint mirroring the Python generator | Two implementations of one schema drift, and the drift is silent | Medium, forever | Rejected |
+| A JS builder in the dashboard, downloaded in the browser | A third implementation, same drift | Medium | Rejected |
+| `swarm_blender.py` imports `make_swarm_scene.py` | One implementation | Producing a scene file needs Python 3 on the machine, not just a browser download | **Chosen** |
+
+The add-on can convert `/api/state` itself, so a live sync never needs the file at all.
+
+**D3. Pure core plus a thin `bpy` shell.** Everything above the `--- Blender layer ---`
+marker in `blender/swarm_blender.py` is plain Python: loading, conversion, distance,
+predicted latency, colour choice, the build plan, the write-back payload. Only `apply_plan`
+touches `bpy`. Blender is **not installed on this machine**, so the `bpy` half is
+**UNVERIFIED**; splitting it is what let the interesting half be tested at all.
+
+**D4. Units are the source of truth, metres are a rendering.** `positions_payload` is the
+exact inverse of the generator's `to_metres`, with clamping to the cube. Editing
+`location_m` by hand moves only the render; the swarm never sees it. Rejected: making metres
+canonical, which would have put rounding error into election inputs.
+
+**D5. Sync updates, it does not rebuild.** Objects are matched by a `swarm_id` custom
+property, so a rename, a selection, parenting and any extra materials survive a sync. Stale
+link objects are removed. Rejected: delete-and-rebuild, which is simpler but throws away the
+user's work once a second.
+
+**D6. Default scale 20 m/unit.** The 100-unit cube becomes 2km across: realistic drone
+spacing, and still inside Blender's default camera clipping. `--scale 1` gives a tabletop,
+`--scale 100` needs the clip end raised.
+
+### 9.5 Verification
+
+| Check | Result |
+|---|---|
+| `python3 blender/test_swarm_blender.py` | 26 pure-core tests pass |
+| Generator against the live swarm | 6 drones, 2 leaders, 15 links |
+| Generator with `--frames` | timeline recorded |
+| Model confirmed end to end | a link predicted 151.06 ms one-way and measured 152.0 ms RTT, which is the responder-side delay model (WORKLOG 8, D1) seen from the outside |
+| The `bpy` half | **UNVERIFIED.** Blender is not installed here. |
+
+### 9.6 Open items
+
+1. **The `bpy` layer is unverified.** It needs someone with Blender 4.x to install the add-on
+   and confirm the build, the sync timer, push-back and CHAOS kill.
+2. The generator needs Python 3 on the host. This is the accepted cost of D2.
+3. The scene file is a snapshot. A timeline has to be recorded deliberately with `--frames`.
+4. A very large swarm makes the committed example file big, since links grow with $N^2$.
+
+### 9.7 Syllabus additions
+
+Nominated for `doc-educator` (page being written in parallel):
+
+| Page | Why |
+|---|---|
+| `architecture/blender-scene` | The reference for `swarm-scene/1`: every section, both editing directions, and why measured RTT and predicted one-way delay differ |
