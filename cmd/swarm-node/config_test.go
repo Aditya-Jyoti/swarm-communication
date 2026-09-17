@@ -28,14 +28,15 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := Config{
-		NodeID:        "box",
-		Listen:        ":7000",
-		Advertise:     "box:7000",
-		Threshold:     cluster.DefaultThreshold,
-		ProbeInterval: cluster.DefaultProbeInterval,
-		ElectionFloor: cluster.DefaultElectionFloor,
-		IdleTimeout:   15 * time.Second,
-		LogLevel:      slog.LevelInfo,
+		NodeID:         "box",
+		Listen:         ":7000",
+		Advertise:      "box:7000",
+		Threshold:      cluster.DefaultThreshold,
+		ProbeInterval:  cluster.DefaultProbeInterval,
+		ElectionFloor:  cluster.DefaultElectionFloor,
+		GossipInterval: cluster.DefaultGossipInterval,
+		IdleTimeout:    15 * time.Second,
+		LogLevel:       slog.LevelInfo,
 	}
 	if len(cfg.Seeds) != 0 || cfg.ControlCenter != "" || cfg.Version {
 		t.Fatalf("unexpected non-default fields: %+v", cfg)
@@ -48,16 +49,17 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadEnv(t *testing.T) {
 	env := envOf(map[string]string{
-		"SWARM_NODE_ID":        "n1",
-		"SWARM_LISTEN":         "0.0.0.0:9000",
-		"SWARM_ADVERTISE":      "node1:9000",
-		"SWARM_SEEDS":          "node2:9000,node3:9000",
-		"SWARM_CONTROL_CENTER": "cc:8080",
-		"SWARM_THRESHOLD":      "0.5",
-		"SWARM_PROBE_INTERVAL": "500ms",
-		"SWARM_ELECTION_FLOOR": "10s",
-		"SWARM_IDLE_TIMEOUT":   "4s",
-		"SWARM_LOG_LEVEL":      "debug",
+		"SWARM_NODE_ID":         "n1",
+		"SWARM_LISTEN":          "0.0.0.0:9000",
+		"SWARM_ADVERTISE":       "node1:9000",
+		"SWARM_SEEDS":           "node2:9000,node3:9000",
+		"SWARM_CONTROL_CENTER":  "cc:8080",
+		"SWARM_THRESHOLD":       "0.5",
+		"SWARM_PROBE_INTERVAL":  "500ms",
+		"SWARM_ELECTION_FLOOR":  "10s",
+		"SWARM_GOSSIP_INTERVAL": "750ms",
+		"SWARM_IDLE_TIMEOUT":    "4s",
+		"SWARM_LOG_LEVEL":       "debug",
 	})
 	failHost := func() (string, error) { return "", errors.New("must not be called") }
 	cfg, err := Load(nil, env, failHost)
@@ -67,6 +69,7 @@ func TestLoadEnv(t *testing.T) {
 	if cfg.NodeID != "n1" || cfg.Listen != "0.0.0.0:9000" || cfg.Advertise != "node1:9000" ||
 		cfg.ControlCenter != "cc:8080" || cfg.Threshold != 0.5 ||
 		cfg.ProbeInterval != 500*time.Millisecond || cfg.ElectionFloor != 10*time.Second ||
+		cfg.GossipInterval != 750*time.Millisecond ||
 		cfg.IdleTimeout != 4*time.Second || cfg.LogLevel != slog.LevelDebug {
 		t.Fatalf("env not applied: %+v", cfg)
 	}
@@ -77,21 +80,22 @@ func TestLoadEnv(t *testing.T) {
 
 func TestLoadFlagsOverrideEnv(t *testing.T) {
 	env := envOf(map[string]string{
-		"SWARM_NODE_ID":        "env-id",
-		"SWARM_LISTEN":         ":1",
-		"SWARM_ADVERTISE":      "env:1",
-		"SWARM_SEEDS":          "env-seed:1",
-		"SWARM_CONTROL_CENTER": "env-cc:1",
-		"SWARM_THRESHOLD":      "0.1",
-		"SWARM_PROBE_INTERVAL": "1s",
-		"SWARM_ELECTION_FLOOR": "1m",
-		"SWARM_IDLE_TIMEOUT":   "1m",
-		"SWARM_LOG_LEVEL":      "error",
+		"SWARM_NODE_ID":         "env-id",
+		"SWARM_LISTEN":          ":1",
+		"SWARM_ADVERTISE":       "env:1",
+		"SWARM_SEEDS":           "env-seed:1",
+		"SWARM_CONTROL_CENTER":  "env-cc:1",
+		"SWARM_THRESHOLD":       "0.1",
+		"SWARM_PROBE_INTERVAL":  "1s",
+		"SWARM_ELECTION_FLOOR":  "1m",
+		"SWARM_GOSSIP_INTERVAL": "1s",
+		"SWARM_IDLE_TIMEOUT":    "1m",
+		"SWARM_LOG_LEVEL":       "error",
 	})
 	args := []string{
 		"-node-id=flag-id", "-listen=:2", "-advertise=flag:2", "-seeds=flag-seed:2",
 		"-control-center=flag-cc:2", "-threshold=0.9", "-probe-interval=2s",
-		"-election-floor=2m", "-idle-timeout=2m", "-log-level=warn",
+		"-election-floor=2m", "-gossip-interval=5s", "-idle-timeout=2m", "-log-level=warn",
 	}
 	cfg, err := Load(args, env, host("box"))
 	if err != nil {
@@ -100,6 +104,7 @@ func TestLoadFlagsOverrideEnv(t *testing.T) {
 	if cfg.NodeID != "flag-id" || cfg.Listen != ":2" || cfg.Advertise != "flag:2" ||
 		cfg.ControlCenter != "flag-cc:2" || cfg.Threshold != 0.9 ||
 		cfg.ProbeInterval != 2*time.Second || cfg.ElectionFloor != 2*time.Minute ||
+		cfg.GossipInterval != 5*time.Second ||
 		cfg.IdleTimeout != 2*time.Minute || cfg.LogLevel != slog.LevelWarn {
 		t.Fatalf("flags did not override env: %+v", cfg)
 	}
@@ -176,6 +181,10 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"probe interval garbage", []string{"-probe-interval=soon"}, nil, "probe-interval \"soon\""},
 		{"election floor zero", []string{"-election-floor=0"}, nil, "election-floor 0s must be positive"},
 		{"election floor garbage", []string{"-election-floor=x"}, nil, "election-floor \"x\""},
+		{"gossip interval zero", []string{"-gossip-interval=0s"}, nil, "gossip-interval 0s must be positive"},
+		{"gossip interval negative", []string{"-gossip-interval=-2s"}, nil, "gossip-interval -2s must be positive"},
+		{"gossip interval garbage", []string{"-gossip-interval=often"}, nil, "gossip-interval \"often\""},
+		{"gossip interval env garbage", nil, map[string]string{"SWARM_GOSSIP_INTERVAL": "often"}, "gossip-interval \"often\""},
 		{"idle timeout zero", []string{"-idle-timeout=0"}, nil, "idle-timeout 0s must be positive"},
 		{"idle timeout garbage", []string{"-idle-timeout=x"}, nil, "idle-timeout \"x\""},
 		{"idle timeout equals 3x probe", []string{"-probe-interval=1s", "-idle-timeout=3s"}, nil, "idle-timeout 3s must exceed 3*probe-interval (3s)"},

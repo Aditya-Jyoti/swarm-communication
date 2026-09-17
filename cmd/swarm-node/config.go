@@ -57,6 +57,10 @@ type Config struct {
 	ProbeInterval time.Duration
 	// ElectionFloor is the periodic re-election safety net. SWARM_ELECTION_FLOOR.
 	ElectionFloor time.Duration
+	// GossipInterval is how often one peer is sent this node's full membership
+	// view (anti-entropy). SWARM_GOSSIP_INTERVAL. A full repair cycle over N
+	// peers takes N intervals.
+	GossipInterval time.Duration
 	// IdleTimeout is how long a connection may be silent before it is declared
 	// dead. SWARM_IDLE_TIMEOUT. Must exceed 3*ProbeInterval; see validate.
 	IdleTimeout time.Duration
@@ -83,6 +87,7 @@ var settings = []setting{
 	{"threshold", "THRESHOLD", strconv.FormatFloat(cluster.DefaultThreshold, 'g', -1, 64), "leader fraction in (0,1]"},
 	{"probe-interval", "PROBE_INTERVAL", cluster.DefaultProbeInterval.String(), "how often peers are scored"},
 	{"election-floor", "ELECTION_FLOOR", cluster.DefaultElectionFloor.String(), "periodic re-election interval"},
+	{"gossip-interval", "GOSSIP_INTERVAL", cluster.DefaultGossipInterval.String(), "how often one peer is sent the full membership view"},
 	{"idle-timeout", "IDLE_TIMEOUT", defaultIdleTimeout.String(), "silence before a connection is declared dead (> 3*probe-interval)"},
 	{"log-level", "LOG_LEVEL", defaultLogLevel, "debug|info|warn|error"},
 }
@@ -166,6 +171,9 @@ func Load(args []string, getenv func(string) string, hostname func() (string, er
 		return Config{}, err
 	}
 	if cfg.ElectionFloor, err = parseDuration("election-floor", *raw["election-floor"]); err != nil {
+		return Config{}, err
+	}
+	if cfg.GossipInterval, err = parseDuration("gossip-interval", *raw["gossip-interval"]); err != nil {
 		return Config{}, err
 	}
 	if cfg.IdleTimeout, err = parseDuration("idle-timeout", *raw["idle-timeout"]); err != nil {

@@ -36,8 +36,10 @@ func loopbackConfig(id string, seeds ...protocol.NodeAddress) Config {
 		Threshold:     cluster.DefaultThreshold,
 		ProbeInterval: testProbeInterval,
 		ElectionFloor: cluster.DefaultElectionFloor,
-		IdleTimeout:   testIdleTimeout,
-		LogLevel:      slog.LevelDebug,
+		// Short enough that the real-socket tests also exercise anti-entropy.
+		GossipInterval: testProbeInterval,
+		IdleTimeout:    testIdleTimeout,
+		LogLevel:       slog.LevelDebug,
 	}
 }
 

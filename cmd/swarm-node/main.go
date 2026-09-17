@@ -153,16 +153,17 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 
 	var err error
 	node, err = cluster.NewNode(cluster.NodeConfig{
-		Self:          cfg.NodeID,
-		Advertise:     cfg.Advertise,
-		Incarnation:   time.Now().Unix(),
-		Transport:     pool,
-		Health:        strategy,
-		Election:      cluster.Config{Threshold: cfg.Threshold},
-		ProbeInterval: cfg.ProbeInterval,
-		ElectionFloor: cfg.ElectionFloor,
-		Logger:        base,
-		OnFrame:       prober.HandleFrame,
+		Self:           cfg.NodeID,
+		Advertise:      cfg.Advertise,
+		Incarnation:    time.Now().Unix(),
+		Transport:      pool,
+		Health:         strategy,
+		Election:       cluster.Config{Threshold: cfg.Threshold},
+		ProbeInterval:  cfg.ProbeInterval,
+		ElectionFloor:  cfg.ElectionFloor,
+		GossipInterval: cfg.GossipInterval,
+		Logger:         base,
+		OnFrame:        prober.HandleFrame,
 	})
 	if err != nil {
 		prober.Close()
