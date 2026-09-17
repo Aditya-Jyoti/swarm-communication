@@ -6,7 +6,9 @@
   <meta name="color-scheme" content="light dark">
   <title>swarm-net control center</title>
   <!-- Everything is local: this page is served by the frontend container
-       (nginx) and needs no network access beyond its own origin. -->
+       (nginx) and needs no network access beyond its own origin. The CSP
+       forbids inline scripts and style attributes, so nothing below has one;
+       dynamic geometry is set through SVG attributes from app.js. -->
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,7 +21,7 @@
   </header>
 
   <section class="summary" aria-label="Cluster summary">
-    <div class="stat"><span class="stat-num" id="sum-nodes">-</span><span class="stat-label">nodes</span></div>
+    <div class="stat"><span class="stat-num" id="sum-nodes">-</span><span class="stat-label">drones</span></div>
     <div class="stat"><span class="stat-num" id="sum-leaders">-</span><span class="stat-label">leaders</span></div>
     <div class="stat"><span class="stat-num" id="sum-healthy">-</span><span class="stat-label">alive + connected</span></div>
     <div class="stat"><span class="stat-num" id="sum-pending">-</span><span class="stat-label">tasks pending</span></div>
@@ -28,24 +30,77 @@
   </section>
 
   <main class="grid">
-    <section class="panel topo-panel" aria-label="Topology">
+    <section class="panel topo-panel" id="topo-panel" aria-label="Airspace">
       <div class="panel-head">
-        <h2>Topology</h2>
-        <ul class="legend" aria-label="Legend">
+        <h2>Airspace</h2>
+        <div class="toolbar" role="toolbar" aria-label="View controls">
+          <span class="seg" role="group" aria-label="View mode">
+            <button type="button" class="btn" id="view-3d" aria-pressed="true">3D airspace</button>
+            <button type="button" class="btn" id="view-2d" aria-pressed="false">Grouped</button>
+          </span>
+          <button type="button" class="btn icon" id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+          <button type="button" class="btn icon" id="zoom-out" title="Zoom out (-)" aria-label="Zoom out">-</button>
+          <button type="button" class="btn" id="view-fit" title="Frame every drone (f)">Fit</button>
+          <button type="button" class="btn" id="view-reset" title="Reset the camera (0)">Reset view</button>
+          <button type="button" class="btn" id="view-full" aria-pressed="false">Fullscreen</button>
+        </div>
+      </div>
+      <div class="panel-head sub-head">
+        <ul class="legend" aria-label="Drone legend">
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="n-shape st-alive leader-shape"/></svg>leader (large, L)</li>
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-alive"/></svg>alive</li>
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-suspect"/></svg>suspect (dashed)</li>
-          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-dead"/></svg>dead (X)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-dead"/><line x1="7" y1="7" x2="13" y2="13" class="n-cross"/><line x1="7" y1="13" x2="13" y2="7" class="n-cross"/></svg>dead (X)</li>
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-disconnected"/></svg>disconnected (hollow)</li>
-          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="halo"/><circle cx="10" cy="10" r="4" class="n-shape st-alive"/></svg>degraded (halo)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6" class="n-shape st-killed"/><line x1="5" y1="5" x2="15" y2="15" class="n-cross killed"/><line x1="5" y1="15" x2="15" y2="5" class="n-cross killed"/></svg>killed (grey cross)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="halo"/><circle cx="10" cy="10" r="4" class="n-shape st-alive"/></svg>delay injected (halo)</li>
         </ul>
+        <span class="toolbar">
+          <label class="chk"><input type="checkbox" id="show-peers"> all peer links</label>
+          <label class="chk"><input type="checkbox" id="show-labels" checked> link labels</label>
+        </span>
       </div>
-      <svg id="topo" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Swarm topology">
-        <g id="topo-clusters"></g>
-        <g id="topo-links"></g>
-        <g id="topo-nodes"></g>
-      </svg>
-      <p id="topo-empty" class="empty">No nodes reported yet.</p>
+
+      <div class="topo-wrap">
+        <svg id="topo" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet"
+             tabindex="0" role="img"
+             aria-label="Swarm airspace. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, plus and minus zoom, 0 resets, f fits, Escape clears the selection.">
+          <g id="v3d">
+            <g id="g3-grid"></g>
+            <g id="g3-hulls"></g>
+            <g id="g3-drops"></g>
+            <g id="g3-peers"></g>
+            <g id="g3-links"></g>
+            <g id="g3-dots"></g>
+            <g id="g3-nodes"></g>
+            <g id="g3-labels"></g>
+          </g>
+          <g id="v2d" display="none">
+            <g id="v2d-cam">
+              <g id="topo-clusters"></g>
+              <g id="topo-links"></g>
+              <g id="topo-dots"></g>
+              <g id="topo-nodes"></g>
+            </g>
+          </g>
+          <g id="tip" class="tip" display="none" aria-hidden="true">
+            <rect id="tip-bg" rx="4" ry="4"></rect>
+            <text id="tip-text"></text>
+          </g>
+        </svg>
+      </div>
+      <p id="topo-empty" class="empty">No drones reported yet.</p>
+      <p class="hint">Drag to orbit. Shift-drag, right-drag or two fingers to pan. Wheel or pinch to
+        zoom. Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, Esc.</p>
+
+      <div class="flow-bar">
+        <label class="chk strong"><input type="checkbox" id="flows-on" checked> message animation</label>
+        <ul class="legend flow-legend" id="flow-legend" aria-label="Message types"></ul>
+      </div>
+
+      <div id="inspector" class="inspector" aria-live="polite">
+        <p class="empty">Hover or click a drone to inspect it.</p>
+      </div>
     </section>
 
     <section class="panel task-panel" aria-label="Submit tasks">
@@ -70,21 +125,46 @@
         </div>
       </form>
 
-      <h2>Chaos (all nodes)</h2>
+      <h2>Chaos (all drones)</h2>
       <div class="row">
         <button type="button" id="chaos-clear-all" class="btn">Clear all delays</button>
       </div>
-      <p class="hint">Per-node delay and kill are in the node table. A killed node exits and
-        Compose restarts it, so you can watch failover and rejoin.</p>
+      <p class="hint">Per-drone delay and kill are in the drone table. A killed drone exits
+        cleanly and stays down (only crashes are restarted), so the failover stays visible.</p>
+
+      <details id="adv" class="adv">
+        <summary>Advanced: drone simulation</summary>
+        <p id="sim-unsupported" class="hint warn" hidden>The control center does not report a
+          simulation config yet, so these controls are disabled.</p>
+        <div class="adv-status">
+          <span id="sim-applied" class="badge b-unknown">applied on -</span>
+          <span id="sim-version" class="muted"></span>
+        </div>
+        <label class="chk strong"><input type="checkbox" id="sim-enabled"> latency emulation enabled</label>
+        <div id="sim-sliders" class="sliders"></div>
+        <p class="eff">Reported by the drones: threshold <span id="eff-threshold" class="mono">-</span>,
+          hysteresis <span id="eff-hysteresis" class="mono">-</span></p>
+        <div class="row">
+          <button type="button" class="btn" id="sim-randomize">Randomize positions</button>
+          <button type="button" class="btn" id="sim-reset-pos">Reset positions</button>
+        </div>
+        <h3>Drone position</h3>
+        <label>Drone
+          <select id="drone-sel"><option value="">(select a drone)</option></select>
+        </label>
+        <div id="pos-sliders" class="sliders"></div>
+        <p id="sim-msg" class="form-msg" role="status" aria-live="polite"></p>
+      </details>
     </section>
 
-    <section class="panel nodes-panel" aria-label="Nodes">
-      <h2>Nodes</h2>
+    <section class="panel nodes-panel" aria-label="Drones">
+      <h2>Drones</h2>
       <div class="table-wrap">
         <table id="node-table">
           <thead>
             <tr>
               <th>id</th><th>role</th><th>state</th><th>term</th><th>leader</th>
+              <th>x</th><th>y</th><th>z</th>
               <th>peers</th><th>ledger</th><th>dropped</th><th>last seen</th><th>chaos</th>
             </tr>
           </thead>

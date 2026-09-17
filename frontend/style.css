@@ -178,22 +178,25 @@ h2 { font-size: 15px; margin-bottom: 8px; }
 .legend li { display: inline-flex; align-items: center; gap: 4px; }
 .legend svg { width: 18px; height: 18px; }
 
+/* Cluster hulls and links get their colour from the leader, through the SVG
+ * `stroke` / `fill` attributes set in app.js. CSS must not set those two
+ * properties here, or it would override the attributes. */
 .cluster-hull {
-  fill: var(--accent);
   fill-opacity: 0.06;
-  stroke: var(--accent);
-  stroke-opacity: 0.35;
+  stroke-opacity: 0.45;
+  stroke-width: 1.5;
   stroke-dasharray: 4 4;
 }
 
-.link { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.5; }
-.link.bad { stroke-dasharray: 3 4; stroke-opacity: 0.35; }
+.link { stroke-opacity: 0.7; stroke-width: 2; }
+.link.bad { stroke-dasharray: 3 4; stroke-opacity: 0.4; }
 
 .n-shape { stroke-width: 2.5; }
 .st-alive        { fill: var(--alive);   stroke: var(--alive); }
 .st-suspect      { fill: var(--suspect); stroke: var(--suspect); stroke-dasharray: 4 3; fill-opacity: 0.55; }
 .st-dead         { fill: var(--dead);    stroke: var(--dead); fill-opacity: 0.35; }
 .st-disconnected { fill: transparent;    stroke: var(--disconnected); stroke-dasharray: 2 3; }
+.st-killed       { fill: none; stroke: var(--disconnected); stroke-dasharray: 1 3; }
 .st-unknown      { fill: var(--disconnected); stroke: var(--disconnected); fill-opacity: 0.4; }
 .leader-shape    { stroke: var(--leader-ring); stroke-width: 3.5; }
 
@@ -216,6 +219,7 @@ h2 { font-size: 15px; margin-bottom: 8px; }
   pointer-events: none;
 }
 .n-cross { stroke: var(--dead); stroke-width: 3; stroke-linecap: round; }
+.n-cross.killed { stroke: var(--disconnected); stroke-width: 3.5; }
 .n-label {
   fill: var(--fg);
   font: 12px var(--mono);
@@ -228,8 +232,9 @@ h2 { font-size: 15px; margin-bottom: 8px; }
 .n-sublabel { fill: var(--muted); font-size: 10px; }
 .n-sublabel.deg { fill: var(--degraded); font-weight: 700; }
 
-.topo-node { cursor: default; }
-.topo-node.flash .flash-ring { animation: flash 1.6s ease-out 1; }
+.topo-node, .drone { cursor: pointer; }
+.topo-node.flash .flash-ring,
+.drone.flash .flash-ring { animation: flash 1.6s ease-out 1; }
 .flash-ring { fill: none; stroke: var(--accent); stroke-width: 4; opacity: 0; }
 @keyframes flash {
   0%   { opacity: 1; stroke-width: 10; }
@@ -237,8 +242,9 @@ h2 { font-size: 15px; margin-bottom: 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .halo, .conn-dot { animation: none !important; }
-  .topo-node.flash .flash-ring { animation-duration: 0.01s; }
+  .halo, .conn-dot, .promo-ring { animation: none !important; }
+  .topo-node.flash .flash-ring,
+  .drone.flash .flash-ring { animation-duration: 0.01s; }
 }
 
 /* ---------- forms and buttons ---------- */
@@ -313,6 +319,7 @@ tr.flash { animation: rowflash 1.6s ease-out 1; }
 .b-suspect, .b-pending  { color: var(--suspect); border-style: dashed; }
 .b-dead, .b-failed      { color: var(--dead); border-style: double; border-width: 3px; }
 .b-disconnected, .b-unknown { color: var(--disconnected); border-style: dotted; }
+.b-killed               { color: var(--disconnected); text-decoration: line-through; border-style: double; border-width: 3px; }
 .b-degraded             { color: var(--degraded); border-style: dashed; }
 .b-leader  { color: var(--panel); background: var(--fg); border-color: var(--fg); }
 .b-worker  { color: var(--muted); }
@@ -349,4 +356,178 @@ tr.flash { animation: rowflash 1.6s ease-out 1; }
 .ev-chaos { border-left-color: var(--degraded) !important; }
 .ev-chaos .k { color: var(--degraded); }
 .ev-local .k { color: var(--muted); }
+.ev-sim { border-left-color: var(--accent) !important; }
+.ev-sim .k { color: var(--accent); }
 .ev-local { font-style: italic; }
+
+/* ---------- airspace toolbar ---------- */
+
+.toolbar { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.seg { display: inline-flex; }
+.seg .btn { border-radius: 0; }
+.seg .btn:first-child { border-radius: 6px 0 0 6px; }
+.seg .btn:last-child { border-radius: 0 6px 6px 0; border-left-width: 0; }
+.btn[aria-pressed="true"] { background: var(--fg); color: var(--panel); border-color: var(--fg); }
+.btn.icon { min-width: 30px; font-size: 15px; line-height: 1; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.sub-head { margin-top: 4px; }
+
+label.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+label.chk input { display: inline-block; width: auto; margin: 0; }
+label.chk.strong { font-weight: 600; }
+
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+.hint.warn { color: var(--suspect); font-weight: 600; }
+
+/* ---------- airspace canvas ---------- */
+
+.topo-wrap { position: relative; }
+#topo {
+  touch-action: none;           /* the page handles pinch and drag itself */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  border-radius: 6px;
+  background: var(--bg);
+}
+#topo:active { cursor: grabbing; }
+#topo:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.topo-panel:fullscreen {
+  overflow: auto;
+  padding: 16px 20px;
+  background: var(--panel);
+}
+.topo-panel:fullscreen #topo { max-height: none; height: calc(100vh - 170px); }
+.topo-panel.maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow: auto;
+  border-radius: 0;
+}
+.topo-panel.maximized #topo { max-height: none; height: calc(100vh - 170px); }
+
+.grid { stroke: var(--border); stroke-width: 1; }
+.grid.major { stroke: var(--muted); stroke-opacity: 0.45; }
+.cube { stroke: var(--muted); stroke-opacity: 0.4; stroke-dasharray: 5 4; }
+.axis-label { fill: var(--muted); font: 700 12px var(--mono); text-anchor: middle; dominant-baseline: central; }
+
+.drop { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1; stroke-dasharray: 2 3; }
+.drop.faint { stroke-opacity: 0.25; }
+.shadow { fill: var(--muted); fill-opacity: 0.45; }
+
+.hull3 { fill-opacity: 0.07; stroke-opacity: 0.55; stroke-width: 1.5; stroke-dasharray: 6 4; stroke-linejoin: round; }
+
+.link3 { stroke-width: 2.2; stroke-opacity: 0.8; stroke-linecap: round; }
+.link3.bad { stroke-dasharray: 4 4; stroke-opacity: 0.45; }
+.link3.hl, .link.hl { stroke-width: 4; stroke-opacity: 1; }
+.peerlink { stroke: var(--muted); stroke-width: 0.8; stroke-opacity: 0.35; }
+.peerlink.hl { stroke: var(--fg); stroke-width: 1.6; stroke-opacity: 0.75; stroke-dasharray: 1 3; }
+/* Invisible, wide hover target on top of each thin link. */
+.hit { stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: help; }
+
+.link-label {
+  fill: var(--fg);
+  font: 10px var(--mono);
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.drone-body .n-shape,
+.drone-body .halo,
+.drone-body .flash-ring,
+.drone-body .n-cross,
+.drone-body .sel-ring,
+.drone-body .cluster-ring,
+.drone-body .promo-ring { vector-effect: non-scaling-stroke; }
+.drone-body .n-glyph { font-size: 11px; }
+.cluster-ring { fill: none; stroke-width: 2.5; }
+.sel-ring { fill: none; stroke: var(--fg); stroke-width: 2.5; stroke-dasharray: 3 2; }
+.promo-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  animation: pulse 0.8s ease-in-out infinite;
+}
+.n-sublabel.promo { fill: var(--accent); font-weight: 700; }
+.drone .n-label, .topo-node .n-label { pointer-events: none; }
+.drone.selected .n-label { font-weight: 700; }
+
+/* ---------- message dots (colour + shape) ---------- */
+
+.dot { stroke: var(--panel); stroke-width: 0.8; pointer-events: none; }
+.mt-ping   { fill: #0072b2; }
+.mt-hb     { fill: #009e73; }
+.mt-member { fill: #cc79a7; }
+.mt-elect  { fill: #d55e00; }
+.mt-join   { fill: #e69f00; }
+.mt-sync   { fill: #56b4e9; }
+.mt-task   { fill: #8e6cbf; }
+.mt-other  { fill: #8a929c; }
+@media (prefers-color-scheme: dark) {
+  .mt-ping { fill: #4aa3e0; }
+  .mt-task { fill: #b294e6; }
+}
+
+.flow-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; }
+.flow-legend { margin: 0; }
+.flow-legend.off { opacity: 0.4; }
+.legend svg.swatch { width: 14px; height: 14px; }
+
+/* ---------- tooltip (inside the SVG) ---------- */
+
+.tip { pointer-events: none; }
+.tip rect { fill: var(--panel); stroke: var(--fg); stroke-opacity: 0.6; fill-opacity: 0.96; }
+.tip text { fill: var(--fg); font: 11px var(--mono); }
+.tip .tip-head { font-weight: 700; }
+
+/* ---------- inspector ---------- */
+
+.inspector { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.inspector .empty { text-align: left; margin: 0; }
+.insp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.insp-head .badge + .badge { margin-left: 0; }
+.insp-facts { list-style: none; margin: 6px 0; padding: 0; font-size: 12px; }
+.table-wrap.scroll.short { max-height: 220px; }
+
+/* ---------- advanced simulation panel ---------- */
+
+.adv { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+.adv summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.adv[open] summary { margin-bottom: 6px; }
+.adv h3 { font-size: 13px; margin: 12px 0 4px; }
+.adv-status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 12px; }
+.sliders { margin: 6px 0; }
+label.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 8px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.sl-name { color: var(--muted); }
+.sl-val { font-size: 12px; font-weight: 600; }
+label.slider input[type="range"] { grid-column: 1 / -1; padding: 0; margin: 2px 0 0; border: 0; background: transparent; }
+.eff { font-size: 12px; color: var(--muted); margin: 6px 0 10px; }
+
+/* ---------- table extras ---------- */
+
+td.pick { cursor: pointer; text-decoration: underline dotted; }
+tr.killed td { opacity: 0.5; }
+tr.killed td:first-child { text-decoration: line-through; }
+tr.selected { outline: 2px solid var(--accent); outline-offset: -2px; }

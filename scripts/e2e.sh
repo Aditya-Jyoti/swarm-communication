@@ -23,6 +23,13 @@
 #   6. wait until a leader other than the victim exists and every surviving
 #      node is attached again
 #   7. submit tasks again and wait until all are done
+#   8. send CHAOS kill to a worker through POST /api/chaos, then check that its
+#      container exits with code 0, is NOT restarted ~10s later
+#      (restart: on-failure), is shown as "killed", and that the swarm is
+#      healthy again with the right leader count
+#   9. POST /api/sim with a new per_unit_ms and check that GET /api/sim
+#      reflects it with a newer version, that the connected drones apply it
+#      (sim_version), and that the swarm is still healthy afterwards
 #
 # Exits non-zero with a FAIL line (plus recent logs) on the first failed step.
 # The stack is always torn down (`down -v`) on exit unless E2E_KEEP=1.
@@ -35,6 +42,8 @@
 #   E2E_HEAL_TIMEOUT     seconds for failover to complete     (default 60)
 #   E2E_TASK_TIMEOUT     seconds for a task batch to finish   (default 60)
 #   E2E_TASKS            tasks per batch                      (default 5)
+#   E2E_KILL_WAIT        seconds a killed container must stay down (default 10)
+#   E2E_SIM_PER_UNIT     per_unit_ms sent in step 9            (default 3.5)
 #   E2E_NO_BUILD=1       skip --build (reuse existing images)
 #   E2E_KEEP=1           do not tear down on exit
 #   E2E_JSON=python3     force the python3 JSON path (default: jq if present)
@@ -55,8 +64,15 @@ TASK_TIMEOUT="${E2E_TASK_TIMEOUT:-60}"
 THRESHOLD="${SWARM_THRESHOLD:-0.3}"
 export SWARM_THRESHOLD="$THRESHOLD"
 TASKS="${E2E_TASKS:-5}"
+KILL_WAIT="${E2E_KILL_WAIT:-10}"
+SIM_PER_UNIT="${E2E_SIM_PER_UNIT:-3.5}"
 BASE="http://127.0.0.1:${PORT}"
 TOTAL=$((NODES + 1)) # + seed
+# Steps 5 and 8 each remove one node for good; step 8 needs a worker to spare.
+if [ "$NODES" -lt 3 ]; then
+	echo "E2E_NODES must be at least 3" >&2
+	exit 2
+fi
 
 # The frontend is the only published port; bind it to loopback for the test.
 export FRONTEND_PORT="$PORT"
@@ -117,12 +133,13 @@ q() {
 	local name="$1" arg="${2:-}"
 	if [ "$JSON" = jq ]; then
 		case "$name" in
-		# "<connected> <leaders> <unattached>" ignoring node ARG (may be empty).
-		# A node is attached if it is a leader, or its leader is a connected
-		# leader that is not ARG.
+		# "<connected> <leaders> <unattached>" ignoring the space-separated node
+		# ids in ARG (may be empty). A node is attached if it is a leader, or
+		# its leader is a connected leader that is not in ARG.
 		health)
 			jq -r --arg skip "$arg" '
-				[.nodes // [] | .[] | select(.id != $skip and .connected == true)] as $live
+				($skip | split(" ") | map(select(. != ""))) as $skips
+				| [.nodes // [] | .[] | select(.connected == true) | select(.id as $i | any($skips[]; . == $i) | not)] as $live
 				| [$live[] | select(.role == "leader") | .id] as $leaders
 				| [$live[] | select(.role != "leader")
 				           | select((.leader // "") as $l | ($leaders | map(. == $l) | any) | not)] as $loose
@@ -130,6 +147,28 @@ q() {
 			;;
 		leaders) jq -r '[.nodes // [] | .[] | select(.connected == true and .role == "leader") | .id] | join(" ")' ;;
 		task_ids) jq -r '.task_ids // [] | join(" ")' ;;
+		# A connected worker that is not the seed and not in ARG (space-separated).
+		pick_worker)
+			jq -r --arg skip "$arg" '
+				($skip | split(" ")) as $skips
+				| [.nodes // [] | .[] | select(.connected == true and .role != "leader" and .id != "seed")
+				  | select(.id as $i | any($skips[]; . == $i) | not) | .id] | first // ""'
+			;;
+		# "<state> <connected>" of node ARG, or "missing missing".
+		node_state)
+			jq -r --arg id "$arg" '
+				([.nodes // [] | .[] | select(.id == $id)] | first) as $n
+				| if $n == null then "missing missing" else "\($n.state // "") \($n.connected)" end'
+			;;
+		# One field of a sim object (GET /api/sim or a POST /api/sim reply).
+		sim_field) jq -r --arg f "$arg" '.[$f] // "missing" | tostring' ;;
+		# "<applied> <live>": connected, non-killed drones whose sim_version is
+		# at least ARG, out of all of them.
+		sim_applied)
+			jq -r --argjson v "$arg" '
+				[.nodes // [] | .[] | select(.connected == true and .state != "killed")] as $live
+				| "\([$live[] | select((.sim_version // 0) >= $v)] | length) \($live | length)"'
+			;;
 		# "<done_ok> <failed> <missing_or_pending>" for the space-separated ids in ARG.
 		task_states)
 			jq -r --arg ids "$arg" '
@@ -149,7 +188,8 @@ name, arg = sys.argv[1], sys.argv[2]
 d = json.load(sys.stdin) or {}
 nodes = d.get("nodes") or []
 if name == "health":
-    live = [n for n in nodes if n.get("id") != arg and n.get("connected") is True]
+    skips = arg.split()
+    live = [n for n in nodes if n.get("id") not in skips and n.get("connected") is True]
     leaders = [n.get("id") for n in live if n.get("role") == "leader"]
     loose = [n for n in live if n.get("role") != "leader" and (n.get("leader") or "") not in leaders]
     print(len(live), len(leaders), len(loose))
@@ -157,6 +197,20 @@ elif name == "leaders":
     print(" ".join(n.get("id") for n in nodes if n.get("connected") is True and n.get("role") == "leader"))
 elif name == "task_ids":
     print(" ".join(d.get("task_ids") or []))
+elif name == "pick_worker":
+    skips = arg.split()
+    ids = [n.get("id") for n in nodes if n.get("connected") is True and n.get("role") != "leader"
+           and n.get("id") != "seed" and n.get("id") not in skips]
+    print(ids[0] if ids else "")
+elif name == "node_state":
+    n = next((n for n in nodes if n.get("id") == arg), None)
+    print("missing missing" if n is None else "%s %s" % (n.get("state") or "", json.dumps(n.get("connected"))))
+elif name == "sim_field":
+    v = d.get(arg)
+    print("missing" if v is None else (v if isinstance(v, str) else json.dumps(v)))
+elif name == "sim_applied":
+    live = [n for n in nodes if n.get("connected") is True and n.get("state") != "killed"]
+    print(sum(1 for n in live if (n.get("sim_version") or 0) >= float(arg)), len(live))
 elif name == "task_states":
     want = [i for i in arg.split(" ") if i]
     first = {}
@@ -173,6 +227,20 @@ else:
 
 state() { curl -fsS --max-time 3 "$BASE/api/state"; }
 
+# post PATH JSON -> response body; fails on a non-2xx status.
+post() { curl -fsS --max-time 5 -H 'Content-Type: application/json' -d "$2" "$BASE$1"; }
+
+# num_cmp A OP B -> numeric comparison (OP is ==, > or >=), so 3.5 == 3.50.
+num_cmp() {
+	awk -v a="$1" -v op="$2" -v b="$3" 'BEGIN {
+		if (a !~ /^-?[0-9.]+$/ || b !~ /^-?[0-9.]+$/) exit 1
+		if (op == "==") exit !(a + 0 == b + 0)
+		if (op == ">") exit !(a + 0 > b + 0)
+		if (op == ">=") exit !(a + 0 >= b + 0)
+		exit 1
+	}'
+}
+
 # ------------------------------------------------------------------ steps
 
 # want_leaders N -> max(1, ceil(N * THRESHOLD)), the LeaderCount formula.
@@ -180,7 +248,9 @@ want_leaders() {
 	awk -v n="$1" -v t="$THRESHOLD" 'BEGIN { x = n * t; c = int(x); if (c < x) c++; if (c < 1) c = 1; print c }'
 }
 
-# wait_healthy SKIP_ID WANT_LIVE TIMEOUT LABEL
+# wait_healthy SKIP_IDS WANT_LIVE TIMEOUT LABEL
+#
+# SKIP_IDS is a space-separated list of node ids to leave out (killed ones).
 #
 # Healthy means: every expected node connected, EXACTLY the formula's number of
 # self-declared leaders, and every worker attached to one of them. Counting
@@ -284,6 +354,93 @@ container_for() {
 	return 1
 }
 
+# container_state CID -> "<status> <exit code> <restart count>"
+container_state() {
+	docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' "$1"
+}
+
+# chaos_kill_worker SKIP_IDS -> sets KILLED_WORKER
+#
+# A CHAOS kill must look like a clean exit: code 0, which restart: on-failure
+# leaves alone, so the drone stays dead and the failover stays visible. A
+# non-zero exit would be restarted (status "restarting", or a higher
+# RestartCount), and this step fails.
+KILLED_WORKER=""
+chaos_kill_worker() {
+	local skip="$1" worker cid deadline st status code restarts restarts2 status2 code2 nstate nconn
+	worker="$(state | q pick_worker "$skip")" || fail "chaos kill: could not read /api/state"
+	[ -n "$worker" ] || fail "chaos kill: no connected worker to kill"
+	cid="$(container_for "$worker")" || fail "chaos kill: no container found for worker $worker"
+	read -r _ _ restarts < <(container_state "$cid")
+	log "chaos kill: POST /api/chaos kill $worker (container ${cid:0:12})"
+	post /api/chaos "$(printf '{"node":"%s","action":"kill"}' "$worker")" >/dev/null ||
+		fail "chaos kill: POST /api/chaos failed"
+
+	deadline=$((SECONDS + 15))
+	st=""
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		st="$(container_state "$cid")" || fail "chaos kill: docker inspect failed"
+		case "$st" in exited\ *) break ;; esac
+		sleep 1
+	done
+	read -r status code restarts2 <<<"$st"
+	[ "$status" = exited ] || fail "chaos kill: $worker did not exit within 15s (status: $st)"
+	[ "$code" = 0 ] || fail "chaos kill: $worker exited with code $code, want 0"
+	[ "$restarts2" = "$restarts" ] ||
+		fail "chaos kill: $worker was restarted before it stayed down (restarts $restarts -> $restarts2)"
+
+	log "chaos kill: $worker exited with code 0; checking it stays down for ${KILL_WAIT}s"
+	sleep "$KILL_WAIT"
+	read -r status2 code2 restarts2 < <(container_state "$cid")
+	if [ "$status2" != exited ] || [ "$restarts2" != "$restarts" ]; then
+		fail "chaos kill: $worker came back (status $status2, exit $code2, restarts $restarts -> $restarts2); want it to stay down"
+	fi
+
+	read -r nstate nconn < <(state | q node_state "$worker") || fail "chaos kill: could not read /api/state"
+	if [ "$nstate" != killed ] || [ "$nconn" != false ]; then
+		fail "chaos kill: /api/state shows $worker as state=$nstate connected=$nconn, want killed/false"
+	fi
+	log "chaos kill: $worker is down, was not restarted, and is shown as killed"
+	KILLED_WORKER="$worker"
+}
+
+# sim_update SKIP_IDS
+#
+# POST /api/sim changes per_unit_ms; GET /api/sim must then show it with a
+# newer version, and every connected drone must report that version.
+sim_update() {
+	local skip="$1" before resp v ver got gotver deadline applied live last=""
+	before="$(curl -fsS --max-time 3 "$BASE/api/sim")" || fail "sim: GET /api/sim failed"
+	ver="$(printf '%s' "$before" | q sim_field version)"
+	log "sim: before: per_unit_ms=$(printf '%s' "$before" | q sim_field per_unit_ms) version=$ver"
+
+	resp="$(post /api/sim "$(printf '{"per_unit_ms":%s}' "$SIM_PER_UNIT")")" || fail "sim: POST /api/sim failed"
+	v="$(printf '%s' "$resp" | q sim_field version)"
+	num_cmp "$(printf '%s' "$resp" | q sim_field per_unit_ms)" == "$SIM_PER_UNIT" ||
+		fail "sim: POST /api/sim reply does not carry per_unit_ms=$SIM_PER_UNIT: $resp"
+	num_cmp "$v" ">" "$ver" || fail "sim: version did not increase ($ver -> $v)"
+
+	got="$(curl -fsS --max-time 3 "$BASE/api/sim")" || fail "sim: GET /api/sim failed"
+	gotver="$(printf '%s' "$got" | q sim_field version)"
+	num_cmp "$(printf '%s' "$got" | q sim_field per_unit_ms)" == "$SIM_PER_UNIT" ||
+		fail "sim: GET /api/sim does not reflect per_unit_ms=$SIM_PER_UNIT: $got"
+	num_cmp "$gotver" ">=" "$v" || fail "sim: GET /api/sim version $gotver is older than the POST reply's $v"
+	log "sim: per_unit_ms=$SIM_PER_UNIT is in force at the control center (version $gotver)"
+
+	deadline=$((SECONDS + 15))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if read -r applied live < <(state | q sim_applied "$gotver"); then
+			last="$applied/$live"
+			if [ "$live" -gt 0 ] && [ "$applied" -eq "$live" ]; then
+				log "sim: every connected drone reports sim_version >= $gotver ($last)"
+				return 0
+			fi
+		fi
+		sleep 1
+	done
+	fail "sim: drones did not apply version $gotver within 15s (applied: $last)"
+}
+
 # ------------------------------------------------------------------ main
 
 log "starting project $PROJECT: seed + $NODES nodes, dashboard on $BASE"
@@ -304,10 +461,18 @@ log "killing leader $victim (container ${cid:0:12}); current leaders: $leaders"
 docker kill "$cid" >/dev/null || fail "docker kill $victim failed"
 
 # The victim is excluded by id: the control center keeps it listed as
-# disconnected for a while, and restart: unless-stopped does not bring back a
-# container killed from the host.
+# disconnected for a while, and Docker does not restart a container killed
+# from the host, whatever its restart policy.
 wait_healthy "$victim" "$((TOTAL - 1))" "$HEAL_TIMEOUT" "failover"
 log "leaders after failover: $(state | q leaders || echo unknown)"
 run_tasks "after"
 
-log "PASS: swarm self-healed after losing leader $victim"
+chaos_kill_worker "$victim"
+wait_healthy "$victim $KILLED_WORKER" "$((TOTAL - 2))" "$HEAL_TIMEOUT" "after chaos kill"
+log "leaders after chaos kill: $(state | q leaders || echo unknown)"
+
+sim_update "$victim $KILLED_WORKER"
+# A new latency model can move leadership; the swarm must settle again.
+wait_healthy "$victim $KILLED_WORKER" "$((TOTAL - 2))" "$HEAL_TIMEOUT" "after sim change"
+
+log "PASS: swarm healed after losing leader $victim and worker $KILLED_WORKER, and applied a sim change"
