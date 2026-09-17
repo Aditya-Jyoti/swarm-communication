@@ -1,135 +1,19 @@
 ---
 title: Repository Layout
-outline: deep
 ---
 
 # Repository Layout
 
+This page has been merged into the
+[System Overview](./overview#repository-layout).
+
+In short:
+
 | Path | What it holds |
 |---|---|
-| `CLAUDE.md` | The operating charter for the agent team |
-| `go.mod` | `module swarm-net` |
-| `package.json` | VitePress toolchain only -- the Go build needs no Node |
-| `.claude/agents/` | Subagent definitions: `system-architect.md`, `doc-educator.md`, `go-engineer.md`, `sim-engineer.md` |
-| `cmd/swarm-node/` | The node binary -- identical for every node in the swarm |
-| `cmd/control-center/` | Coordinator plus embedded HTTP/WebSocket server |
-| `pkg/protocol/` | Wire schemas and framing codec. Imports nothing local. |
-| `pkg/network/` | TCP listener, dialer, connection pool, read/write loops |
-| `pkg/health/` | `HealthStrategy` interface and `LatencyHealthStrategy` |
-| `pkg/cluster/` | Membership, election math, heartbeats, failover, replication |
-| `pkg/telemetry/` | The node's Control Center uplink: `TELEMETRY` from `cluster.Status`, `TASK` and `CHAOS` dispatch, chaos validation |
-| `pkg/controlcenter/` | The Control Center: hub, node server, HTTP API and WebSocket |
-| `web/` | `embed.go` plus `static/`: the vanilla HTML/CSS/JS dashboard, compiled into the CC binary |
-| `Dockerfile` | Multi-stage build with two targets, `node` and `control-center` |
-| `docker-compose.yml` | Control Center, `seed`, and a scalable `node` service on the `swarmnet` bridge |
-| `deploy/` | `node-entrypoint.sh`: derives a readable node ID under `--scale`, then `exec`s the binary |
-| `scripts/` | `e2e.sh` (self-healing test), `check-ascii.mjs` and `check-mermaid.mjs` (docs lint) |
-| `docs/` | The VitePress site -- the curriculum |
-| `docs/.vitepress/config.js` | Sidebar; extended after every Concept Discovery pass |
-| `docs/WORKLOG.md` | Append-only engineering log |
-| `docs/architecture/` | How THIS system works |
-| `docs/concepts/` | Transferable foundations it stands on |
-
-## Why `pkg/` splits this way
-
-The temptation in a project this size is a single `swarm` package. It is rejected for one reason:
-**the seams are where the teaching happens**. A reader who wants to understand framing should be
-able to read `pkg/protocol` without election logic in their way, and a reader who wants election
-should not have to skip past byte-slice arithmetic.
-
-The boundaries are drawn so each package has exactly one reason to change:
-
-- **`protocol` changes** when the wire format changes. Nothing else should have to.
-- **`network` changes** when connection management changes -- pooling, deadlines, backpressure. It
-  moves opaque frames and has no opinion about their contents.
-- **`health` changes** when a new metric is introduced. This is the extension point the brief calls
-  out explicitly, so it gets its own package rather than a file inside `cluster`. A strategy living
-  next to the code that consumes it is a strategy that will accidentally grow a dependency on it.
-- **`cluster` changes** when the distributed algorithm changes -- thresholds, affinity rules,
-  failover behaviour. This is where the genuinely hard reasoning lives, and it is kept free of I/O
-  detail so it can be unit-tested without a socket.
-- **`telemetry` changes** when the dashboard needs to show something new. Keeping it separate stops
-  display concerns from leaking into the state machine. It reads `cluster.Status`; `cluster`
-  never imports it.
-- **`controlcenter` changes** when the dashboard API or the CC's hub changes. It speaks the wire
-  protocol but is not a mesh member, so it depends on `network` and `telemetry`, never on
-  `cluster` directly.
-
-The dependency graph is a DAG and points one way:
-
-```mermaid
-flowchart TD
-    N["cmd/swarm-node"]
-    C["cmd/control-center"]
-    CC["pkg/controlcenter"]
-    WEB["web"]
-    CL["pkg/cluster"]
-    T["pkg/telemetry"]
-    H["pkg/health"]
-    NW["pkg/network"]
-    P["pkg/protocol"]
-
-    N --> CL
-    N --> T
-    N --> H
-    N --> NW
-    C --> CC
-    C --> WEB
-    CC --> T
-    CC --> NW
-    T --> CL
-    T --> NW
-    CL --> H
-    CL --> NW
-    H --> P
-    NW --> P
-```
-
-`pkg/protocol` is the sink of the graph and imports nothing from this module. If a future change
-appears to require `protocol` to import `cluster`, the correct response is to hoist the shared type
-into `protocol` or to introduce an interface -- never to merge the packages.
-
-## `cmd/` holds wiring, not logic
-
-Both binaries should read as configuration, construction, and lifecycle: parse flags and
-environment, build the dependency graph, install signal handlers, block, shut down cleanly. Any
-`if` statement in `cmd/` that expresses a distributed-systems rule belongs in `pkg/`. This keeps
-the interesting code testable without spawning processes.
-
-`cmd/swarm-node` is deliberately one binary for all roles. A node does not know at start-up whether
-it will be a leader; roles are states in a machine, not build targets. Two binaries would make the
-promotion path untestable and would invite the two code paths to drift.
-
-## `web/static` is embedded, not mounted
-
-The dashboard is served by the Control Center from `embed.FS` (`web/embed.go:20`), not from a bind mount. One binary,
-no volume wiring, no path that works in development and breaks in the container. The cost is a
-rebuild to see a CSS change, which is the right trade for a demonstration system that must come up
-identically on someone else's machine.
-
-## `docs/` mirrors the two kinds of knowledge
-
-`architecture/` answers *"how does this system work?"* -- it is allowed to be specific,
-opinionated, and obsolete the moment the code changes, which is why it cites code directly.
-
-`concepts/` answers *"what must I understand for that to make sense?"* -- it is transferable. A
-reader should be able to take the framing or netpoller page to an unrelated project and still get
-value. These pages reference this repository, but they are not *about* it.
-
-Operational material (running, scaling, chaos) lives in
-[Running the Swarm](./running-the-swarm), inside `architecture/`.
-
-## The agent definitions in `.claude/agents/`
-
-Four roles, so that no single context window carries the whole system:
-
-| Agent | Owns | Never does |
-|---|---|---|
-| `system-architect` | Interface contracts, trade-off analysis, the worklog, escalating questions to the user | Write production Go |
-| `doc-educator` | Concept discovery, the curriculum, sidebar wiring | Make architectural decisions |
-| `go-engineer` | Everything in `pkg/` and `cmd/` | Invent contracts unilaterally |
-| `sim-engineer` | `Dockerfile`, `docker-compose.yml`, `deploy/`, `scripts/e2e.sh`, `web/static/` | Touch cluster logic |
-
-The separation is not ceremony. The architect asking "what breaks if a leader is slow rather than
-dead?" and the engineer asking "what does this `Read` return on a half-open socket?" are different
-modes of attention, and interleaving them in one pass produces worse answers to both.
+| `backend/` | Go module: `cmd/`, `pkg/`, `Dockerfile`, `deploy/` |
+| `frontend/` | Dashboard files and the nginx config |
+| `docs/` | This site |
+| `docker-compose.yml` | The local swarm |
+| `.env.example` | Every tunable |
+| `scripts/e2e.sh` | End-to-end self-healing test |

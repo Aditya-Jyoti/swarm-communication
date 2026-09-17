@@ -1,247 +1,154 @@
 ---
 title: System Overview
-outline: deep
 ---
 
 # System Overview
 
-`swarm-net` is a peer-to-peer swarm of $N$ identical Go processes, each in its own container on a
-user-defined Docker bridge network, plus one Control Center that coordinates nothing and observes
-everything.
+`swarm-net` is a group of identical Go processes ("nodes") that find each other over TCP, pick
+their own leaders, and repair themselves when a node dies. A small Control Center watches the
+swarm and sends it work. A browser dashboard shows everything live.
 
-The design constraint that shapes every other decision: **there are no special nodes**. Every node
-ships the same binary and the same configuration schema. Leadership is a role a node acquires from
-measured health, not a flag it is started with. Kill any container and the swarm reshapes.
+The one rule behind the design: **there are no special nodes**. Every node runs the same binary.
+A node becomes a leader because it measured healthy, not because it was configured that way.
 
-## The map
-
-```mermaid
-flowchart TD
-    BR["Browser dashboard (vanilla JS)"]
-    CC["Control Center: cmd/control-center"]
-
-    subgraph CLA["Cluster A"]
-        LA{{"Leader A"}}
-        WA1(["worker"])
-        WA2(["worker"])
-        WA3(["worker"])
-        WA4(["worker"])
-    end
-
-    subgraph CLB["Cluster B"]
-        LB{{"Leader B"}}
-        WB1(["worker"])
-        WB2(["worker"])
-    end
-
-    subgraph CLC["Cluster C"]
-        LC{{"Leader C"}}
-        WC1(["worker"])
-        WC2(["worker"])
-        WC3(["worker"])
-    end
-
-    BR <-->|"WebSocket: telemetry, tasks, chaos"| CC
-
-    CC ==>|"TCP, framed"| LA
-    CC ==>|"TCP, framed"| LB
-    CC ==>|"TCP, framed"| LC
-
-    WA1 -->|"lowest latency"| LA
-    WA2 --> LA
-    WA3 --> LA
-    WA4 --> LA
-    WB1 -->|"lowest latency"| LB
-    WB2 --> LB
-    WC1 -->|"lowest latency"| LC
-    WC2 --> LC
-    WC3 --> LC
-
-    LA -.->|"health probe"| LB
-    LB -.->|"health probe"| LC
-    LA -.->|"health probe"| LC
-    WA4 -.->|"health probe"| LB
-    WB2 -.->|"health probe"| LC
-    WC3 -.->|"health probe"| LA
-```
-
-Solid double arrows are the Control Center's task and telemetry path. Solid single arrows are
-cluster attachment: a worker attaches to whichever leader answers fastest. Dashed arrows are health
-probing, which runs across the **full P2P mesh** -- every node can probe every other, not only its
-own leader. Only a representative subset is drawn; at $N=10$ the real mesh is 45 edges.
-
-The number of leaders is $\lceil N \times \text{threshold} \rceil$, minimum 1. Cluster sizes are
-whatever affinity produces.
-
-Two distinct traffic planes overlay the same TCP mesh:
-
-- **The control plane.** Peer discovery, health probes, election messages, heartbeats, membership
-  gossip. Node-to-node, constant, small, latency-sensitive.
-- **The data plane.** Tasks injected at the Control Center, sent to one leader, assigned by it to
-  one of its workers; results and telemetry sent back up. Bursty, larger, throughput-sensitive.
-
-They share a transport but not a priority. Heartbeats must not queue behind a task payload -- a
-fact that constrains the framing and connection-pool design in `pkg/network`.
-
-## The four mechanisms
-
-### 1. Dynamic leadership threshold
-
-The number of leaders is a function of swarm size, not a constant:
-
-$$\text{LeaderCount} = \max(1, \lceil N \times \text{threshold} \rceil)$$
-
-With `threshold = 0.3`: $N=3 \Rightarrow 1$ leader, $N=10 \Rightarrow 3$, $N=25 \Rightarrow 8$. The
-$\max(1, \ldots)$ clamp keeps a single-node swarm legal -- a degenerate case that must work,
-because it is the first thing anyone runs.
-
-Candidates are ranked by health score; the top `LeaderCount` become leaders. The interesting
-question is not the formula but what happens when two nodes compute different values of $N$ at the
-same instant. That is a split-brain scenario, covered in
-[Split-Brain and Quorum](/concepts/split-brain-and-quorum) and
-[Convergence Debugging](/architecture/convergence-debugging).
-
-Because leadership is acquired rather than configured, role is a state in a machine:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Leader: alone at start, elects itself
-    Leader --> Detached: demoted, a healthier peer outranks it
-    Detached --> Worker: JOIN_ACK accepted by the best leader
-    Worker --> Detached: 3 silent ticks, leader suspected, or leader stepped down
-    Worker --> Worker: re-home to a leader better by the margin
-    Detached --> Leader: elected
-    Worker --> Leader: promoted, healthiest survivor after failover
-    Leader --> [*]: shutdown
-    Worker --> [*]: shutdown
-```
-
-A detached node is a worker with no leader. Status reports it with an empty `leader`.
-
-### 2. Affinity clustering, not quotas
-
-A worker is not assigned to a leader. It probes every elected leader, measures the round-trip
-health score, and joins the best one. There are no fixed percentage splits and no balancing
-authority.
-
-The consequence is worth stating up front: **clusters will be uneven**, and that is the intended
-behaviour. If one leader sits on a fast path from seven workers, it gets seven workers. Load
-balancing is a separate concern from affinity, and conflating them produces a system that is bad at
-both. If capacity limits are later required, they enter as an explicit admission-control policy on
-the leader, not as a quota baked into the clustering rule.
-
-### 3. Health as an interface
-
-```go
-// pkg/health/strategy.go:83 (comments trimmed)
-type HealthStrategy interface {
-    Name() string
-    EvaluateScore(ctx context.Context, target protocol.NodeAddress) (float64, error)
-}
-```
-
-`LatencyHealthStrategy` ships as the default. The contract exists so that CPU load, free memory,
-packet loss, or a composite weighted score can be substituted without `pkg/cluster` learning
-anything new. The cluster logic must therefore never inspect *what* a score means -- only compare
-scores. Any code that assumes "score is milliseconds" is a bug against this contract.
-
-The contract's rules (lower is better, NaN means unmeasured, a cancelled probe is not a failure)
-are in `pkg/health/strategy.go` and the [Worklog](/WORKLOG), section 2.3. Election ranks on each
-node's **self-reported** score, while a worker picks its leader on its **own** measurements.
-
-### 4. Self-healing
-
-```mermaid
-sequenceDiagram
-    participant L as Assigned leader
-    participant W as Worker
-    participant P as Surviving peers
-    participant CC as Control Center
-
-    L->>W: HEARTBEAT
-    W-->>L: HEARTBEAT_ACK
-    L->>W: HEARTBEAT
-    W-->>L: HEARTBEAT_ACK
-    Note over L: crash
-    Note over W,P: socket reset, or 3 ticks with no beat
-    W->>W: suspect the leader, detach, carry its pending tasks
-    Note over W,P: leader keeps its seat while only suspect
-    Note over W,P: 3s later the suspicion is confirmed, leader dead
-    Note over P: election without it promotes the healthiest node
-    W->>P: JOIN_CLUSTER to the best leader, hand over the tasks
-    P->>CC: TELEMETRY now reports role leader
-```
-
-$K = 3$ ticks, not one, because a single missed beat is indistinguishable from a scheduler hiccup
-or a GC pause. The gap between "slow" and "dead" is unknowable from the outside -- this is the
-core insight of failure-detector theory, and $K$ and the heartbeat interval are the two knobs
-that trade detection latency against false positives. A leader crash is repaired within about
-$3\,\text{s} + 2 \times 0.5\,\text{s}$. The mechanics are in
-[Failure Detection and Failover](./failure-detection-and-failover), and what happens to in-flight
-work in [Replication and Tasks](./replication-and-tasks).
-
-## Package boundaries
-
-| Package | Owns | Must not know about |
-|---|---|---|
-| `pkg/protocol` | Wire schemas, message types, framing codec | Cluster roles, health semantics |
-| `pkg/network` | TCP listener, dialer, connection pool, read/write loops | Message *meaning* |
-| `pkg/health` | `HealthStrategy` + `LatencyHealthStrategy` | Election rules, membership |
-| `pkg/cluster` | Membership table, election math, heartbeats, failover, replication | Byte-level framing, socket details |
-| `pkg/telemetry` | The node's CC uplink: status to `TELEMETRY`, `TASK`/`CHAOS` dispatch | Election internals, the dashboard |
-| `pkg/controlcenter` | Hub, node server, task routing, HTTP API, WebSocket | Election internals, mesh membership |
-| `web` | Embedded dashboard assets | Everything in Go beyond `embed` |
-| `cmd/swarm-node` | Wiring, config, lifecycle, signal handling | -- |
-| `cmd/control-center` | Wiring, config, signals, `http.Server` | -- |
-
-The dependency direction is strictly downward: `cmd` -> {`controlcenter`, `telemetry`} ->
-`cluster` -> {`health`, `network`} -> `protocol`. `pkg/protocol` imports nothing from this repo.
-If that ever inverts, the abstraction has failed and the fix is a new interface, not an import
-cycle break. The full graph is in [Repository Layout](./repo-layout).
-
-## Deployment
+## The components
 
 ```mermaid
 flowchart LR
-    DF["Dockerfile: one build stage"] --> IN["image swarm-net/node"]
-    DF --> IC["image swarm-net/control-center"]
-    IN --> SEED["service seed"]
-    IN --> NODE["service node, --scale N"]
-    IC --> CCS["service control-center, port 8080"]
-    EP["deploy/node-entrypoint.sh"] --> IN
+    B[Browser] --> F[frontend nginx]
+    F --> CC[control-center]
+    CC --> L1[leader 1]
+    CC --> L2[leader 2]
+    L1 --> W1[worker]
+    L1 --> W2[worker]
+    L2 --> W3[worker]
 ```
 
-`docker compose up --build` starts the CC, `seed`, and 5 replicas of `node`. Each replica derives
-a readable ID from Docker DNS. Details: [Running the Swarm](./running-the-swarm) and
-[Container Images & PID 1](/concepts/container-images-and-pid-1).
+| Component | What it does |
+|---|---|
+| Browser | Runs the dashboard. Talks HTTP and WebSocket to the frontend only. |
+| `frontend` | nginx. Serves the dashboard files and forwards `/api/`, `/healthz` and `/ws` to the Control Center. |
+| `control-center` | API and WebSocket server. Collects telemetry from every node, sends tasks to leaders. |
+| leaders | Accept tasks, hand them to their workers, copy their task list to those workers. |
+| workers | Run tasks. Each one joins the leader it can reach fastest. |
 
-## What is deliberately not here
+Every node also sends telemetry straight to the Control Center. That arrow is left out above to
+keep the picture simple.
 
-- **No consensus algorithm.** This is not Raft. Leaders are elected from health scores, and the
-  system accepts that two partitions may each elect leaders. The comparison to Raft/Paxos, and an
-  honest account of what guarantees we are giving up, is in
-  [Why Not Consensus](/architecture/why-not-consensus).
-- **No persistence.** State lives in memory and is replicated leader-to-worker. A total swarm
-  shutdown loses it. That is a legitimate choice for this system's purpose and an illegitimate one
-  for a database; the docs will say which is which.
-- **No authentication or encryption on the mesh.** The mesh is trusted because it is a private
-  bridge network. Publishing any mesh port to the host would invalidate that assumption, which is
-  why `docker-compose.yml` publishes only the Control Center's HTTP port. The dashboard API has
-  no authentication either; it relies on the WebSocket same-origin check and on binding to a
-  trusted host.
+## How many leaders
 
-## Where to go next
+The leader count grows with the swarm:
 
-- [Repository Layout](./repo-layout) -- what lives where, and why the boundaries fall there.
-- [Failure Detection and Failover](./failure-detection-and-failover) -- suspicion, heartbeats and
-  the failover bound.
-- [Replication and Tasks](./replication-and-tasks) -- `STATE_SYNC` and at-least-once task
-  delivery.
-- [Convergence Debugging](./convergence-debugging) -- two real bugs and what they teach.
-- [The Control Center](./control-center) -- how telemetry, tasks and chaos flow.
-- [Running the Swarm](./running-the-swarm) -- start, scale, break, and test it.
-- [TCP Sockets & The Kernel](/concepts/tcp-sockets-and-the-kernel) -- the substrate everything
-  above is built on.
-- [Stream Framing](/concepts/stream-framing) -- why "send a message" is not an operation TCP
-  offers.
-- [Engineering Worklog](/WORKLOG) -- the decisions and the open questions.
+$$LeaderCount = \max(1, \lceil N \times threshold \rceil)$$
+
+With the default `threshold = 0.3`: 3 nodes give 1 leader, 6 give 2, 10 give 3.
+
+Nodes are ranked by their health score and the best ones lead. The score comes from a pluggable
+interface, `HealthStrategy` (`backend/pkg/health/strategy.go`). The default,
+`LatencyHealthStrategy`, scores round-trip time. In a running node the probe is a `PING`/`PONG`
+over the existing link (`MeshProber`, `backend/pkg/network/prober.go`).
+The cluster code only compares scores (lower is better), so another metric can be dropped in.
+
+## Clusters form by latency
+
+Nobody assigns workers to leaders. Each worker measures every leader and joins the fastest one.
+Clusters can therefore be uneven, and that is intended.
+
+A node changes role as the swarm changes:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Leader: alone at start
+    Leader --> Detached: outranked
+    Detached --> Worker: joined a leader
+    Worker --> Detached: leader lost
+    Worker --> Leader: promoted
+    Detached --> Leader: elected
+```
+
+"Detached" means a worker with no leader yet.
+
+## A task, end to end
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant CC as control-center
+    participant L as leader
+    participant W as worker
+    B->>CC: POST /api/tasks
+    CC->>L: TASK
+    L->>W: TASK
+    W->>L: TASK_RESULT
+    L->>CC: TASK_RESULT
+    CC->>B: task_done event
+```
+
+The browser request goes through nginx first. It is left out of the diagram.
+Details: [Replication and Tasks](./replication-and-tasks) and
+[The Control Center](./control-center).
+
+## Two kinds of traffic
+
+All node-to-node traffic shares one TCP connection per pair, but not one priority.
+
+- **Control traffic:** handshakes, probes, heartbeats, gossip, `STATE_SYNC`. Small and never
+  dropped.
+- **Data traffic:** `TASK` and `TASK_RESULT`. Dropped first when a queue is full, so heartbeats
+  never wait behind work.
+
+See [Backpressure and Bounded Queues](/concepts/backpressure-and-bounded-queues).
+
+## Repository layout
+
+| Path | What it holds |
+|---|---|
+| `backend/` | Go module `swarm-net` |
+| `backend/cmd/swarm-node/` | The node binary. Same for every node. |
+| `backend/cmd/control-center/` | The Control Center binary (API and WebSocket only) |
+| `backend/pkg/protocol/` | Message types and framing. Imports nothing local. |
+| `backend/pkg/network/` | TCP listener, dialer, connection pool, prober |
+| `backend/pkg/health/` | `HealthStrategy` and `LatencyHealthStrategy` |
+| `backend/pkg/cluster/` | Membership, election, heartbeats, failover, replication, tasks |
+| `backend/pkg/telemetry/` | A node's link to the Control Center |
+| `backend/pkg/controlcenter/` | The Control Center's hub, node server and HTTP API |
+| `backend/Dockerfile` | Two targets: `node` and `control-center` |
+| `backend/deploy/node-entrypoint.sh` | Gives each scaled replica a readable ID |
+| `frontend/` | Dashboard (`index.html`, `app.js`, `style.css`), `nginx.conf.template`, `Dockerfile` |
+| `docs/` | This site. `package.json` sits at the repo root. |
+| `docker-compose.yml` | Services `frontend`, `control-center`, `seed`, `node` |
+| `.env.example` | Every tunable. Copy it to `.env`. |
+| `scripts/e2e.sh` | End-to-end self-healing test |
+
+Imports only point one way:
+
+```mermaid
+flowchart LR
+    CMD[cmd] --> CC[controlcenter]
+    CMD --> T[telemetry]
+    CC --> T
+    T --> CL[cluster]
+    CL --> H[health]
+    CL --> N[network]
+    N --> P[protocol]
+```
+
+Each package has one reason to change. `protocol` changes with the wire format, `network` with
+connection handling, `health` with a new metric, `cluster` with the algorithm.
+
+## What is deliberately missing
+
+- **No consensus.** Two network partitions can each elect leaders. See
+  [Why Not Consensus](./why-not-consensus).
+- **No persistence.** State lives in memory. Stop every node and it is gone.
+- **No mesh authentication.** The mesh runs on a private Docker network and its port is never
+  published. Only the frontend port is published, bound to `127.0.0.1` by default.
+
+## Read next
+
+1. [The Mesh and the Handshake](./mesh-and-handshake)
+2. [Failure Detection and Failover](./failure-detection-and-failover)
+3. [Replication and Tasks](./replication-and-tasks)
+4. [The Control Center](./control-center)
+5. [Running the Swarm](./running-the-swarm)
+6. [Why Not Consensus](./why-not-consensus)
