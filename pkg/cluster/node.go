@@ -1045,10 +1045,10 @@ func (n *Node) sendView(ctx context.Context, to protocol.NodeID, view View) {
 // score reports, and redrawing on each would keep resetting the cursor and
 // quietly turn the bound back into random selection.
 //
-// The view includes our own record. That record is first-hand, and receivers
-// trust a role only when rec.ID is the sender, so gossip repairs our own role
-// and score at every peer within a cycle. It cannot repair a role we merely
-// relay; that stays the owner's job.
+// The view includes every record we hold, each carrying its member's Seq.
+// Receivers accept a role or score only from a newer Seq, whoever relays it, so
+// gossip repairs any member's latest self-report within a cycle, and a stale
+// relay can never overwrite a fresher one.
 func (n *Node) gossipRound(ctx context.Context) {
 	view := n.table.Snapshot()
 	if view.Version != n.gossipVersion {

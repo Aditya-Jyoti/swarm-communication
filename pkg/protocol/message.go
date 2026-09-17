@@ -72,7 +72,7 @@ const (
 	TypePong MessageType = "PONG"
 
 	// TypeHeartbeat is a leader's liveness beat to its workers. Carries
-	// HeartbeatPayload. K consecutive misses trigger failover in Phase 4.
+	// HeartbeatPayload. K beat-less intervals make the worker fail over.
 	TypeHeartbeat MessageType = "HEARTBEAT"
 	// TypeHeartbeatAck is a worker's acknowledgement of a heartbeat, which is how a
 	// leader learns its cluster is still attached. Carries HeartbeatAckPayload.
@@ -296,9 +296,9 @@ type PongPayload struct {
 
 // HeartbeatPayload is a leader's liveness beat to an attached worker.
 type HeartbeatPayload struct {
-	// Seq increments per beat on this link. A worker counts *gaps* in Seq, not
-	// merely elapsed silence, which distinguishes "the leader is slow" from "the
-	// leader stopped".
+	// Seq increments per beat on this link. Diagnostic only: a worker counts
+	// failure-detector ticks without a valid beat, not gaps in Seq, to decide
+	// that its leader has stopped.
 	Seq uint64 `json:"seq"`
 	// Term is the election term this leader believes it holds. A worker receiving a
 	// heartbeat from an older term is looking at a leader that has not yet learned
