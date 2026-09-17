@@ -97,9 +97,11 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 		return fmt.Errorf("control-center: listen http on %s: %w", cfg.HTTPListen, err)
 	}
 	cc, err := controlcenter.New(controlcenter.Config{
-		NodeListen: cfg.NodeListen,
-		APIToken:   cfg.APIToken,
-		Logger:     log,
+		NodeListen:  cfg.NodeListen,
+		APIToken:    cfg.APIToken,
+		SimDisabled: !cfg.SimEnabled,
+		SimParams:   &cfg.SimParams,
+		Logger:      log,
 	})
 	if err != nil {
 		_ = httpLn.Close()

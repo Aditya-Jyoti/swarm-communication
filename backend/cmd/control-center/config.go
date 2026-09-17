@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"swarm-net/pkg/controlcenter"
+	"swarm-net/pkg/geo"
 )
 
 // errConfig is wrapped by every configuration failure so exitCode can map it
@@ -36,6 +37,14 @@ type Config struct {
 	// APIToken, if set, is required on mutating API calls.
 	// SWARM_CC_API_TOKEN, environment only: a flag would expose it in `ps`.
 	APIToken string
+	// SimEnabled starts the drone simulation's emulated latency switched on.
+	// SWARM_SIM_ENABLED, default true.
+	SimEnabled bool
+	// SimParams is the starting latency model. SWARM_SIM_BASE_MS,
+	// SWARM_SIM_PER_UNIT_MS and SWARM_SIM_JITTER_MS; defaults from geo.
+	// Out of range is a config error here, unlike the API, which clamps: a
+	// typo in a compose file should stop the CC, not be quietly corrected.
+	SimParams geo.Params
 	// Version is set by -version; nothing else is meaningful then.
 	Version bool
 }
@@ -48,7 +57,13 @@ var settings = []setting{
 	{"listen", "CC_LISTEN", defaultNodeListen, "TCP bind address for node connections"},
 	{"http", "CC_HTTP", defaultHTTPListen, "HTTP bind address for the API and WebSocket"},
 	{"log-level", "LOG_LEVEL", defaultLogLevel, "debug|info|warn|error"},
+	{"sim-enabled", "SIM_ENABLED", "true", "start with emulated drone latency on"},
+	{"sim-base-ms", "SIM_BASE_MS", fmtFloat(geo.DefaultBaseMS), "emulated latency: fixed part, ms"},
+	{"sim-per-unit-ms", "SIM_PER_UNIT_MS", fmtFloat(geo.DefaultPerUnitMS), "emulated latency: ms per unit of distance"},
+	{"sim-jitter-ms", "SIM_JITTER_MS", fmtFloat(geo.DefaultJitterMS), "emulated latency: maximum random extra, ms"},
 }
+
+func fmtFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 
 // Load builds a Config from args, the environment and defaults. Env values
 // seed the flag defaults, so a flag the operator passed wins and one they did
@@ -92,7 +107,36 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	if cfg.LogLevel, err = parseLogLevel(*raw["log-level"]); err != nil {
 		return Config{}, err
 	}
+	if cfg.SimEnabled, err = strconv.ParseBool(strings.TrimSpace(*raw["sim-enabled"])); err != nil {
+		return Config{}, fmt.Errorf("%w: sim-enabled %q: want true or false", errConfig, *raw["sim-enabled"])
+	}
+	for _, f := range []struct {
+		name string
+		max  float64
+		dst  *float64
+	}{
+		{"sim-base-ms", geo.MaxBaseMS, &cfg.SimParams.BaseMS},
+		{"sim-per-unit-ms", geo.MaxPerUnitMS, &cfg.SimParams.PerUnitMS},
+		{"sim-jitter-ms", geo.MaxJitterMS, &cfg.SimParams.JitterMS},
+	} {
+		if *f.dst, err = parseRange(f.name, *raw[f.name], f.max); err != nil {
+			return Config{}, err
+		}
+	}
 	return cfg, nil
+}
+
+// parseRange parses a float in [0, max]. The negated comparison also rejects
+// NaN, which ParseFloat accepts and every ordinary comparison lets through.
+func parseRange(name, raw string, max float64) (float64, error) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s %q: %v", errConfig, name, raw, err)
+	}
+	if !(v >= 0 && v <= max) {
+		return 0, fmt.Errorf("%w: %s %v must be in [0,%v]", errConfig, name, v, max)
+	}
+	return v, nil
 }
 
 // checkBind validates a bind address. An empty host is fine (all interfaces).

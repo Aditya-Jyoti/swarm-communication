@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"swarm-net/pkg/geo"
 	"swarm-net/pkg/protocol"
 )
 
@@ -28,7 +29,8 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (Config{NodeListen: ":7000", HTTPListen: ":8080", LogLevel: slog.LevelInfo}) {
+	simDefaults := geo.DefaultParams()
+	if cfg != (Config{NodeListen: ":7000", HTTPListen: ":8080", LogLevel: slog.LevelInfo, SimEnabled: true, SimParams: simDefaults}) {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 
@@ -37,7 +39,7 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (Config{NodeListen: "0.0.0.0:9000", HTTPListen: ":9090", LogLevel: slog.LevelDebug}) {
+	if cfg != (Config{NodeListen: "0.0.0.0:9000", HTTPListen: ":9090", LogLevel: slog.LevelDebug, SimEnabled: true, SimParams: simDefaults}) {
 		t.Fatalf("env = %+v", cfg)
 	}
 
@@ -95,6 +97,50 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadSim(t *testing.T) {
+	env := map[string]string{
+		"SWARM_SIM_ENABLED":     "false",
+		"SWARM_SIM_BASE_MS":     "0",
+		"SWARM_SIM_PER_UNIT_MS": " 10 ",
+		"SWARM_SIM_JITTER_MS":   "200",
+	}
+	getenv := func(k string) string { return env[k] }
+	cfg, err := Load(nil, getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SimEnabled || cfg.SimParams != (geo.Params{BaseMS: 0, PerUnitMS: 10, JitterMS: 200}) {
+		t.Fatalf("sim from env = %+v %+v", cfg.SimEnabled, cfg.SimParams)
+	}
+	// Flags beat env.
+	cfg, err = Load([]string{"-sim-enabled=1", "-sim-base-ms=2.5"}, getenv)
+	if err != nil || !cfg.SimEnabled || cfg.SimParams.BaseMS != 2.5 || cfg.SimParams.PerUnitMS != 10 {
+		t.Fatalf("sim flags = %+v, %v", cfg, err)
+	}
+
+	for _, args := range [][]string{
+		{"-sim-enabled=maybe"},
+		{"-sim-base-ms=-1"},
+		{"-sim-base-ms=500.1"},
+		{"-sim-per-unit-ms=11"},
+		{"-sim-jitter-ms=NaN"},
+		{"-sim-jitter-ms=+Inf"},
+		{"-sim-jitter-ms=fast"},
+	} {
+		if _, err := Load(args, noEnv); !errors.Is(err, errConfig) || exitCode(err) != exitConfig {
+			t.Errorf("Load(%v) = %v, want config error", args, err)
+		}
+	}
+	if _, err := Load(nil, func(k string) string {
+		if k == "SWARM_SIM_PER_UNIT_MS" {
+			return "-0.5"
+		}
+		return ""
+	}); !errors.Is(err, errConfig) {
+		t.Errorf("negative env = %v, want config error", err)
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	if exitCode(nil) != exitOK || exitCode(errors.New("x")) != exitRuntime || exitCode(errConfig) != exitConfig {
 		t.Fatal("exit code mapping wrong")
@@ -126,7 +172,8 @@ func TestRunEndToEnd(t *testing.T) {
 	type addrs struct{ node, http net.Addr }
 	ready := make(chan addrs, 1)
 	done := make(chan error, 1)
-	cfg := Config{NodeListen: "127.0.0.1:0", HTTPListen: "127.0.0.1:0", LogLevel: slog.LevelDebug}
+	cfg := Config{NodeListen: "127.0.0.1:0", HTTPListen: "127.0.0.1:0", LogLevel: slog.LevelDebug,
+		SimEnabled: true, SimParams: geo.Params{BaseMS: 4, PerUnitMS: 1, JitterMS: 0}}
 	go func() {
 		done <- run(ctx, cfg, &logs, func(n, h net.Addr) { ready <- addrs{n, h} })
 	}()
@@ -148,6 +195,16 @@ func TestRunEndToEnd(t *testing.T) {
 	resp.Body.Close()
 	if string(body) != "ok" {
 		t.Fatalf("/healthz = %q", body)
+	}
+	// The sim settings reach the hub.
+	resp, err = http.Get(base + "/api/sim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"enabled":true,"base_ms":4,"per_unit_ms":1,"jitter_ms":0,`) {
+		t.Fatalf("/api/sim = %s", body)
 	}
 	// "/" points at the frontend; the CC no longer serves the dashboard.
 	resp, err = http.Get(base + "/")
