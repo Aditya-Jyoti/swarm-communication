@@ -110,6 +110,20 @@ type app struct {
 	setDelays func(d time.Duration)
 }
 
+// uplinkIdleFloor is the smallest read deadline the Control Center link may
+// use. The CC is the only sender of unsolicited traffic on that link and it
+// PINGs every 5s (controlcenter.DefaultKeepAlive), so a deadline equal to the
+// ping period reaps a healthy link whenever a ping is a few milliseconds late.
+// Three periods tolerates two lost or late pings.
+const uplinkIdleFloor = 15 * time.Second
+
+// uplinkIdleTimeout decouples the CC link's idle timeout from the mesh's. A
+// short mesh timeout (Compose runs 5s to make failover visible) is right for
+// peers that heartbeat every 500ms and wrong for a link pinged every 5s.
+func uplinkIdleTimeout(mesh time.Duration) time.Duration {
+	return max(mesh, uplinkIdleFloor)
+}
+
 // newApp builds and binds everything but dials nobody and runs no loop.
 //
 // # Construction order
@@ -189,7 +203,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 				return node.SubmitTask(ctx, t)
 			},
 			OnChaos: a.applyChaos,
-			Conn:    network.ConnConfig{IdleTimeout: cfg.IdleTimeout},
+			Conn:    network.ConnConfig{IdleTimeout: uplinkIdleTimeout(cfg.IdleTimeout)},
 			Logger:  base,
 		})
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"swarm-net/pkg/controlcenter"
 	"swarm-net/pkg/protocol"
 	"swarm-net/pkg/telemetry"
 )
@@ -276,4 +277,19 @@ func (w *syncWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.b.String()
+}
+
+func TestUplinkIdleTimeoutNeverUndercutsKeepAlive(t *testing.T) {
+	for _, tc := range []struct{ mesh, want time.Duration }{
+		{0, uplinkIdleFloor},
+		{5 * time.Second, uplinkIdleFloor},
+		{time.Minute, time.Minute},
+	} {
+		if got := uplinkIdleTimeout(tc.mesh); got != tc.want {
+			t.Errorf("uplinkIdleTimeout(%v) = %v, want %v", tc.mesh, got, tc.want)
+		}
+	}
+	if uplinkIdleFloor < 3*controlcenter.DefaultKeepAlive {
+		t.Errorf("floor %v is under three CC keep-alive periods (%v)", uplinkIdleFloor, controlcenter.DefaultKeepAlive)
+	}
 }
