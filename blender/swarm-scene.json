@@ -1,0 +1,1526 @@
+{
+  "schema": "swarm-scene/1",
+  "_doc": {
+    "what": "One self-describing snapshot of the swarm, enough to build or update a Blender scene.",
+    "coordinates": "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks metres, Z up. Every drone therefore carries BOTH: position_units (what you POST to /api/sim to move it) and location_m (what goes in object.location). world.metres_per_unit is the only conversion factor; X and Y are centred on the origin, Z stays an altitude above the ground plane.",
+    "latency": "The Control Center emulates network latency from distance: a drone delays its PONG by base + distance * per_unit + jitter. Election ranks drones by their median measured RTT, so central drones become leaders, and every worker joins the leader it measures as closest. links[].rtt_ms is what was really measured; links[].predicted_one_way_ms is what the model asks for. A measured round trip is about one one-way delay plus real network time.",
+    "editing": "This file is a snapshot, not the source of truth. To MOVE a drone, POST its position_units to the Control Center (see write_back) and the swarm re-groups for real; the next snapshot then shows it. Editing location_m here only moves the render.",
+    "animation": "timeline is optional. With --frames the generator samples repeatedly and records one entry per sample, so the Blender add-on can key positions, roles and cluster colours over time and you can watch a failover as an animation."
+  },
+  "meta": {
+    "generated_at": "2026-09-17T18:19:07+00:00",
+    "generator": "blender/make_swarm_scene.py",
+    "source_url": "http://127.0.0.1:8080/api/state",
+    "sim_version": 1789649647639,
+    "node_count": 6,
+    "leader_count": 2
+  },
+  "world": {
+    "_doc": "Airspace and unit conversion. size is in swarm units; the cube is size^3.",
+    "size_units": 100,
+    "metres_per_unit": 20.0,
+    "size_m": 2000.0,
+    "up_axis": "Z",
+    "ground_z_m": 0.0,
+    "fps": 24
+  },
+  "sim": {
+    "_doc": "The live latency model. Change these through /api/sim, never by editing this file.",
+    "enabled": true,
+    "base_ms": 1,
+    "per_unit_ms": 2,
+    "jitter_ms": 0.5,
+    "max_delay_ms": 1500,
+    "threshold_override": 0,
+    "hysteresis_override": -1,
+    "version": 1789649647639
+  },
+  "clusters": [
+    {
+      "leader": "swarm-net-node-3",
+      "colour": [
+        0.2,
+        0.6,
+        0.95,
+        1.0
+      ],
+      "members": [
+        "swarm-net-node-2"
+      ]
+    },
+    {
+      "leader": "swarm-net-node-5",
+      "colour": [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      "members": [
+        "seed",
+        "swarm-net-node-1",
+        "swarm-net-node-4"
+      ]
+    }
+  ],
+  "drones": [
+    {
+      "id": "seed",
+      "object_name": "Drone_seed",
+      "role": "worker",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-5",
+      "cluster_colour": [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 21.8508,
+        "y": 81.1883,
+        "z": 38.9394
+      },
+      "location_m": [
+        -562.9848,
+        623.7667,
+        778.7872
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 701
+      }
+    },
+    {
+      "id": "swarm-net-node-1",
+      "object_name": "Drone_swarm-net-node-1",
+      "role": "worker",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-5",
+      "cluster_colour": [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 43.0789,
+        "y": 19.3343,
+        "z": 75.467
+      },
+      "location_m": [
+        -138.4214,
+        -613.3142,
+        1509.3397
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 270
+      }
+    },
+    {
+      "id": "swarm-net-node-2",
+      "object_name": "Drone_swarm-net-node-2",
+      "role": "worker",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-3",
+      "cluster_colour": [
+        0.2,
+        0.6,
+        0.95,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 38.7023,
+        "y": 41.5998,
+        "z": 17.7777
+      },
+      "location_m": [
+        -225.9533,
+        -168.0038,
+        355.555
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 468
+      }
+    },
+    {
+      "id": "swarm-net-node-3",
+      "object_name": "Drone_swarm-net-node-3",
+      "role": "leader",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-3",
+      "cluster_colour": [
+        0.2,
+        0.6,
+        0.95,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 53.0511,
+        "y": 37.6947,
+        "z": 36.3105
+      },
+      "location_m": [
+        61.0226,
+        -246.1055,
+        726.2098
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 366
+      }
+    },
+    {
+      "id": "swarm-net-node-4",
+      "object_name": "Drone_swarm-net-node-4",
+      "role": "worker",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-5",
+      "cluster_colour": [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 42.0,
+        "y": 57.0,
+        "z": 62.0
+      },
+      "location_m": [
+        -160.0,
+        140.0,
+        1240.0
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 536
+      }
+    },
+    {
+      "id": "swarm-net-node-5",
+      "object_name": "Drone_swarm-net-node-5",
+      "role": "leader",
+      "state": "alive",
+      "connected": true,
+      "leader": "swarm-net-node-5",
+      "cluster_colour": [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      "state_colour": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "position_units": {
+        "x": 40.5126,
+        "y": 55.1979,
+        "z": 58.7172
+      },
+      "location_m": [
+        -189.749,
+        103.9578,
+        1174.3441
+      ],
+      "telemetry": {
+        "term": 8,
+        "ledger_size": 0,
+        "dropped": 0,
+        "degraded": false,
+        "threshold": 0.3,
+        "hysteresis": 0.5,
+        "sim_version": 1789649647639,
+        "last_seen_ms": 621
+      }
+    }
+  ],
+  "links": [
+    {
+      "from": "seed",
+      "to": "swarm-net-node-1",
+      "kind": "peer",
+      "distance_units": 74.905,
+      "distance_m": 1498.109,
+      "rtt_ms": 152.015,
+      "predicted_one_way_ms": 151.061
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-2",
+      "kind": "peer",
+      "distance_units": 47.948,
+      "distance_m": 958.966,
+      "rtt_ms": 97.939,
+      "predicted_one_way_ms": 97.147
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-3",
+      "kind": "peer",
+      "distance_units": 53.592,
+      "distance_m": 1071.834,
+      "rtt_ms": 108.951,
+      "predicted_one_way_ms": 108.433
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-4",
+      "kind": "peer",
+      "distance_units": 39.024,
+      "distance_m": 780.477,
+      "rtt_ms": 80.186,
+      "predicted_one_way_ms": 79.298
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-5",
+      "kind": "cluster",
+      "distance_units": 37.616,
+      "distance_m": 752.311,
+      "rtt_ms": 77.459,
+      "predicted_one_way_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-2",
+      "kind": "peer",
+      "distance_units": 61.992,
+      "distance_m": 1239.832,
+      "rtt_ms": 126.414,
+      "predicted_one_way_ms": 125.233
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-3",
+      "kind": "peer",
+      "distance_units": 44.382,
+      "distance_m": 887.644,
+      "rtt_ms": 90.663,
+      "predicted_one_way_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-4",
+      "kind": "peer",
+      "distance_units": 40.015,
+      "distance_m": 800.307,
+      "rtt_ms": 82.067,
+      "predicted_one_way_ms": 81.281
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-5",
+      "kind": "cluster",
+      "distance_units": 39.665,
+      "distance_m": 793.307,
+      "rtt_ms": 81.408,
+      "predicted_one_way_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-3",
+      "kind": "cluster",
+      "distance_units": 23.761,
+      "distance_m": 475.226,
+      "rtt_ms": 49.391,
+      "predicted_one_way_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-4",
+      "kind": "peer",
+      "distance_units": 46.943,
+      "distance_m": 938.861,
+      "rtt_ms": 96.021,
+      "predicted_one_way_ms": 95.136
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-5",
+      "kind": "peer",
+      "distance_units": 43.177,
+      "distance_m": 863.533,
+      "rtt_ms": 88.434,
+      "predicted_one_way_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-4",
+      "kind": "peer",
+      "distance_units": 33.982,
+      "distance_m": 679.639,
+      "rtt_ms": 70.247,
+      "predicted_one_way_ms": 69.214
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-5",
+      "kind": "peer",
+      "distance_units": 31.075,
+      "distance_m": 621.494,
+      "rtt_ms": 64.397,
+      "predicted_one_way_ms": 63.399
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-5",
+      "kind": "cluster",
+      "distance_units": 4.029,
+      "distance_m": 80.59,
+      "rtt_ms": 10.224,
+      "predicted_one_way_ms": 9.309
+    }
+  ],
+  "messages": [
+    {
+      "from": "seed",
+      "to": "swarm-net-node-5",
+      "type": "HEARTBEAT_ACK",
+      "count": 2,
+      "colour": [
+        0.45,
+        0.85,
+        0.55,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-1",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 151.061
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-2",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 97.147
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-3",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 108.433
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-4",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 79.298
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-5",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "seed",
+      "to": "swarm-net-node-5",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-5",
+      "type": "HEARTBEAT_ACK",
+      "count": 2,
+      "colour": [
+        0.45,
+        0.85,
+        0.55,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "seed",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 151.061
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "seed",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 151.061
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-2",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 125.233
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-2",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 125.233
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-3",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-3",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-4",
+      "type": "MEMBERSHIP_DELTA",
+      "count": 1,
+      "colour": [
+        0.85,
+        0.55,
+        0.15,
+        1.0
+      ],
+      "flight_ms": 81.281
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-4",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 81.281
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-4",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 81.281
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-5",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-1",
+      "to": "swarm-net-node-5",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-3",
+      "type": "HEARTBEAT_ACK",
+      "count": 2,
+      "colour": [
+        0.45,
+        0.85,
+        0.55,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "seed",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 97.147
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "seed",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 97.147
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-1",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 125.233
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-1",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 125.233
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-3",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-3",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-4",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 95.136
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-4",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 95.136
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-5",
+      "type": "MEMBERSHIP_DELTA",
+      "count": 1,
+      "colour": [
+        0.85,
+        0.55,
+        0.15,
+        1.0
+      ],
+      "flight_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-5",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-2",
+      "to": "swarm-net-node-5",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-2",
+      "type": "HEARTBEAT",
+      "count": 2,
+      "colour": [
+        0.15,
+        0.75,
+        0.42,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "seed",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 108.433
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "seed",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 108.433
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-1",
+      "type": "MEMBERSHIP_DELTA",
+      "count": 1,
+      "colour": [
+        0.85,
+        0.55,
+        0.15,
+        1.0
+      ],
+      "flight_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-1",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-1",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 90.014
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-2",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-2",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-2",
+      "type": "STATE_SYNC",
+      "count": 1,
+      "colour": [
+        0.25,
+        0.65,
+        0.7,
+        1.0
+      ],
+      "flight_ms": 48.773
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-4",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 69.214
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-4",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 69.214
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-5",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 63.399
+    },
+    {
+      "from": "swarm-net-node-3",
+      "to": "swarm-net-node-5",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 63.399
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-5",
+      "type": "HEARTBEAT_ACK",
+      "count": 2,
+      "colour": [
+        0.45,
+        0.85,
+        0.55,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "seed",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 79.298
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-1",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 81.281
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-2",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 95.136
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-3",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 69.214
+    },
+    {
+      "from": "swarm-net-node-4",
+      "to": "swarm-net-node-5",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "seed",
+      "type": "HEARTBEAT",
+      "count": 2,
+      "colour": [
+        0.15,
+        0.75,
+        0.42,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-1",
+      "type": "HEARTBEAT",
+      "count": 2,
+      "colour": [
+        0.15,
+        0.75,
+        0.42,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-4",
+      "type": "HEARTBEAT",
+      "count": 2,
+      "colour": [
+        0.15,
+        0.75,
+        0.42,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "seed",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "seed",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "seed",
+      "type": "STATE_SYNC",
+      "count": 1,
+      "colour": [
+        0.25,
+        0.65,
+        0.7,
+        1.0
+      ],
+      "flight_ms": 76.481
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-1",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-1",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-1",
+      "type": "STATE_SYNC",
+      "count": 1,
+      "colour": [
+        0.25,
+        0.65,
+        0.7,
+        1.0
+      ],
+      "flight_ms": 80.581
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-2",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-2",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 87.603
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-3",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 63.399
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-3",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 63.399
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-4",
+      "type": "MEMBERSHIP_DELTA",
+      "count": 1,
+      "colour": [
+        0.85,
+        0.55,
+        0.15,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-4",
+      "type": "PING",
+      "count": 1,
+      "colour": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-4",
+      "type": "PONG",
+      "count": 1,
+      "colour": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "flight_ms": 9.309
+    },
+    {
+      "from": "swarm-net-node-5",
+      "to": "swarm-net-node-4",
+      "type": "STATE_SYNC",
+      "count": 1,
+      "colour": [
+        0.25,
+        0.65,
+        0.7,
+        1.0
+      ],
+      "flight_ms": 9.309
+    }
+  ],
+  "tasks": [],
+  "legend": {
+    "_doc": "Colour keys, shared with the dashboard so a render matches the web UI.",
+    "message_colours": {
+      "PING": [
+        0.18,
+        0.55,
+        0.92,
+        1.0
+      ],
+      "PONG": [
+        0.35,
+        0.72,
+        0.98,
+        1.0
+      ],
+      "HEARTBEAT": [
+        0.15,
+        0.75,
+        0.42,
+        1.0
+      ],
+      "HEARTBEAT_ACK": [
+        0.45,
+        0.85,
+        0.55,
+        1.0
+      ],
+      "MEMBERSHIP_DELTA": [
+        0.85,
+        0.55,
+        0.15,
+        1.0
+      ],
+      "ELECTION_RESULT": [
+        0.9,
+        0.3,
+        0.3,
+        1.0
+      ],
+      "JOIN_CLUSTER": [
+        0.7,
+        0.45,
+        0.9,
+        1.0
+      ],
+      "JOIN_ACK": [
+        0.8,
+        0.6,
+        0.95,
+        1.0
+      ],
+      "STATE_SYNC": [
+        0.25,
+        0.65,
+        0.7,
+        1.0
+      ],
+      "TASK": [
+        0.95,
+        0.8,
+        0.2,
+        1.0
+      ],
+      "TASK_RESULT": [
+        0.95,
+        0.9,
+        0.55,
+        1.0
+      ],
+      "LEAVE": [
+        0.55,
+        0.55,
+        0.55,
+        1.0
+      ],
+      "SIM_CONFIG": [
+        0.6,
+        0.6,
+        0.75,
+        1.0
+      ]
+    },
+    "state_colours": {
+      "alive": [
+        0.85,
+        0.87,
+        0.9,
+        1.0
+      ],
+      "suspect": [
+        0.95,
+        0.75,
+        0.25,
+        1.0
+      ],
+      "dead": [
+        0.35,
+        0.35,
+        0.38,
+        1.0
+      ],
+      "killed": [
+        0.25,
+        0.25,
+        0.27,
+        1.0
+      ],
+      "disconnected": [
+        0.45,
+        0.45,
+        0.48,
+        1.0
+      ]
+    },
+    "cluster_colours": [
+      [
+        0.2,
+        0.6,
+        0.95,
+        1.0
+      ],
+      [
+        0.95,
+        0.45,
+        0.25,
+        1.0
+      ],
+      [
+        0.35,
+        0.8,
+        0.45,
+        1.0
+      ],
+      [
+        0.8,
+        0.4,
+        0.85,
+        1.0
+      ],
+      [
+        0.95,
+        0.75,
+        0.2,
+        1.0
+      ],
+      [
+        0.3,
+        0.75,
+        0.8,
+        1.0
+      ]
+    ]
+  },
+  "write_back": {
+    "_doc": "How to push a change back into the running swarm. The Blender add-on uses this when you drag a drone and press Push; the dashboard's Advanced panel sends the same request.",
+    "endpoint": "POST {base}/api/sim",
+    "content_type": "application/json",
+    "move_example": {
+      "positions": {
+        "<drone id>": {
+          "x": 10.0,
+          "y": 80.0,
+          "z": 35.0
+        }
+      }
+    },
+    "model_example": {
+      "base_ms": 1,
+      "per_unit_ms": 3.5,
+      "jitter_ms": 0.5
+    },
+    "election_example": {
+      "threshold": 0.5,
+      "hysteresis": 0.5
+    },
+    "clear_overrides_example": {
+      "threshold": 0,
+      "hysteresis": -1
+    },
+    "kill_example": {
+      "endpoint": "POST {base}/api/chaos",
+      "body": {
+        "node": "<drone id>",
+        "action": "kill"
+      }
+    },
+    "notes": [
+      "Positions are in swarm units (0..100), not metres: divide metres by world.metres_per_unit.",
+      "A killed drone stays dead; bring it back with `docker compose up -d`."
+    ]
+  },
+  "blender": {
+    "_doc": "Hints for the add-on. Safe to edit: they change the render, not the swarm.",
+    "collection": "Swarm",
+    "drone_mesh": "cone",
+    "drone_size_m": 12.0,
+    "label_drones": true,
+    "draw_links": "cluster",
+    "draw_ground_grid": true,
+    "animate_messages": true,
+    "sync": {
+      "mode": "poll",
+      "url": "http://127.0.0.1:8080/api/state",
+      "interval_s": 1.0,
+      "_doc": "The add-on re-fetches this URL on a timer and moves the objects, so a slider change in the dashboard shows up in Blender within interval_s."
+    }
+  }
+}
