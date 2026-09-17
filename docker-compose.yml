@@ -82,6 +82,8 @@ services:
         condition: service_started
 
 networks:
+  # Compose names it "<project>_swarmnet". No fixed `name:` on purpose: a fixed
+  # name would make two projects (a dev stack and scripts/e2e.sh, which uses its
+  # own project) fight over one network.
   swarmnet:
-    name: swarmnet
     driver: bridge
