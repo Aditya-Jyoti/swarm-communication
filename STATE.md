@@ -30,8 +30,8 @@ chaos delay / kill                 node degraded / node restarts and rejoins
 hash task                          correct SHA-256
 ```
 
-`TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst` passed 3 of 3 runs locally at `-cpu 1`,
-but CI has seen it time out (see Open items).
+The simultaneous-dial tests pass 18,000 runs at `-cpu 1,2,4` on 2 loaded cores after
+`1aa504d` (see Worklog 6.11).
 
 ## What landed this session
 
@@ -53,9 +53,8 @@ but CI has seen it time out (see Open items).
 
 ## Open items
 
-1. **Flaky test, OPEN.** `TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst`
-   (`pkg/network`) times out at `-cpu 1` on CI. A debug agent is investigating it. No fix is
-   in the log yet.
+1. **Flaky dial test: FIXED** (`1aa504d` plus 4 test fixes). Keep stressing `pkg/network`
+   at `-cpu 1` under load after any pool change.
 2. **MEDIUM-1**, deferred by the user. A poisoned peer keeps its connection but stays dead
    (WORKLOG 5.2). Gossip may mitigate it, but that is untested.
 3. **A death at `MaxInt64` cannot be refuted.** Needs a bound on accepted incarnations, or
@@ -74,7 +73,7 @@ but CI has seen it time out (see Open items).
 
 ## Suggested next session
 
-1. Close or quarantine the flaky dial test (item 1).
+1. Watch CI for any remaining flake at `-cpu 1`.
 2. The user decides on MEDIUM-1, and whether the tombstone TTL should grow with N.
 3. `doc-educator`: pages for the two concepts nominated in WORKLOG 6.10.
 
