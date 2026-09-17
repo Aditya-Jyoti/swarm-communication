@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -340,6 +341,43 @@ type MemberRecord struct {
 	Incarnation int64  `json:"incarnation"`
 	Role        string `json:"role"`  // "leader" | "worker"
 	State       string `json:"state"` // "alive" | "suspect" | "dead"
+	// Score is the node's SELF-REPORTED health cost (lower is better), in the
+	// units of the swarm's shared health strategy. It is what election ranks on.
+	//
+	// It must be self-reported, not measured by the sender about the subject: a
+	// round trip is observer-relative (A's RTT to B is not C's RTT to B), so an
+	// election run on locally measured scores gives every node a different
+	// answer and views never converge. A value every node computes about itself
+	// the same way is the cheapest input that is symmetric across observers.
+	//
+	// On the wire, UnmeasuredScore (-1) means "no measurement yet". JSON cannot
+	// carry NaN or Inf, so MarshalJSON substitutes it; receivers must treat a
+	// negative score as unmeasured, never as excellent.
+	Score float64 `json:"score"`
+}
+
+// UnmeasuredScore is the wire value of MemberRecord.Score for a node that has no
+// measurement. Negative on purpose: no real cost is negative, so it cannot be
+// confused with a measurement, and it is not a magic large number that would
+// sort somewhere plausible.
+const UnmeasuredScore = -1
+
+// MarshalJSON sanitises Score. encoding/json rejects NaN and Inf outright, and a
+// single unmeasured member would otherwise fail the encode of a whole delta --
+// silently, as a dropped frame -- so the substitution is done here where every
+// sender passes through it.
+func (r MemberRecord) MarshalJSON() ([]byte, error) {
+	type alias MemberRecord
+	a := alias(r)
+	if math.IsNaN(a.Score) || math.IsInf(a.Score, 0) || a.Score < 0 {
+		a.Score = UnmeasuredScore
+	}
+	return json.Marshal(a)
+}
+
+// Measured reports whether Score carries a real measurement.
+func (r MemberRecord) Measured() bool {
+	return r.Score >= 0 && !math.IsNaN(r.Score) && !math.IsInf(r.Score, 0)
 }
 
 // MembershipDeltaPayload carries a set of member records that the sender believes
