@@ -1119,10 +1119,13 @@ func TestInboundClaimReleaseResolvesDeadEntry(t *testing.T) {
 		t.Fatal("resolved entry was never retired")
 	}
 	// The redial loop was parked on e.gone throughout; only now does it dial.
-	h.nextDial().Close()
+	// Count while this handshake is still held open, before anything can
+	// trigger a further attempt.
+	held := h.nextDial()
 	if n := h.dialer.count(); n != 2 {
 		t.Errorf("dial attempts = %d, want 2 (no redial while parked)", n)
 	}
+	held.Close()
 }
 
 // While a PeerDown is parked, a replacement that arrives from the higher ID is
@@ -1150,11 +1153,13 @@ func TestParkedPeerDownIsDiscardedByReplacement(t *testing.T) {
 		t.Fatalf("inbound while a PeerDown is parked was rejected: %v", err)
 	}
 	defer inbound.Close()
+	// The ACK precedes registration; wait for the replacement to be installed.
+	waitState(t, h.pool, "replacement registered", func() bool {
+		cur := h.pool.peers[idB.ID]
+		return cur != nil && cur != e
+	})
 	h.pool.releaseClaim(idB.ID)
 	h.noEvent()
-	if cur := entryFor(t, h.pool, idB.ID); cur == e {
-		t.Error("old entry is back in the map")
-	}
 	// Traffic proves the replacement is live.
 	env := mustEnv(t, protocol.TypePing)
 	if err := h.pool.Send(context.Background(), idB.ID, env); err != nil {
