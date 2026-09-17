@@ -41,7 +41,7 @@ func TestFailoverConvergesAfterLeaderCrash(t *testing.T) {
 			s.run(15*time.Second, nil)
 			before := s.check()
 			if len(before.problems) > 0 {
-				t.Fatalf("not converged before the crash: %v", before.problems)
+				t.Fatalf("seed %d: not converged before the crash: %v\n%s", seed, before.problems, s.dump())
 			}
 			if len(before.leaders) != 2 {
 				t.Fatalf("leaders = %v, want 2", before.leaders)
@@ -114,16 +114,16 @@ func TestFailoverConvergesAfterLeaderCrash(t *testing.T) {
 					converged = s.elapsed - crashedAt
 					last = c
 				case converged >= 0 && !ok:
-					t.Fatalf("t=+%v: diverged after converging at +%v: %v, leaders %v, missing %v",
-						s.elapsed-crashedAt, converged, c.problems, c.leaders, missing)
+					t.Fatalf("seed %d: t=+%v: diverged after converging at +%v: %v, leaders %v, missing %v\n%s", seed,
+						s.elapsed-crashedAt, converged, c.problems, c.leaders, missing, s.dump())
 				case converged >= 0 && !equalIDs(c.leaders, last.leaders):
-					t.Fatalf("t=+%v: leaders moved %v -> %v after converging", s.elapsed-crashedAt, last.leaders, c.leaders)
+					t.Fatalf("seed %d: t=+%v: leaders moved %v -> %v after converging\n%s", seed, s.elapsed-crashedAt, last.leaders, c.leaders, s.dump())
 				case converged < 0:
 					last, lastMissing = c, missing
 				}
 			})
 			if converged < 0 {
-				t.Fatalf("never converged: %v, leaders %v, missing %v", last.problems, last.leaders, lastMissing)
+				t.Fatalf("seed %d: never converged: %v, leaders %v, missing %v\n%s", seed, last.problems, last.leaders, lastMissing, s.dump())
 			}
 			if converged > failoverBound {
 				t.Fatalf("converged at +%v, bound %v", converged, failoverBound)

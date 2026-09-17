@@ -153,6 +153,25 @@ func (f *FakeClock) awaitTimers(n int) {
 // way in deadline order. It returns only when every fired tick has been received or
 // its ticker stopped. Advancing with nothing registered simply moves the clock.
 func (f *FakeClock) Advance(d time.Duration) {
+	f.advanceStepwise(d, nil)
+}
+
+// advanceStepwise is Advance with a hook: after each delivered tick it calls
+// between (if non-nil) before looking for the next due timer.
+//
+// # Why Advance alone is not enough for a deterministic simulation
+//
+// Advance waits until each tick is *received*, not until the receiver has
+// finished what the tick started. When several timers share a deadline (the
+// node's 1s probe, 2s gossip and 500ms failure-detector tickers all meet at
+// every even second), the probe tick starts a round on other goroutines, and
+// by the time Advance offers the gossip tick the round's result may or may not
+// be waiting too. The loop's select then picks between them at random, so
+// whether a new self-score is announced before or after that instant's gossip
+// and beats depends on the scheduler. A test that settles the node inside
+// between gets one fixed order: each tick's consequences, probe round included,
+// are complete before the next tick at the same instant is delivered.
+func (f *FakeClock) advanceStepwise(d time.Duration, between func()) {
 	if d < 0 {
 		panic("cluster: FakeClock.Advance: negative duration")
 	}
@@ -185,6 +204,11 @@ func (f *FakeClock) Advance(d time.Duration) {
 		select {
 		case w.ch <- fireAt:
 		case <-w.stopped:
+		}
+		// Also unlocked: between typically waits on the receiving loop, which
+		// may itself need mu.
+		if between != nil {
+			between()
 		}
 
 		f.mu.Lock()
