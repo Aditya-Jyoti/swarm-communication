@@ -86,6 +86,11 @@ func TestParseChaos(t *testing.T) {
 		{protocol.ChaosPayload{Action: "delay", DelayMS: 5000}, Chaos{Action: ChaosDelay, Delay: MaxChaosDelay}, false},
 		{protocol.ChaosPayload{Action: "delay", DelayMS: 5001}, Chaos{}, true},
 		{protocol.ChaosPayload{Action: "delay", DelayMS: -1}, Chaos{}, true},
+		// DelayMS * 1ms overflows int64 for these. The first wraps negative,
+		// the second wraps to ~448us; both used to be accepted.
+		{protocol.ChaosPayload{Action: "delay", DelayMS: 9223372036855}, Chaos{}, true},
+		{protocol.ChaosPayload{Action: "delay", DelayMS: 18446744073710}, Chaos{}, true},
+		{protocol.ChaosPayload{Action: "delay", DelayMS: math.MaxInt}, Chaos{}, true},
 		{protocol.ChaosPayload{Action: "reboot"}, Chaos{}, true},
 		{protocol.ChaosPayload{}, Chaos{}, true},
 	}
