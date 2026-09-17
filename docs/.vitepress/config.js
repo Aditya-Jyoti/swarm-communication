@@ -49,6 +49,7 @@ export default withMermaid(defineConfig({
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
           { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' },
           { text: 'Failure Detection & Failover', link: '/architecture/failure-detection-and-failover' },
+          { text: 'Replication & Tasks', link: '/architecture/replication-and-tasks' },
           { text: 'Control Plane Contract', link: '/architecture/control-plane' },
           { text: 'The Control Center', link: '/architecture/control-center' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' }
