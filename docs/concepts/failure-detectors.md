@@ -76,10 +76,29 @@ answered within 1 ms, a 50 ms silence is $\phi$ of many sigmas and suspicion ris
 routinely takes 40 ms, the same silence is unremarkable. The threshold is on $\phi$, not on a
 count, so the detector adapts per peer. Cassandra and Akka use it.
 
-This swarm ships K-missed-beats. `HEARTBEAT` at `pkg/protocol/message.go:75` says so in its
-comment, and the `Seq` field in `HeartbeatPayload` (`pkg/protocol/message.go:297`) is what
-makes "missed" countable: a worker counts *gaps in sequence*, not elapsed silence alone, so a
-leader that is slow but still beating is distinguishable from one that stopped.
+This swarm chose K-missed-beats, and **it ships in Phase 4**. Today the wire contract exists
+but no code sends or counts a beat:
+
+- `TypeHeartbeat` (`pkg/protocol/message.go:76`) says so in its comment: "K consecutive
+  misses trigger failover in Phase 4".
+- `HeartbeatPayload.Seq` (`pkg/protocol/message.go:302`) is what will make "missed"
+  countable. A worker counts *gaps in sequence*, not elapsed silence alone, so a leader that
+  is slow but still beating is distinguishable from one that stopped.
+
+### What Phase 3 actually does
+
+There is no suspicion and no miss budget yet. A lost link *is* a death:
+
+| Transport event | Phase 3 verdict | Where |
+|---|---|---|
+| clean close or `LEAVE` | dead (departed) | `pkg/cluster/node.go:646`, `pkg/cluster/node.go:909` |
+| protocol violation | dead | `pkg/cluster/node.go:652` |
+| peer died, timeout, other | dead | `pkg/cluster/node.go:657` |
+| undecodable payload | dead | `pkg/cluster/node.go:930` |
+
+All inferred deaths go through one function, `markDead` (`pkg/cluster/node.go:691`), so
+that Phase 4 can insert the suspect step in exactly one place. The detector in Phase 3 is
+therefore the transport's read deadline alone.
 
 ---
 
@@ -91,8 +110,8 @@ leader that is slow but still beating is distinguishable from one that stopped.
 |---|---|---|
 | heartbeat / probe interval $T$ | the sender's ticker | how often evidence arrives |
 | probe timeout $t_p$ | `pkg/health/latency.go:39`, default 2 s | how long one probe waits |
-| read idle timeout $t_{idle}$ | the transport's reader deadline | how long a socket may be silent before it is torn down |
-| miss budget $K$ | the cluster's detector | how many consecutive absences are tolerated |
+| read idle timeout $t_{idle}$ | `pkg/network/conn.go:107`, default 15 s (`pkg/network/conn.go:123`) | how long a socket may be silent before it is torn down |
+| miss budget $K$ | the cluster's detector (Phase 4) | how many consecutive absences are tolerated |
 
 Worst-case detection latency for a clean crash is roughly
 
@@ -127,7 +146,8 @@ ErrProbeCanceled = errors.New("health: probe canceled by caller")
 ```
 
 Only `ErrUnreachable` (which wraps `ErrProbeTimeout`) is a statement about the peer. It records
-a penalty sample of `ProbeTimeout * FailurePenalty` (`pkg/health/latency.go:112`, penalty
+a penalty sample of `ProbeTimeout * FailurePenalty` (`recordFailure`,
+`pkg/health/latency.go:334`, penalty
 default at `pkg/health/latency.go:44`) so that a peer which times out is ranked worse than one
 which answers slowly. That is the coordinated-omission fix described in
 [Latency as a Statistic](/concepts/latency-as-a-statistic), and it is a *completeness* measure:
@@ -145,7 +165,7 @@ exact signature of a network partition, and it starts an election of a cluster t
 until the moment it was asked to stop.
 
 ```go
-// pkg/health/strategy.go:222
+// pkg/health/strategy.go:222 (comment elided)
 func IsCancellation(err error) bool {
 	if err == nil {
 		return false
@@ -182,22 +202,52 @@ default:
 Order matters. `IsCancellation` first, `err != nil` second. Reversed, every shutdown is a
 partition.
 
-### Suspicion as a state, not a bit
+### Suspicion as a state, not a bit (Phase 4)
 
-`pkg/cluster/member.go:44` defines `StateSuspect` between alive and dead. A detector that goes
-straight from alive to dead has no window in which the accused can object. Suspect is that
-window: the swarm gossips "I think X is gone", and X, if it is alive, answers with a higher
-incarnation that overrides the rumour. That mechanism is SWIM's, and it is covered in
-[Gossip and Anti-Entropy](/concepts/gossip-and-anti-entropy). Its effect on this page's terms
-is to buy accuracy without paying for it in $K$: a false suspicion is corrected by the victim
-instead of by waiting longer.
+`StateSuspect` is **defined** at `pkg/cluster/member.go:47`, between alive and dead, and it
+round-trips on the wire. It is **assigned nowhere** in `pkg/` yet. Nothing today moves a
+member into it.
+
+```sh
+$ grep -rn 'StateSuspect' pkg --include='*.go' | grep -v _test
+pkg/cluster/member.go:47:	StateSuspect
+pkg/cluster/member.go:53:	case StateSuspect:
+pkg/cluster/member.go:67:		return StateSuspect
+```
+
+The plan for Phase 4, and the reason the state already exists:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Alive
+    Alive --> Suspect: K beats missed (Phase 4)
+    Suspect --> Alive: member refutes at higher incarnation
+    Suspect --> Dead: suspicion deadline expires (Phase 4)
+    Alive --> Dead: link lost (Phase 3 today)
+    Dead --> Alive: member refutes past the death
+```
+
+A detector that goes straight from alive to dead has no window in which the accused can
+object. Suspect is that window: the swarm gossips "I think X is gone", and X, if alive,
+answers with a higher incarnation. That buys accuracy without paying for it in $K$: a false
+suspicion is corrected by the victim instead of by waiting longer.
+
+The groundwork is already in the merge code:
+
+- `SetState` bumps the incarnation on death only (`pkg/cluster/member.go:325`). A suspicion
+  stays at the member's own incarnation, so the member can still refute it by bumping once.
+- `Revive` still covers a suspect record held at the member's own incarnation
+  (`pkg/cluster/member.go:368`).
+
+The merge rules behind refutation are on
+[Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation).
 
 ---
 
 ## Why It Matters in This Swarm
 
-- **Election consumes the detector's output as a view.** `Elect` (`pkg/cluster/election.go:107`)
-  sizes the leader count from `view.Alive()`. Every false positive shrinks $N$, changes
+- **Election consumes the detector's output as a view.** `Elect` (`pkg/cluster/election.go:112`)
+  sizes the leader count from `view.Alive()` (`pkg/cluster/election.go:115`). Every false positive shrinks $N$, changes
   `LeaderCount`, and can trigger a re-election of a swarm that lost nobody.
 - **The detector's false positives are correlated.** A GC pause, a cgroup throttle, or a host
   under load delays *every* probe from that node at once. $p^K$ assumes independence; under
@@ -208,8 +258,12 @@ instead of by waiting longer.
   deadline the looser of the two, or the transport pre-empts the decision the cluster was
   designed to make.
 - **A `LEAVE` is an optimisation, not a signal the detector may depend on.**
-  `pkg/protocol/message.go:95` says a SIGKILLed container never sends one. Completeness must
+  `pkg/protocol/message.go:93` says a SIGKILLed container never sends one. Completeness must
   come from silence alone.
+- **A false positive is expensive to undo.** A death bumps the member's incarnation
+  (`pkg/cluster/member.go:325`), so a peer wrongly declared dead cannot come back by simply
+  reconnecting. It must see the death and refute it. That is the argument for landing the
+  suspect step before tightening any timeout.
 
 ---
 
@@ -226,7 +280,9 @@ bug: dead peers classified as cancellations, and no eviction ever).
 ### The transport evicts first
 
 Symptom: peers are dropped with a connection-closed error rather than a suspect-then-dead
-transition, and `StateSuspect` is never observed. Cause: $t_{idle} < K \cdot T + t_p$. The
+transition, and `StateSuspect` is never observed. (In Phase 3 this is the expected behaviour,
+since nothing assigns `StateSuspect` yet.) Once Phase 4 lands, the cause is
+$t_{idle} < K \cdot T + t_p$. The
 socket's idle deadline fires before the detector's budget is spent. Raise the idle timeout or
 lower $K \cdot T$; they must be ordered.
 
@@ -260,5 +316,8 @@ have different observations.
   only place the discrimination can be made.
 - [Error Wrapping and Classification](/concepts/error-wrapping-and-classification) -- the
   `errors.Is` chain that `IsCancellation` depends on.
-- [Gossip and Anti-Entropy](/concepts/gossip-and-anti-entropy) -- SWIM suspicion and refutation.
+- [Gossip and Anti-Entropy](/concepts/gossip-and-anti-entropy) -- how a death reaches every
+  peer.
+- [Monotonic Merge and Incarnation](/concepts/monotonic-merge-and-incarnation) -- refutation
+  and why death bumps the incarnation.
 - [Split-Brain and Quorum](/concepts/split-brain-and-quorum) -- what a false positive does to $N$.
