@@ -48,7 +48,9 @@ export default withMermaid(defineConfig({
           { text: 'Repository Layout', link: '/architecture/repo-layout' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
           { text: 'The Mesh and the Handshake', link: '/architecture/mesh-and-handshake' },
-          { text: 'Control Plane Contract', link: '/architecture/control-plane' }
+          { text: 'Control Plane Contract', link: '/architecture/control-plane' },
+          { text: 'The Control Center', link: '/architecture/control-center' },
+          { text: 'Running the Swarm', link: '/architecture/running-the-swarm' }
         ]
       },
       {
@@ -64,7 +66,10 @@ export default withMermaid(defineConfig({
           { text: 'TCP Teardown & Half-Open Sockets', link: '/concepts/tcp-teardown-and-half-open-sockets' },
           { text: 'Deadlines & I/O Timeouts', link: '/concepts/deadlines-and-io-timeouts' },
           { text: 'Backpressure & Bounded Queues', link: '/concepts/backpressure-and-bounded-queues' },
-          { text: 'Backoff & Connection Storms', link: '/concepts/backoff-and-connection-storms' }
+          { text: 'Backoff & Connection Storms', link: '/concepts/backoff-and-connection-storms' },
+          { text: 'WebSocket Framing & The HTTP Upgrade', link: '/concepts/websocket-framing-and-upgrade' },
+          { text: 'Graceful Shutdown & Teardown Ordering', link: '/concepts/graceful-shutdown-and-teardown-ordering' },
+          { text: 'Container Images & PID 1', link: '/concepts/container-images-and-pid-1' }
         ]
       },
       {
@@ -89,7 +94,8 @@ export default withMermaid(defineConfig({
           { text: 'Gossip & Anti-Entropy', link: '/concepts/gossip-and-anti-entropy' },
           { text: 'Monotonic Merge & Incarnation', link: '/concepts/monotonic-merge-and-incarnation' },
           { text: 'Split-Brain & Quorum', link: '/concepts/split-brain-and-quorum' },
-          { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' }
+          { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' },
+          { text: 'Cooperative vs Uncooperative Failure Injection', link: '/concepts/cooperative-vs-uncooperative-failure-injection' }
         ]
       }
     ],
