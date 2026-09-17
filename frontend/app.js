@@ -2291,6 +2291,11 @@
       localPos.clear();
       simAction({ reset_positions: true }, "reset positions");
     });
+    // threshold 0 and a negative hysteresis clear the operator override; each
+    // drone then returns to its own configured values.
+    $("sim-clear-election").addEventListener("click", function () {
+      simAction({ threshold: 0, hysteresis: -1 }, "drones' own threshold/hysteresis");
+    });
     $("drone-sel").addEventListener("change", function () {
       var id = $("drone-sel").value;
       renderPosSliders(true);
