@@ -58,8 +58,7 @@ cross-link heavily, and they get more out of you if read in order.
 
 ## Status
 
-Phase 1 complete: scaffolding, agent definitions, documentation framework, and the first Concept
-Discovery pass. The Go implementation begins in Phase 2 with the wire protocol and the
-`HealthStrategy` interface. Concept pages written before the code exists state their code
-references as forward commitments; they are rewritten to cite real `file.go:line` locations as each
-phase lands.
+Phases 1-3 of 5 complete: scaffolding and CI, the wire protocol and pluggable health strategy, the
+TCP mesh with leader election and latency affinity, and gossip with anti-entropy (Phase 3b).
+Phase 4 (heartbeat failover, suspicion, state replication) and Phase 5 (Control Center, dashboard,
+Docker Compose) have not started. Every decision so far is recorded in the [Worklog](/WORKLOG).
