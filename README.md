@@ -1,147 +1,93 @@
 # swarm-net
 
-A self-healing peer-to-peer swarm network in Go, with a live dashboard, and a full technical
-curriculum documenting every layer it stands on.
+A self-healing peer-to-peer swarm in Go, with a live browser dashboard.
 
-$N$ identical Go nodes run in isolated containers on a user-defined Docker bridge network and
-speak native TCP to each other. They measure peer health through a pluggable strategy, elect
-$\max(1, \lceil N \times \text{threshold} \rceil)$ leaders from the scores, and cluster themselves
-by latency affinity: each worker joins whichever leader answers fastest, with no fixed quotas. When
-a leader stops answering heartbeats, its workers suspect it, the swarm confirms the death,
-promotes the healthiest worker, and the workers reattach. Pending tasks are re-issued. A Control
-Center sends tasks, collects telemetry, and serves a vanilla HTML/JS dashboard where you can
-watch all of this happen. The dashboard also has chaos controls for killing nodes and adding
-latency on purpose.
+Identical nodes run in Docker containers and talk raw TCP. They score each other by latency,
+elect $\max(1, \lceil N \times threshold \rceil)$ leaders, and each worker joins the fastest
+leader. When a leader dies, the swarm promotes the healthiest worker and re-issues pending tasks.
+A Control Center sends tasks and collects telemetry. The dashboard shows it all live and has
+chaos buttons to break things on purpose.
 
-**Docs site:** <https://aditya-jyoti.github.io/swarm-communication/>
+**Docs:** <https://aditya-jyoti.github.io/swarm-communication/>
 
-## Status
+## Layout
 
-**All 5 phases are implemented.**
-
-| Phase | Status |
+| Path | What it holds |
 |---|---|
-| 1 -- Scaffolding, CI, docs site | Complete |
-| 2 -- Wire protocol, pluggable health | Complete |
-| 3a -- TCP mesh, election, latency affinity | Complete |
-| 3b -- Gossip and anti-entropy | Complete |
-| 4 -- Suspicion, heartbeat failover, state replication, task routing | Complete |
-| 5 -- Control Center, dashboard, Docker Compose | Complete |
+| `backend/` | Go module: `cmd/` (swarm-node, control-center), `pkg/`, `Dockerfile`, `deploy/` |
+| `frontend/` | Vanilla HTML/JS dashboard, `nginx.conf.template`, `Dockerfile` |
+| `docs/` | The VitePress site, including the [Worklog](docs/WORKLOG.md) |
+| `docker-compose.yml` | The local stack |
+| `.env.example` | Every tunable, commented |
+| `scripts/` | `e2e.sh` and the docs checkers |
 
-Known open items are listed in [`STATE.md`](STATE.md) and in section 6.9 of the
-[Worklog](docs/WORKLOG.md).
+The frontend container (nginx) serves the dashboard and proxies `/api/`, `/healthz` and `/ws`
+to the Control Center. The Control Center itself is not published.
 
 ## Quick start
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 
-Open <http://localhost:8080>. The default stack is a Control Center, a `seed` node and 5
-replicas (N = 6, so 2 leaders). Pick any N:
+Open <http://127.0.0.1:8080>. The default stack is a Control Center, a `seed` node, 5 more
+nodes (N = 6, so 2 leaders) and the frontend.
+
+## Scaling
 
 ```bash
-docker compose up --build --scale node=11
+docker compose up -d --scale node=11     # N = 12, 4 leaders
 ```
 
-From the dashboard, submit tasks, kill a leader, or add latency, then watch the swarm re-elect.
-
-## End-to-end check
-
-```bash
-scripts/e2e.sh                # seed + 5 nodes
-E2E_NODES=8 scripts/e2e.sh    # seed + 8 nodes
-```
-
-The script starts the stack under its own Compose project and waits for the exact leader count.
-It runs a batch of tasks, `docker kill`s a leader, waits for the swarm to heal, then runs a
-second batch. It needs Docker, plus `jq` or `python3`.
-
-## Layout
-
-```
-cmd/       swarm-node and control-center binaries
-pkg/       protocol, network, health, cluster, telemetry, controlcenter
-web/       vanilla JS dashboard, embedded into the control-center binary
-deploy/    node container entrypoint
-docs/      the VitePress curriculum
-scripts/   e2e.sh and the docs checkers
-```
-
-`Dockerfile` and `docker-compose.yml` are in the repository root. See
-[`docs/architecture/repo-layout.md`](docs/architecture/repo-layout.md) for why the package
-boundaries are drawn where they are.
-
-## Documentation
-
-Read it online at <https://aditya-jyoti.github.io/swarm-communication/>, or build it locally
-(needs Node 22):
-
-```bash
-npm install
-npm run docs:dev
-```
-
-Start with the [System Overview](docs/architecture/overview.md), then
-[Running the Swarm](docs/architecture/running-the-swarm.md). The [Worklog](docs/WORKLOG.md)
-records every decision, the alternatives that were rejected, and why.
-
-## Building
-
-```bash
-go build ./...
-```
-
-Requires Go 1.27+. The Go build does not need Node. `package.json` exists only for the docs
-site.
+Or set `NODE_REPLICAS` in `.env`. No code or YAML edits.
 
 ## Running without Docker
 
-A three-node swarm on one machine, one terminal each:
-
 ```bash
-SWARM_NODE_ID=n1 SWARM_LISTEN=:7001 SWARM_ADVERTISE=127.0.0.1:7001 go run ./cmd/swarm-node
-SWARM_NODE_ID=n2 SWARM_LISTEN=:7002 SWARM_ADVERTISE=127.0.0.1:7002 SWARM_SEEDS=127.0.0.1:7001 go run ./cmd/swarm-node
-SWARM_NODE_ID=n3 SWARM_LISTEN=:7003 SWARM_ADVERTISE=127.0.0.1:7003 SWARM_SEEDS=127.0.0.1:7001 go run ./cmd/swarm-node
+cd backend
+go run ./cmd/control-center -listen 127.0.0.1:7000 -http 127.0.0.1:8080
+go run ./cmd/swarm-node -node-id n1 -listen 127.0.0.1:7001 \
+  -advertise 127.0.0.1:7001 -control-center 127.0.0.1:7000
+go run ./cmd/swarm-node -node-id n2 -listen 127.0.0.1:7002 \
+  -advertise 127.0.0.1:7002 -seeds 127.0.0.1:7001 -control-center 127.0.0.1:7000
 ```
 
-To add the dashboard, run `go run ./cmd/control-center -listen :7000` and start each node with
-`SWARM_CONTROL_CENTER=127.0.0.1:7000`.
+One terminal each. Without the frontend there is no dashboard; use the API with `curl`. Every
+flag also has a `SWARM_*` env var (flags win). See
+[Running the Swarm](docs/architecture/running-the-swarm.md).
 
-Every setting can be set with an env var or with the matching flag, e.g. `-gossip-interval`. If
-both are set, the flag wins.
+## Tests
 
-### swarm-node
+```bash
+cd backend && go test -race ./...    # unit tests (Go 1.27+)
+scripts/e2e.sh                       # full stack: kill a leader, check it heals
+npm ci && npm run docs:check         # docs: ASCII, Mermaid, build (Node 22)
+```
 
-| Env var | Default | Meaning |
+`scripts/e2e.sh` goes through the frontend port (`E2E_HTTP_PORT`, default 18080). It needs
+Docker, `curl`, and `jq` or `python3`.
+
+## Configuration
+
+Compose reads `.env`. Every variable has a default, so `.env` is optional. The full commented
+list is in [`.env.example`](.env.example).
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `SWARM_NODE_ID` | hostname | Node identity |
-| `SWARM_LISTEN` | `:7000` | TCP bind address |
-| `SWARM_ADVERTISE` | `<hostname>:<listen port>` | Address peers dial |
-| `SWARM_SEEDS` | empty | Comma-separated peers to dial at start-up |
-| `SWARM_CONTROL_CENTER` | empty | Control Center address. Empty means no uplink. |
-| `SWARM_TELEMETRY_INTERVAL` | `1s` | How often telemetry is sent to the Control Center |
-| `SWARM_THRESHOLD` | `0.3` | Leader fraction in (0,1] |
+| `BIND_ADDR` | `127.0.0.1` | Host address for the published port. The API has no auth. |
+| `FRONTEND_PORT` | `8080` | Host port for the dashboard |
+| `CC_HTTP_PORT` | `18081` | Host port for the CC, only if its `ports:` block is uncommented |
+| `NODE_REPLICAS` | `5` | Nodes besides `seed` |
+| `SWARM_THRESHOLD` | `0.3` | Leader fraction in (0, 1] |
 | `SWARM_PROBE_INTERVAL` | `1s` | How often peers are scored |
-| `SWARM_ELECTION_FLOOR` | `30s` | Interval of the periodic re-election |
-| `SWARM_GOSSIP_INTERVAL` | `2s` | Anti-entropy: send the full view to one peer per interval |
-| `SWARM_IDLE_TIMEOUT` | `15s` | Silence before a connection is dead (must exceed 3x probe interval) |
+| `SWARM_IDLE_TIMEOUT` | `5s` | Silence before a link is dead (more than 3x the probe interval) |
+| `SWARM_GOSSIP_INTERVAL` | `2s` | How often a full membership view is sent |
+| `SWARM_ELECTION_FLOOR` | `30s` | Periodic re-election |
+| `SWARM_TELEMETRY_INTERVAL` | `1s` | How often nodes report to the CC |
 | `SWARM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `SWARM_IMAGE_TAG` | `dev` | Tag for the three images |
+| `SWARM_VERSION` | `dev` | Version baked into the binaries |
+| `GO_VERSION`, `ALPINE_VERSION`, `NGINX_VERSION` | `1.27`, `3.22`, `1.31-alpine` | Base images |
 
-### control-center
-
-| Env var | Flag | Default | Meaning |
-|---|---|---|---|
-| `SWARM_CC_LISTEN` | `-listen` | `:7000` | TCP bind address that nodes dial |
-| `SWARM_CC_HTTP` | `-http` | `:8080` | Dashboard and API bind address |
-| `SWARM_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error` |
-
-The HTTP API (`/api/state`, `/api/tasks`, `/api/chaos`, `/ws`) is specified in
-[Control Plane Contract](docs/architecture/control-plane.md).
-
-## Testing
-
-```bash
-go test -race ./...
-scripts/e2e.sh
-```
+Known open items are in [`STATE.md`](STATE.md).
