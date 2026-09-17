@@ -46,11 +46,13 @@ func ParseChaos(p protocol.ChaosPayload) (Chaos, error) {
 	case ChaosKill, ChaosClear:
 		return Chaos{Action: a}, nil
 	case ChaosDelay:
-		d := time.Duration(p.DelayMS) * time.Millisecond
-		if p.DelayMS < 0 || d > MaxChaosDelay {
+		// Range-check the integer BEFORE converting: DelayMS * 1ms overflows
+		// int64 for large inputs and can wrap back into 0..MaxChaosDelay (or
+		// below zero), so checking the product would accept garbage.
+		if p.DelayMS < 0 || int64(p.DelayMS) > MaxChaosDelay.Milliseconds() {
 			return Chaos{}, fmt.Errorf("%w: delay_ms %d outside 0..%d", ErrInvalidChaos, p.DelayMS, MaxChaosDelay.Milliseconds())
 		}
-		return Chaos{Action: a, Delay: d}, nil
+		return Chaos{Action: a, Delay: time.Duration(p.DelayMS) * time.Millisecond}, nil
 	default:
 		return Chaos{}, fmt.Errorf("%w: unknown action %q", ErrInvalidChaos, p.Action)
 	}

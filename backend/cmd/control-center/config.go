@@ -9,6 +9,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"swarm-net/pkg/controlcenter"
 )
 
 // errConfig is wrapped by every configuration failure so exitCode can map it
@@ -31,6 +33,9 @@ type Config struct {
 	HTTPListen string
 	// LogLevel is the slog threshold. SWARM_LOG_LEVEL.
 	LogLevel slog.Level
+	// APIToken, if set, is required on mutating API calls.
+	// SWARM_CC_API_TOKEN, environment only: a flag would expose it in `ps`.
+	APIToken string
 	// Version is set by -version; nothing else is meaningful then.
 	Version bool
 }
@@ -70,6 +75,12 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	cfg := Config{
 		NodeListen: strings.TrimSpace(*raw["listen"]),
 		HTTPListen: strings.TrimSpace(*raw["http"]),
+		APIToken:   getenv(envPrefix + "CC_API_TOKEN"),
+	}
+	if cfg.APIToken != "" {
+		if err := controlcenter.CheckAPIToken(cfg.APIToken); err != nil {
+			return Config{}, fmt.Errorf("%w: %s%s: %v", errConfig, envPrefix, "CC_API_TOKEN", err)
+		}
 	}
 	if err := checkBind("listen", cfg.NodeListen); err != nil {
 		return Config{}, err

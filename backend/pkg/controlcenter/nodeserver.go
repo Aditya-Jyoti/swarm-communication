@@ -40,6 +40,7 @@ type nodeLink struct {
 func (s *Server) acceptLoop() {
 	defer s.wg.Done()
 	delay := time.Duration(0)
+	saturated := false // accept-loop owned
 	for {
 		raw, err := s.ln.Accept()
 		if err != nil {
@@ -64,7 +65,24 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 		delay = 0
+		// Take a handshake slot without waiting. Refusing is the right answer
+		// under a flood: the alternative, one parked goroutine per silent
+		// socket for HandshakeTimeout, is unbounded. A real node that is
+		// refused redials with backoff. Logged once per saturated stretch, not
+		// once per socket, so the flood cannot also flood the log.
+		select {
+		case s.handshakes <- struct{}{}:
+			saturated = false
+		default:
+			if !saturated {
+				s.log.Warn("too many pending node handshakes; refusing new sockets", "limit", cap(s.handshakes), "remote", raw.RemoteAddr())
+				saturated = true
+			}
+			_ = raw.Close()
+			continue
+		}
 		if !s.track(raw) {
+			<-s.handshakes
 			_ = raw.Close()
 			return
 		}
@@ -80,6 +98,7 @@ func (s *Server) serveNode(raw net.Conn) {
 	remote := raw.RemoteAddr().String()
 
 	id, err := s.acceptHello(raw)
+	<-s.handshakes // the slot covers the handshake only, not the link
 	if err != nil {
 		_ = raw.Close()
 		s.log.Warn("node handshake failed", "remote", remote, "err", err)

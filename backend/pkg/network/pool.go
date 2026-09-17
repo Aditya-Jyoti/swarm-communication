@@ -38,6 +38,14 @@ type PoolConfig struct {
 	// The pool gives up on the address after MaxRedials redials in a row fail and a
 	// later Connect starts it over.
 	MaxRedials int
+	// MaxPendingHandshakes caps inbound sockets that are still in the HELLO
+	// exchange. Admit closes a socket beyond it at once. Default: 128.
+	//
+	// Each pending handshake holds a goroutine and, from the moment a 4-byte
+	// header arrives, a frame buffer of up to protocol.MaxFrameSize, for up to
+	// HandshakeTimeout. Uncapped, a connection flood is a memory flood. A
+	// legitimate peer that is refused redials with backoff.
+	MaxPendingHandshakes int
 	// Rand feeds jitter into the default Backoff. Default: math/rand/v2.
 	Rand func() float64
 	// Now is the clock for deadlines, injectable for tests. Default: time.Now.
@@ -55,6 +63,9 @@ func (c PoolConfig) withDefaults() PoolConfig {
 	}
 	if c.HandshakeTimeout <= 0 {
 		c.HandshakeTimeout = 3 * time.Second
+	}
+	if c.MaxPendingHandshakes <= 0 {
+		c.MaxPendingHandshakes = 128
 	}
 	if c.Rand == nil {
 		c.Rand = rand.Float64
@@ -114,7 +125,7 @@ type dialEntry struct {
 //
 // # Synchronisation
 //
-// mu guards every mutable field below it: peers, dials, pending, claims, dialing,
+// mu guards every mutable field below it: peers, dials, pending, admitting, claims, dialing,
 // deferred, downInFlight, addrOf, known, closed. Nothing blocking is ever done under mu -- handshakes, event
 // emission and Conn.Close all happen outside it -- so a stalled peer or a slow
 // Events consumer cannot make Send block on the lock.
@@ -163,6 +174,10 @@ type Pool struct {
 	// pending holds sockets in mid-handshake, so Close can cut them short rather
 	// than waiting out HandshakeTimeout.
 	pending map[net.Conn]struct{}
+	// admitting counts the inbound subset of pending (dials are tracked there
+	// too), which is what MaxPendingHandshakes limits. No waiter reads it, so
+	// it needs no Broadcast.
+	admitting int
 	// claims counts inbound handshakes that passed admitPolicy and are about to
 	// register a connection to that ID. dialing counts dials in flight to an
 	// address. Both defer PeerDown for a matching entry; see the type comment.
@@ -255,7 +270,8 @@ func (p *Pool) Forget(addr protocol.NodeAddress) {
 
 // Admit takes ownership of an accepted socket that has not yet handshaken. The
 // handshake runs on its own goroutine so the accept loop never blocks on a peer
-// that connects and then says nothing.
+// that connects and then says nothing. Beyond MaxPendingHandshakes the socket
+// is closed at once instead.
 func (p *Pool) Admit(raw net.Conn) {
 	p.mu.Lock()
 	if p.closed {
@@ -263,6 +279,12 @@ func (p *Pool) Admit(raw net.Conn) {
 		_ = raw.Close()
 		return
 	}
+	if p.admitting >= p.cfg.MaxPendingHandshakes {
+		p.mu.Unlock()
+		_ = raw.Close()
+		return
+	}
+	p.admitting++
 	p.pending[raw] = struct{}{}
 	p.changed.Broadcast()
 	p.wg.Add(1)

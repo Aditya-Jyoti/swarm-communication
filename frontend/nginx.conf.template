@@ -7,10 +7,24 @@
 #   CONTROL_CENTER_UPSTREAM  host:port of the CC HTTP server (control-center:8080)
 #   NGINX_LOCAL_RESOLVERS    nameservers from /etc/resolv.conf (exported by the
 #                            image because NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1)
+#   CC_API_TOKEN             the control center's API token, or empty (the
+#                            Dockerfile defaults it to "", so it is always set)
 #
 # This file is included inside the main http {} block.
 
 server_tokens off;
+
+# API token, added server-side on /api/ and /ws so the browser never holds it.
+# Empty token: the header is not sent at all (proxy_set_header with an empty
+# value drops the header, including one the client sent). Non-empty: every
+# request that reaches this proxy is authorised, so the token protects the CC
+# from callers that bypass nginx, not from users of the dashboard; see
+# backend/pkg/controlcenter/auth.go. The CC refuses to start with a token
+# containing characters that would break this line (quotes, spaces, "$").
+map "${CC_API_TOKEN}" $cc_authorization {
+    ""      "";
+    default "Bearer ${CC_API_TOKEN}";
+}
 
 # "Connection: upgrade" only when the client asked for one.
 map $http_upgrade $connection_upgrade {
@@ -76,6 +90,7 @@ server {
         proxy_pass $control_center;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
+        proxy_set_header Authorization $cc_authorization;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_connect_timeout 3s;
@@ -96,6 +111,7 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Authorization $cc_authorization;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_connect_timeout 3s;

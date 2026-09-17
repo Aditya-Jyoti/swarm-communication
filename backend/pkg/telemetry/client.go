@@ -332,6 +332,7 @@ func (c *Client) dispatch(ctx context.Context, pool *network.Pool, env *protocol
 		if err != nil {
 			return
 		}
+		//lint:ignore S1016 field by field on purpose; see network.MeshProber.answer
 		pong, err := protocol.NewReply(env, protocol.TypePong, c.cfg.Self.ID, protocol.PongPayload{Nonce: p.Nonce, Seq: p.Seq})
 		if err != nil {
 			return

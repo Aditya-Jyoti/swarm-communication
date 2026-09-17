@@ -258,7 +258,8 @@ func (c NodeConfig) withDefaults() NodeConfig {
 // shuffleIDs is the production Shuffle. The top-level math/rand/v2 functions
 // are safe for concurrent use and randomly seeded, so there is no source to own.
 func shuffleIDs(ids []protocol.NodeID) {
-	rand.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+	// Gossip target order only needs to be spread out, not unpredictable.
+	rand.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] }) // #nosec G404 -- load spreading, not security
 }
 
 // Status is an immutable snapshot of a node for telemetry. Every map and slice is

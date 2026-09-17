@@ -16,7 +16,14 @@ FROM nginx:${NGINX_VERSION}
 # (/etc/nginx/templates -> /etc/nginx/conf.d).
 # NGINX_ENTRYPOINT_LOCAL_RESOLVERS: export the container's nameservers as
 # NGINX_LOCAL_RESOLVERS for the template's `resolver` line.
+# CC_API_TOKEN: the control center's API token, injected by nginx on /api/ and
+# /ws. Empty (auth off) by default. It must be DEFINED even when empty:
+# envsubst skips unset variables, and nginx would then read the literal
+# ${CC_API_TOKEN} as an unknown variable and refuse to start. Set it at run
+# time (Compose), never at build time.
+# hadolint ignore=DL3064
 ENV CONTROL_CENTER_UPSTREAM=control-center:8080 \
+    CC_API_TOKEN="" \
     NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
     NGINX_ENTRYPOINT_QUIET_LOGS=1
 
@@ -44,4 +51,4 @@ EXPOSE 8080
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/frontend-healthz || exit 1
+    CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/frontend-healthz"]

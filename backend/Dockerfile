@@ -14,7 +14,7 @@
 # target is a cache hit.
 
 ARG GO_VERSION=1.27
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.24
 
 # ---------------------------------------------------------------------------
 # build: compile static binaries.
@@ -61,7 +61,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:${ALPINE_VERSION} AS runtime
 # ca-certificates is not needed (no outbound TLS); tzdata is not needed (UTC logs).
 # Fixed non-root uid so file ownership is predictable across rebuilds.
-RUN addgroup -S -g 10001 swarm && adduser -S -D -H -u 10001 -G swarm swarm
+# `apk upgrade` pulls base-package security fixes published after the alpine
+# tag was cut (e.g. libssl3 CVE-2026-14456 in 3.24.1). The Go binaries are
+# static and use no openssl, but the scanner cannot know that, and a patched
+# base costs nothing.
+RUN apk upgrade --no-cache \
+    && addgroup -S -g 10001 swarm && adduser -S -D -H -u 10001 -G swarm swarm
 USER 10001:10001
 
 # ---------------------------------------------------------------------------
@@ -80,5 +85,5 @@ FROM runtime AS control-center
 COPY --from=build /out/control-center /usr/local/bin/control-center
 EXPOSE 7000 8080
 HEALTHCHECK --interval=5s --timeout=2s --start-period=5s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
 ENTRYPOINT ["/usr/local/bin/control-center"]

@@ -748,6 +748,7 @@ func TestTieBreakInboundFromHigherIDIsRejected(t *testing.T) {
 	h.event(PeerUp)
 
 	inbound, info, err := h.inboundFrom(idB)
+	//lint:ignore SA5001 inboundFrom never returns a nil conn; err is the handshake outcome under test
 	defer inbound.Close()
 	if !errors.Is(err, ErrHandshakeRejected) {
 		t.Fatalf("higher-ID peer's dial = %v, want ErrHandshakeRejected", err)
@@ -884,6 +885,7 @@ func TestOlderIncarnationIsRejected(t *testing.T) {
 
 	stale := Identity{ID: idA.ID, Advertise: idA.Advertise, Incarnation: idA.Incarnation - 1}
 	inbound, _, err := h.inboundFrom(stale)
+	//lint:ignore SA5001 inboundFrom never returns a nil conn; err is the handshake outcome under test
 	defer inbound.Close()
 	if !errors.Is(err, ErrHandshakeRejected) {
 		t.Fatalf("stale incarnation = %v, want rejection", err)
@@ -1495,6 +1497,7 @@ func TestStaleIncarnationRejectionNamesTheIncarnations(t *testing.T) {
 	h.event(PeerUp)
 	stale := Identity{ID: idA.ID, Advertise: idA.Advertise, Incarnation: idA.Incarnation - 1}
 	inbound, _, err := h.inboundFrom(stale)
+	//lint:ignore SA5001 inboundFrom never returns a nil conn; err is the handshake outcome under test
 	defer inbound.Close()
 	if err == nil || !strings.Contains(err.Error(), "incarnation") {
 		t.Errorf("stale rejection reason = %v, want one naming incarnations", err)

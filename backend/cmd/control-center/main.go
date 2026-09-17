@@ -39,6 +39,12 @@ const (
 	// readHeaderTimeout stops a client that opens a socket and dribbles
 	// headers from holding a goroutine (Slowloris).
 	readHeaderTimeout = 5 * time.Second
+	// idleTimeout closes keep-alive connections that carry no request. The
+	// default (0) falls back to ReadTimeout, which is also 0: never.
+	idleTimeout = 60 * time.Second
+	// maxHeaderBytes: the API needs a few hundred bytes of headers; the 1MiB
+	// default is 1MiB of memory per slow client.
+	maxHeaderBytes = 16 << 10
 )
 
 func main() {
@@ -92,6 +98,7 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 	}
 	cc, err := controlcenter.New(controlcenter.Config{
 		NodeListen: cfg.NodeListen,
+		APIToken:   cfg.APIToken,
 		Logger:     log,
 	})
 	if err != nil {
@@ -101,14 +108,20 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 	if onListening != nil {
 		onListening(cc.NodeAddr(), httpLn.Addr())
 	}
-	log.Info("control center listening", "nodes", cc.NodeAddr(), "http", httpLn.Addr(), "version", version)
+	// Whether auth is on, never the token itself.
+	log.Info("control center listening", "nodes", cc.NodeAddr(), "http", httpLn.Addr(), "version", version, "api_token", cfg.APIToken != "")
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// No ReadTimeout/WriteTimeout: they would also cut /ws, a long-lived
+	// hijacked connection. POST bodies get a per-request deadline in the
+	// handler instead (controlcenter.Config.RequestTimeout).
 	srv := &http.Server{
 		Handler:           cc.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	// HTTP server goroutine: owned by run, joined via httpErr below. It ends
