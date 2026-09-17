@@ -76,6 +76,7 @@ export default withMermaid(defineConfig({
           { text: 'Latency as a Statistic', link: '/concepts/latency-as-a-statistic' },
           { text: 'Failure Detectors', link: '/concepts/failure-detectors' },
           { text: 'Gossip & Anti-Entropy', link: '/concepts/gossip-and-anti-entropy' },
+          { text: 'Monotonic Merge & Incarnation', link: '/concepts/monotonic-merge-and-incarnation' },
           { text: 'Split-Brain & Quorum', link: '/concepts/split-brain-and-quorum' },
           { text: 'Idempotence & Hysteresis', link: '/concepts/idempotence-and-hysteresis' }
         ]
