@@ -366,6 +366,10 @@ type Node struct {
 	leader      protocol.NodeID
 	// hint is a leader named by a JOIN_ACK rejection; consumed by the next evaluate.
 	hint protocol.NodeID
+	// joinID is the envelope ID of the JOIN_CLUSTER we are waiting on, empty
+	// when no JOIN is outstanding. Only a JOIN_ACK echoing it may attach or
+	// detach us; see handleJoinAck.
+	joinID string
 	// rejections counts JOIN_ACK rejections since the last probe round; see
 	// maxRejectionsPerRound.
 	rejections int
@@ -1166,7 +1170,7 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 	case protocol.TypeJoinAck:
 		p, ok := payloadOrPoison[protocol.JoinAckPayload](ctx, n, f)
 		if ok {
-			n.handleJoinAck(ctx, f.peer, p)
+			n.handleJoinAck(ctx, f.peer, f.env.ID, p)
 		}
 	case protocol.TypeLeave:
 		// The payload is informational; a LEAVE with a bad body is still a LEAVE.
@@ -1414,22 +1418,45 @@ func (n *Node) handleJoinCluster(ctx context.Context, f inboundFrame, p protocol
 	n.publish()
 }
 
-func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protocol.JoinAckPayload) {
+// handleJoinAck applies the answer to the JOIN we are waiting on, and only
+// that answer.
+//
+// # Why acks are matched by envelope ID, not by sender
+//
+// During leader churn a worker can send two JOINs to the same node: one while
+// that node has briefly stepped down, and another once it is a leader again.
+// Both answers arrive, in order, on the same link: "rejected, not a leader",
+// then "accepted". Matched by sender alone, the first answer looks like the
+// reply to the second JOIN. It detaches the worker (and spends a rejection,
+// possibly the last one this round), so the acceptance that follows looks
+// stale and is dropped. The leader then lists a worker that believes it is
+// detached, and neither side notices until the next probe round. The leader
+// echoes the JOIN's ID (protocol.NewReply), so the ID is what says which JOIN
+// an answer is about. An answer to an older JOIN says nothing about the current
+// one, whichever way it went, so it is ignored: an old acceptance is repaired
+// by the heartbeat ack path, and an old rejection's hint is out of date.
+func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, id string, p protocol.JoinAckPayload) {
+	if id == "" || id != n.joinID || n.leader != from {
+		n.log.Debug("JOIN_ACK for a JOIN we are not waiting on; ignored",
+			"from", from, "accepted", p.Accepted, "pending_leader", n.leader)
+		return
+	}
+	n.joinID = ""
 	if p.Accepted {
 		leader := p.Leader
 		if leader == "" {
 			leader = from
 		}
-		// An acceptance only counts for the JOIN we are still waiting on. One
-		// that arrives after we were promoted, or after we moved on to another
-		// leader, is stale: applying it would leave a leader attached to someone
-		// else, or a worker pointing at a leader it has abandoned. The sender
-		// learns from our next HEARTBEAT_ACK that we are not its worker.
-		if n.isLeader() || n.leader != leader {
-			n.log.Debug("stale JOIN_ACK ignored", "from", from, "leader", leader, "current", n.leader)
+		// A leader accepts on its own behalf. An acceptance naming another
+		// node is malformed; it answered our JOIN, so treat it as a refusal
+		// and choose again rather than wait on a JOIN nobody will answer.
+		// (A promoted node never gets here: its leader is itself.)
+		if leader != from {
+			n.log.Warn("JOIN_ACK accepted on behalf of another node; ignored", "from", from, "leader", leader)
+			n.leader = ""
+			n.evaluate(ctx)
 			return
 		}
-		n.leader = leader
 		n.hint = ""
 		// A new attachment is a new replication session: the leader's
 		// snapshot versions say nothing about the previous leader's.
@@ -1442,9 +1469,7 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 	// Rejected. We are not attached anywhere; the named leader is a hint that the
 	// next evaluate prefers over its own ranking if it is a leader we can score.
 	n.log.Info("join rejected", "by", from, "reason", p.Reason, "hint", p.Leader)
-	if n.leader == from {
-		n.leader = ""
-	}
+	n.leader = ""
 	n.hint = p.Leader
 	n.rejections++
 	n.evaluate(ctx)
@@ -1803,10 +1828,12 @@ func (n *Node) join(ctx context.Context, leader protocol.NodeID) {
 		// membership and the connection table disagree, which PeerDown resolves.
 		n.log.Warn("JOIN_CLUSTER send failed", "leader", leader, "err", err)
 		n.leader = ""
+		n.joinID = ""
 		return
 	}
 	n.log.Info("joining leader", "leader", leader, "score", n.local[leader])
 	n.leader = leader
+	n.joinID = env.ID
 	// A new attachment gets a full HeartbeatMisses window before its silence
 	// counts against the leader.
 	n.sinceBeat = 0

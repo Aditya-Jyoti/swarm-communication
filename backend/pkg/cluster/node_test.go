@@ -388,6 +388,19 @@ func (h *harness) frame(from protocol.NodeID, t protocol.MessageType, payload an
 	if err != nil {
 		h.t.Fatalf("NewEnvelope: %v", err)
 	}
+	if t == protocol.TypeJoinAck {
+		// A real leader answers a specific JOIN and echoes its ID. Reply to
+		// the latest JOIN we sent to from; with none, the ack answers nothing
+		// and the node must ignore it.
+		env.ID = ""
+		joins := h.tr.sentOf(protocol.TypeJoinCluster)
+		for i := len(joins) - 1; i >= 0; i-- {
+			if joins[i].to == from {
+				env.ID = joins[i].env.ID
+				break
+			}
+		}
+	}
 	h.node.Handler()(from, env)
 	h.settle()
 	return env

@@ -912,6 +912,70 @@ func TestWorkerRejoinsLeaderThatSteppedDown(t *testing.T) {
 	}
 }
 
+// ackJoin delivers from's answer to one specific JOIN, the way a real leader
+// does: echoing that JOIN's envelope ID.
+func (h *harness) ackJoin(join *protocol.Envelope, p protocol.JoinAckPayload) {
+	h.t.Helper()
+	env, err := protocol.NewReply(join, protocol.TypeJoinAck, join.To, p)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.node.Handler()(join.To, env)
+	h.settle()
+}
+
+// Seed 501 of the reordering sweep, reduced. A worker JOINs node-b while
+// node-b is briefly not leading, then JOINs it again once it is. The answers
+// arrive in order: "rejected, not a leader" for the first JOIN, then
+// "accepted" for the second. The rejection answers a JOIN we are no longer
+// waiting on, so it must neither detach us nor spend the rejection budget, and
+// the acceptance must attach us. Before the fix the rejection, matched by
+// sender alone, detached the worker; with the budget spent it did not re-JOIN,
+// and the acceptance was then dropped as stale. node-b listed a worker that
+// believed it was detached until the next probe round.
+func TestRejectionOfAnEarlierJoinDoesNotVoidTheCurrentOne(t *testing.T) {
+	h := threeNodes(t, "node-z") // JOIN #1 to node-b outstanding
+	joins := h.tr.sentOf(protocol.TypeJoinCluster)
+	if len(joins) != 1 || joins[0].to != "node-b" {
+		t.Fatalf("setup: JOINs = %+v, want one to node-b", joins)
+	}
+	first := joins[0].env
+
+	// node-b claims the seat and then (by Seq) gives it up: the attachment is
+	// void and we JOIN it again.
+	h.deltaAbout("node-b", "node-b", RoleLeader, 1.0, 10)
+	h.deltaAbout("node-b", "node-b", RoleWorker, 1.0, 11)
+	joins = h.tr.sentOf(protocol.TypeJoinCluster)
+	if len(joins) != 2 || joins[1].to != "node-b" {
+		t.Fatalf("setup: JOINs = %+v, want a second one to node-b", joins)
+	}
+	second := joins[1].env
+	// This round's rejections are already spent, as they were in the sim: a
+	// detach now is not repaired until the next probe round.
+	if err := h.node.barrier(h.ctx, func() { h.node.rejections = maxRejectionsPerRound }); err != nil {
+		t.Fatal(err)
+	}
+
+	h.ackJoin(first, protocol.JoinAckPayload{Accepted: false, Reason: "not a leader", Leader: "node-c"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("a rejection of the earlier JOIN detached us: Leader = %q", st.Leader)
+	}
+	h.ackJoin(second, protocol.JoinAckPayload{Accepted: true, Leader: "node-b"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("the acceptance of the current JOIN was dropped: Leader = %q", st.Leader)
+	}
+	if got := len(h.tr.sentOf(protocol.TypeJoinCluster)); got != 2 {
+		t.Fatalf("%d JOINs, want 2: the stale answer caused a re-JOIN", got)
+	}
+
+	// Answers to a JOIN already answered change nothing either way.
+	h.ackJoin(second, protocol.JoinAckPayload{Accepted: false, Reason: "not a leader", Leader: "node-c"})
+	h.ackJoin(first, protocol.JoinAckPayload{Accepted: true, Leader: "node-b"})
+	if st := h.status(); st.Leader != "node-b" {
+		t.Fatalf("a repeated answer moved us: Leader = %q", st.Leader)
+	}
+}
+
 // A leader drops a worker for promotion only when the worker claims it, not
 // because the leader's own election momentarily includes the worker.
 func TestLeaderKeepsWorkerUntilItClaimsLeadership(t *testing.T) {

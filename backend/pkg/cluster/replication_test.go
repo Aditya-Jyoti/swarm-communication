@@ -263,7 +263,15 @@ func TestWorkerReplacesOnlyWithNewerSnapshotFromItsLeader(t *testing.T) {
 	h.syncFrom("node-b", protocol.StateSyncPayload{Term: term, Version: 50, Ledger: []protocol.TaskRecord{rec("older-term", taskDone)}})
 	ledgerIs("b")
 
-	// A new attachment is a new session: a lower version is accepted.
+	// A new attachment is a new session: a lower version is accepted. It has
+	// to be a real one -- node-b steps down, we re-JOIN, and it accepts that
+	// JOIN -- because a repeated answer to the JOIN already answered is not.
+	joins := len(h.tr.sentOf(protocol.TypeJoinCluster))
+	h.deltaAbout("node-b", "node-b", RoleLeader, 1.0, 100)
+	h.deltaAbout("node-b", "node-b", RoleWorker, 1.0, 101)
+	if got := len(h.tr.sentOf(protocol.TypeJoinCluster)); got != joins+1 {
+		t.Fatalf("setup: %d re-JOINs after node-b stepped down, want 1", got-joins)
+	}
 	h.frame("node-b", protocol.TypeJoinAck, protocol.JoinAckPayload{Accepted: true, Leader: "node-b"})
 	h.syncFrom("node-b", protocol.StateSyncPayload{Term: term, Version: 1, Ledger: []protocol.TaskRecord{rec("restarted", taskPending)}})
 	ledgerIs("restarted")
