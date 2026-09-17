@@ -71,8 +71,27 @@ speaks, and `world.metres_per_unit` is the only conversion.
 python3 blender/make_swarm_scene.py --frames 120 --interval 0.5   # 60s of swarm
 ```
 
-This records a `timeline`, so you can key positions, roles and cluster colours
-over time. Kill a leader while it samples and you capture the failover.
+This records a `timeline`: one entry per sample, each with every drone's
+location, role, state and leader. Kill a leader while it samples and the
+failover is captured in the file.
+
+The add-on does **not** key it for you -- it builds the still snapshot. Drive the
+frames yourself, where entry `i` belongs at frame `i * fps * interval`:
+
+```python
+# Blender text editor, with the add-on already loaded.
+import json, bpy
+from swarm_blender import build_plan, apply_plan
+scene = json.load(open("blender/swarm-scene.json"))
+fps = bpy.context.scene.render.fps
+for i, frame in enumerate(scene["timeline"]["frames"]):
+    at = int(i * fps * scene["timeline"]["interval_s"])
+    for d in frame["drones"]:
+        ob = bpy.data.objects.get("Drone_" + d["id"].replace(".", "_"))
+        if ob:
+            ob.location = d["location_m"]
+            ob.keyframe_insert("location", frame=at)
+```
 
 ## What the scene contains
 

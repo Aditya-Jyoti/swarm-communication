@@ -71,8 +71,11 @@ def load_scene(path_or_url: str, timeout: float = 5.0) -> dict:
 
     Accepts three things on purpose, because each is convenient somewhere:
       - a path to a scene file  (reproducible, diffable, commit next to a render)
-      - .../api/scene           (the Control Center serves the same document)
       - .../api/state           (the dashboard's raw feed, converted here)
+
+    There is deliberately no /api/scene endpoint: the conversion lives in the
+    generator alone, so a second implementation cannot drift from it. A URL
+    ending in /api/scene is still tolerated, in case one is ever added.
     """
     if path_or_url.startswith(("http://", "https://")):
         with urllib.request.urlopen(path_or_url, timeout=timeout) as r:
@@ -652,7 +655,7 @@ def register():  # noqa: C901 - Blender registration is inherently flat
         bpy.utils.register_class(c)
     bpy.types.Scene.swarm_source = bpy.props.StringProperty(
         name="Source", default=DEFAULT_SCENE,
-        description="Scene file path, or a URL ending in /api/scene or /api/state")
+        description="Scene file path, or a URL ending in /api/state")
     bpy.types.Scene.swarm_base_url = bpy.props.StringProperty(
         name="Dashboard", default=DEFAULT_URL,
         description="Base URL used when pushing changes back")
