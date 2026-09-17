@@ -827,3 +827,208 @@ The 4.4 debt table is stale in two rows. It is left as written; this is the corr
 |---|---|---|
 | Monotonic merge and the incarnation number | Already nominated in 4.5. HIGH-2 makes it concrete: why a death must bump the incarnation, and why only the node itself may overturn its death. **Being written now.** | Phase 3 |
 | Tombstones and garbage collection in gossip | 5.6. Why deleted records resurrect, how long a tombstone must live, and how that bound relates to $N \times T$. | Phase 4 |
+
+---
+
+## 2026-09-17 -- Phases 4 and 5 -- Failure Detection, Replication, Control Center
+
+This entry covers `d464ac0..a6b270f`. Both phases were built at the same time against one
+contract, then merged and verified together in Docker. Earlier entries are not edited.
+
+### 6.1 Process decision: autonomous, parallel execution
+
+**Agent:** `system-architect`
+
+**Decision (user, 2026-09-17):** run Phases 4 and 5 autonomously, with no phase-gate reviews.
+Parallel subagents each work in their own git worktree, and the lead merges their work.
+
+| Option | Failure mode it invites | Outcome |
+|---|---|---|
+| Sequential phases, with a user gate after each (CLAUDE.md section 6) | Slow. Phase 5 sits idle until Phase 4 is done. | Waived by the user for these two phases |
+| Parallel agents in one checkout | Agents overwrite each other's files (seen in session 3) | Rejected |
+| Parallel agents in worktrees, one written contract | Integration bugs stay hidden until the merge | **Chosen** |
+
+**Accepted cost:** bugs that sit between the two halves only show up after the merge. Section 6.6
+describes exactly that.
+
+### 6.2 The contract
+
+**Agent:** `system-architect`
+
+- `6694871`: compile-checked stubs in `pkg/cluster/control.go` (`SubmitTask`, `OnTaskResult`,
+  `SetChaosDelay`, `Status`, `Executor`).
+- `b31dd33`: `docs/architecture/control-plane.md` fixes the wire and HTTP surface: the node -> CC
+  TCP links, the three task kinds, the REST paths and the WebSocket JSON.
+- `bb6956d`: the only wire addition. `TaskRecord` gains `Kind` and `Body` (both `omitempty`).
+  A promoted leader cannot re-issue a task it knows only by ID.
+
+### 6.3 Phase 4 -- failure detection and heartbeats
+
+**Agent:** `go-engineer`
+
+```mermaid
+stateDiagram-v2
+    [*] --> Alive
+    Alive --> Suspect: link loss, 3 missed probes or 3 missed beats
+    Suspect --> Alive: reconnect, fresh probe or refutation
+    Suspect --> Dead: 3s timeout or 6 missed probes
+    Alive --> Dead: LEAVE, clean close or protocol violation
+    Dead --> [*]: tombstone GC after 60s
+```
+
+| Decision | Choice | Rejected | Reasoning / accepted cost |
+|---|---|---|---|
+| Suspicion (`ac36fbd`) | `SuspectAfter` 3, `DeadAfter` 6, `SuspicionTimeout` 3s | Death on the first miss (Phase 3 behaviour) | A death bumps the incarnation, so a brief outage would cost a refutation and two re-elections. Cost: a real crash is confirmed after 3s, not at once. |
+| Link loss | Marks the peer suspect, not dead | Ignoring resets and waiting for probes | A reset is the fastest signal. Workers leave the leader at once, and the pool's redial lands inside the 3s window. |
+| Who confirms a suspicion | Only the node that raised it first-hand | Also confirming relayed suspicions | One node's bad link must not kill a healthy peer across the whole swarm. |
+| Suspect leader (`9e85f40`) | Keeps its seat in `Elect` | Replacing it on doubt | Replacing on doubt means two re-elections for every lost packet. Workers already avoid the suspect, so only the promotion waits. |
+| Heartbeats (`dc62692`) | Every 500ms, 3 misses allowed | Reusing probes | The reader goroutine sends PONGs, so a stuck event loop still answers them. The loop itself sends beats. |
+| Terms | Lamport-style: adopt a higher term seen in a beat or ack | Dropping beats with an older term | Each node's term counts the leader changes it has seen, so healthy nodes can disagree. Dropping those beats would make workers abandon healthy leaders. An older beat is acked with the newer term instead. |
+| Tombstone GC (`b3f6616`) | Remove a death 60s after this node first sees it. Drop a relayed tombstone for a member this node does not hold. | Keeping tombstones forever (5.6) | Views grow with swarm size, not with churn. Cost: 60s covers $(2N-1) \times T$ only up to $N \approx 15$ at $T = 2$ s. Past that, a stale record can bring back a dead node as a ghost, which is then detected and killed again. |
+
+### 6.4 Phase 4 -- replication and tasks
+
+**Agent:** `go-engineer`
+
+| Decision | Choice | Rejected | Reasoning / accepted cost |
+|---|---|---|---|
+| Snapshot (`69ab6d3`) | A full `STATE_SYNC` snapshot after each change, re-sent every 2s, ordered by (Term, Version) | Deltas | Applying a snapshot twice is harmless, and the next one repairs a lost one. Cost: the bytes sent grow with the ledger. |
+| Ledger | Holds at most 500 records. Completed records are evicted first. | No limit | If every record is pending, the oldest task is dropped with a warning. |
+| Large bodies | Bodies over 1KiB are not replicated | Replicating every body | Keeps snapshots under the frame limit. Cost: such a task runs, but cannot be re-issued after failover. |
+| Routing (`ab5d13d`) | The leader assigns tasks round-robin to its workers, and runs a task itself if no worker is reachable. A worker forwards to its leader, and a forwarded task is never forwarded again. | The CC picks the worker | The CC does not know the clusters. Forwarding only once rules out loops. |
+| Load | At most 256 tasks run at once per node. Any task past that fails at once with `busy`. | No limit on goroutines | Tasks are dropped under load, not queued. |
+| Re-issue | At-least-once, on three paths: promotion, a dead worker, a demoted leader's hand-off. `e63dd28` adds one more: workers left without a leader forward their copy's pending tasks to the next leader. | Exactly-once | Exactly-once needs consensus (see `why-not-consensus`). Duplicates are harmless, because the CC keeps the first result for each `task_id`. |
+| Executor (`19c2d3d`) | `echo`, `sleep`, `hash`. `sleep` waits on the injected Clock. | `time.Sleep` | Tests stay deterministic under `FakeClock`. |
+
+### 6.5 Phase 5 -- Control Center, dashboard, deployment
+
+**Agent:** `go-engineer` (Go), `sim-engineer` (infra, frontend)
+
+**Go:** `pkg/telemetry` (the node uplink), `pkg/controlcenter` (single-writer hub, node server,
+HTTP and WebSocket) and `cmd/control-center`. The WebSocket library is `github.com/coder/websocket`
+(chosen in 4.2).
+
+Deviations from the contract. All were agreed and recorded in `control-plane.md` (`b69e048`).
+
+| Deviation | Rejected | Why |
+|---|---|---|
+| The CC answers `HELLO` itself | Reusing `network.Pool` | The Pool gossips `KnownPeers`, so the CC would leak node addresses and act like a mesh member. |
+| The CC sends `PING` every 5s | Relying on node telemetry | Otherwise the CC never sends anything on the link, and the node's read deadline would close it. |
+| The node announces incarnation 0 on the CC link | Its real incarnation | If the CC address points at a mesh node by mistake, that node's pool rejects the older link and the real mesh link survives. |
+| JSON `{"error"}` bodies with 400, 404, 503 | Plain-text errors | Scripts only have to parse one shape. |
+
+**Infra:** a vanilla JS dashboard (`0fba1cb`), a multi-stage alpine `Dockerfile` with `node` and
+`control-center` targets (`2e785e7`), and `docker-compose.yml`. Each replica gets its identity
+from a reverse DNS lookup of its own IP (`deploy/node-entrypoint.sh`). Also `scripts/e2e.sh`
+(`b30fb9c`) and a CI docker job (`8b7b762`).
+
+**Fixes found in Docker:**
+
+| Commit | Defect | Fix |
+|---|---|---|
+| `68707bb` | Compose runs the mesh with a 5s idle timeout, and the uplink used the same value. A 5s ping that arrived slightly late closed a healthy CC link. | The uplink uses `max(mesh, 15s)`, three keep-alive periods. |
+| `af1b2b4` | The CC gives HTTP 5s to drain on SIGTERM, but Compose killed it sooner. | `stop_grace_period: 10s`. |
+
+### 6.6 The convergence bug: two root causes
+
+**Agent:** `go-engineer` (cause 1), `system-architect` as lead (cause 2)
+
+In a 6-node Docker run, nodes held different leader sets.
+
+```mermaid
+flowchart TD
+    Symptom["6-node Docker run: divergent leader sets"] --> C1["Cause 1: score and role had no merge order at equal incarnation"]
+    Symptom --> C2["Cause 2: cmd never wired NodeConfig.Connect"]
+    C1 --> M1["Stale gossip relays overwrote fresh values"]
+    M1 --> F1["efd8b03: Seq field, first-hand ordering"]
+    C2 --> M2["Nodes dialled only seeds, other peers unknown and marked dead"]
+    M2 --> S2["Every node led itself: 6 leaders, 2 wanted"]
+    S2 --> F2["c08ec5e: dial every learned peer, plus regression test"]
+    F2 --> T2["a6b270f: e2e asserts the exact leader count"]
+```
+
+**Cause 1 (`efd8b03`).** At equal incarnation, `Upsert` accepted any score, so the last value to
+arrive won. Anti-entropy keeps relaying old views, so the disagreement never healed. Fix: a
+per-member `Seq` that only the member itself bumps. Role and score are taken only from a newer
+`Seq`, whoever relays them. A new deterministic simulator (`converge_test.go`) that reorders
+frames across links found this. The same commit fixed four related defects:
+
+- Hysteresis was 0 in production. It now defaults to 0.5.
+- JOIN ping-pong. A worker now answers at most 3 rejections per probe round.
+- A stale `JOIN_ACK` could re-point a worker's leader. It is now ignored.
+- Orphaned attachments. A worker now voids its attachment when its leader steps down.
+
+**Cause 2 (`c08ec5e`).** This bug dates back to Phase 3a. The Pool records addresses learned from
+HELLO and gossip, but does not dial them. Only `NodeConfig.Connect` does, and `cmd` never set it.
+Under Compose, every node was connected only to `seed`, a star instead of a mesh.
+
+**Why it stayed hidden for two phases:**
+
+- Loopback tests advertised port-0 addresses, which cannot be dialled anyway. So no test needed
+  nodes to dial learned peers.
+- `e2e.sh` checked for at least one leader. A node that leads itself counts as attached, so a run
+  with 6 leaders still passed.
+
+**Lesson:** assert the exact formula, not a lower bound. `e2e.sh` now requires exactly
+$\max(1, \lceil N \times threshold \rceil)$ leaders.
+
+### 6.7 CI and docs-site incident
+
+**Agent:** `sim-engineer`
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| The deployed site was blank | No VitePress `base`, so assets were served from `/assets/...` and returned 404 under `/swarm-communication/` | `51a7829`: `base` defaults to `/swarm-communication/` (override with `DOCS_BASE`), plus `.nojekyll` |
+| Math pages logged "Hydration completed but contains mismatches" | `markdown-it-mathjax3` was added with `md.use()`, so Vue did not recognise the `mjx-` tags | `e7872ac`: VitePress `markdown.math: true` |
+| `npm ci` failed in CI | The lockfile lacked `jsdom@30`, and jsdom 30 crashes on Node 20 (open item 1 in the previous `STATE.md`) | `37cc49c` regenerated the lockfile, `b85e5c2` moved CI to Node 22 |
+
+The site is live at <https://aditya-jyoti.github.io/swarm-communication/>.
+
+### 6.8 Verification
+
+**Agent:** `system-architect`
+
+| Check | Result |
+|---|---|
+| Docker e2e (`scripts/e2e.sh`, seed + 5 nodes) | 2 of 2 leaders. Failover took about 1s after `docker kill` stopped a leader. Task batches finished before and after. |
+| Simulator (`f3e5a5e`), 16 seeds | After a leader crash, every seed converges at exactly +3s (the suspicion timeout) and stays stable for 20s. Every outstanding task is reported. |
+| Chaos `delay` | The node shows as degraded |
+| Chaos `kill` | The node exits, Compose restarts it, and it rejoins with a new incarnation |
+| `hash` task | The output is the correct SHA-256 |
+
+### 6.9 Open items
+
+**Agent:** `system-architect`
+
+| Item | Status |
+|---|---|
+| `TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst` times out at `-cpu 1` (seen on CI) | **OPEN.** A debug agent is investigating. |
+| MEDIUM-1 (5.2) | Open, deferred by the user |
+| A death recorded at `MaxInt64` cannot be refuted | Open |
+| Task bodies over 1KiB cannot be re-issued after failover | Accepted cost (6.4) |
+| Tasks fail with `busy` when 256 are already running | Accepted cost (6.4) |
+| The 60s tombstone TTL is only safe up to $N \approx 15$ at the default gossip interval | Accepted cost (6.3). The TTL should grow with $N$. |
+| The CC is a single point of task ingress | Accepted in 4.2. The swarm keeps running without it. |
+
+### 6.10 Syllabus additions
+
+**Agent:** `doc-educator` (authoring), nominated by `system-architect`
+
+Pages in `docs/architecture` and `docs/concepts` that no earlier syllabus table lists:
+
+| Page | Why | Status |
+|---|---|---|
+| `architecture/control-plane` | The Phase 4/5 contract (6.2) | Written |
+| `architecture/control-center` | The hub, node server and dashboard API (6.5) | Written |
+| `architecture/running-the-swarm` | Compose, scaling, chaos, e2e | Written |
+| `concepts/websocket-framing-and-upgrade` | The dashboard feed | Written |
+| `concepts/container-images-and-pid-1` | The multi-stage image, and signals inside containers | Written |
+| `concepts/graceful-shutdown-and-teardown-ordering` | `af1b2b4`, and the order in which the CC shuts down | Written |
+| `concepts/cooperative-vs-uncooperative-failure-injection` | Nominated in 4.5 | Written |
+
+Newly nominated in this phase:
+
+| Concept | Why |
+|---|---|
+| Per-member sequence numbers for fields that are not monotone | Cause 1 in 6.6: why `Seq` is needed alongside the incarnation |
+| Testing what you deploy | Cause 2 in 6.6: undialable test addresses and lower-bound assertions hid a star topology |
