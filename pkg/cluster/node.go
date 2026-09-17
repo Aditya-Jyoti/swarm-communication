@@ -286,7 +286,12 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		Incarnation: cfg.Incarnation,
 		Role:        RoleWorker,
 		State:       StateAlive,
-		Score:       0, // alone, a node must be able to lead; see selfScore
+		// Unmeasured until the first probe round: see selfScore. Seeding 0 here
+		// would make a booting node claim the best score in the swarm before it has
+		// measured a single link, and a newcomer would displace a healthy incumbent
+		// on that claim alone. A node that really is alone still leads, via Elect's
+		// nobody-is-measurable fallback.
+		Score: health.ScoreUnavailable(),
 	})
 	n.dialed[cfg.Advertise] = struct{}{}
 	n.publish()
@@ -1034,18 +1039,50 @@ func abs(f float64) float64 {
 // election needs. Affinity, by contrast, is meant to be observer-relative --
 // "which leader is closest to ME" -- so it keeps using the local map.
 //
-// With no valid local RTTs it is 0: a node alone must be able to lead, and 0 is
-// the value every node reports at start-up, so the first election everywhere is
-// the deterministic lowest-ID tie-break.
+// # Two different kinds of "no median"
+//
+// Scores are lower-is-better, so 0 is the best value in the ranking and must only
+// ever be reported as a claim, never as a shrug. Two states produce an empty
+// sample set and they are not the same fact:
+//
+//   - No peer entries at all. We are alone: nobody has been probed because there
+//     is nobody to probe. 0 is right. A lone node must be electable, and it is the
+//     value every node reports before it has company, so the first election is the
+//     deterministic lowest-ID tie-break.
+//   - Peer entries exist and not one of them is valid. Our probe path is broken --
+//     PINGs unanswered, PONGs firewalled, the prober rejecting every peer -- and we
+//     know nothing about ourselves. Reporting 0 here would rank us FIRST in every
+//     election in the swarm on the strength of our own blindness: we would displace
+//     healthy incumbents, and then workers could not even attach to us, because
+//     their ChooseLeader sees our NaN and skips us. Elected and unjoinable. So the
+//     honest answer is ScoreUnavailable, which Elect's eligibility gate reads as
+//     "not a leadership candidate".
+//
+// Excluding ourselves is safe: if every node is unmeasured, Elect falls back to the
+// lowest alive ID rather than leaving the swarm leaderless, so an all-blind swarm
+// still converges on one leader instead of stalling.
 func (n *Node) selfScore() float64 {
-	var valid []float64
+	var (
+		valid []float64
+		peers int
+	)
 	for id, s := range n.local {
-		if id != n.cfg.Self && health.IsValidScore(s) {
+		if id == n.cfg.Self {
+			// Our own entry is the previous answer written back by
+			// updateSelfScore, not evidence about a link. Counting it would make
+			// "alone" indistinguishable from "blind" from the second round on.
+			continue
+		}
+		peers++
+		if health.IsValidScore(s) {
 			valid = append(valid, s)
 		}
 	}
-	if len(valid) == 0 {
+	switch {
+	case peers == 0:
 		return 0
+	case len(valid) == 0:
+		return health.ScoreUnavailable()
 	}
 	sort.Float64s(valid)
 	mid := len(valid) / 2

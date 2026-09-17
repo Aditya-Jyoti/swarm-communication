@@ -1,179 +1,196 @@
 # Project State
 
-Written 2026-09-17. This file is a handover snapshot, not a design document. It
-records what exists, what is verified, what is half-finished, and what the next
-session needs to know. The durable decision record is `docs/WORKLOG.md`; this file is
-the "where did we stop" note that sits beside it.
+Written 2026-09-17 (session 2). Handover snapshot, not a design document: what
+exists, what is verified, what is half-finished, what the next session needs to know.
+
+Note: this file was deleted earlier in this same session (commit `cfece07`) on the
+theory that `docs/WORKLOG.md` should be the single status record. That was then
+undercut by a standing "no documentation writes this session" constraint, which left
+the worklog frozen at "Phase 3 Planning" while seven commits landed. The file is
+restored because a stale single record is worse than two honest ones. **The worklog
+is still the durable decision record and is still badly behind -- see Debt.**
 
 ## Where things stand
 
 | Phase | Status |
 |---|---|
-| 1 -- Scaffolding, agents, VitePress, first concept pass | Complete |
-| 2 -- Wire protocol and pluggable health interface | Complete, tested, committed |
-| 3a -- P2P socket mesh and clustering engine | **Partially built, stopped mid-phase** |
-| 3b -- Gossip and anti-entropy | Not started |
+| 1 -- Scaffolding, agents, VitePress | Complete |
+| 2 -- Wire protocol, pluggable health | Complete |
+| 3a -- P2P socket mesh, clustering engine | Complete and merged (`d1d94cc`) |
+| 3b -- Gossip and anti-entropy | **Designed and approved, NOT started** |
 | 4 -- Heartbeats, failover, replication | Not started |
 | 5 -- Control Center, dashboard, Compose | Not started |
 
-Everything is committed. The working tree is clean.
+Branch `chore/reconcile-state-and-ci`, 7 commits ahead of `d1d94cc`. Nothing pushed.
 
 ## Verification at the moment of the snapshot
 
 ```
-gofmt -l pkg cmd      clean
-go vet ./...          clean
-go test ./pkg/...     129 tests pass
-npm run docs:check    ASCII clean, 41 Mermaid diagrams parse
+go build ./...                clean
+go vet ./...                  clean
+gofmt -l pkg cmd              clean
+go test -race -count=2 ./...  all pass
+npm run docs:check            ASCII clean, 55 Mermaid parse, site builds
+fuzz: 60s / 4.03M execs       no crashers
 ```
-
-Coverage by package:
 
 | Package | Coverage |
 |---|---|
 | `pkg/health` | 100.0% |
-| `pkg/protocol` | 97.3% |
-| `pkg/cluster` | 97.1% |
-| `pkg/network` | 85.9% |
+| `pkg/network` | 98.3% |
+| `pkg/protocol` | 97.6% |
+| `pkg/cluster` | 97.5% |
+| `cmd/swarm-node` | 93.5% |
+| `pkg/telemetry` | no code, no tests |
 
-The three uncovered branches in `pkg/protocol` are deliberate defensive assertions:
-the `crypto/rand` panic in `NewMessageID`, an unreachable zero-length marshal guard,
-and a `json.Indent` failure that cannot occur because a decoded `Payload` is always
-valid JSON. They were left uncovered on purpose rather than papered over with
-contrived tests.
+## What landed this session
 
-## What exists
+| Commit | What |
+|---|---|
+| `cfece07` | Deleted STATE.md (superseded by this file) |
+| `7684686` | `.github/workflows/ci.yml` -- gofmt, vet, `go test -race -count=2`. The Go suite had NO CI gate before this; `deploy.yml` built docs only |
+| `c1da135` | `FuzzDecodeFrame` over the frame decoder. First fuzz target in the repo |
+| `fc63794` | Framing throughput benchmarks |
+| `b52e2be` | Membership merge benchmarks. First benchmarks in the repo |
+| `6a6b523` | `perf(cluster)`: Snapshot 4 -> 1 allocs, Leaders 1.4-1.7x, `Size()` no longer allocates 57 KB to count. NOTE: commit body has a typo, "unin lineable" |
+| `f9e3b29` | `fix(cluster)`: HIGH-1, the unmeasurable-node-reports-best-score bug |
 
-### `pkg/protocol` -- complete
+## Decisions locked with the user this session
 
-Length-prefixed JSON framing. `uint32` big-endian length, then a JSON body.
+| Decision | Choice |
+|---|---|
+| STATE.md | Delete it -- later reversed by this file |
+| `LEAVE` handling | `markDead` instead of `Remove`. **NOT YET IMPLEMENTED** |
+| Gossip peer selection | Shuffled round-robin, k=1, ~2s interval. Amends `docs/WORKLOG.md:585`, which says "one random peer". **NOT YET IMPLEMENTED** |
+| 3b scope | Dissemination and repair only. No suspicion state, no indirect probing -- those stay Phase 4 |
+| HIGH-2 fix shape | Bump incarnation on death so a death outranks a concurrent refutation. **NOT YET IMPLEMENTED** |
+| MEDIUM-2 | Prune `n.local` / `n.missed`. **NOT YET IMPLEMENTED** |
+| MEDIUM-1 | Deferred by the user |
 
-- `Envelope` with a deferred-decode `json.RawMessage` payload.
-- 14 message types split into control and data planes.
-- `Encoder` (mutex-guarded, safe for concurrent use) and `Decoder` (single-reader by
-  design, deliberately carries no mutex so a second reader is a race the detector
-  catches immediately).
-- `MaxFrameSize` validated against the header **before** any payload allocation.
-- `DumpStream`, a non-production diagnostic that buys back the `netcat` readability
-  length-prefixing cost us.
-- Phase 3 payload schemas added: `MemberRecord`, `MembershipDeltaPayload`,
-  `ElectionResultPayload`, `JoinClusterPayload`, `JoinAckPayload`, `LeavePayload`.
+## Audit findings -- open
 
-### `pkg/health` -- complete
+A read-only audit of Phase 3a ran this session. One of four findings is fixed.
 
-- `HealthStrategy` with the amended context-carrying signature.
-- `LatencyHealthStrategy` with an injectable `Prober`, so the statistics are testable
-  with no clock and no socket.
-- `TCPConnectProber` is an explicit **placeholder**. It measures a kernel handshake,
-  which a node in a GC pause still completes promptly, so it would happily elect a
-  comatose node. Phase 3 is supposed to replace it with PING/PONG over the mesh.
+**HIGH-1 -- FIXED in `f9e3b29`.** `selfScore` returned 0 (the best value, since
+lower-is-better) when it had peers but could measure none of them.
+*Still owed:* dedicated regression tests for the join-time displacement case and the
+all-unmeasured swarm. The existing suite passes and covers the fallback; those two
+scenarios have no test of their own.
 
-### `pkg/network` -- partially built
+**HIGH-2 -- OPEN. This blocks Phase 3b.** A death record is weaker than a newer alive
+record, so it loses the merge it most needs to win.
+- `pkg/cluster/member.go:301` -- `SetState` records death at the member's CURRENT
+  incarnation without bumping it. "B dead at 6" is the strongest a neighbour can say.
+- `pkg/cluster/member.go` `Upsert`, higher-incarnation branch -- an unconditional full
+  overwrite, including a return to `alive`.
+- `pkg/cluster/node.go:833` -- `refuteIfNeeded` returns early on `StateAlive`, so an
+  alive-about-self record at a higher incarnation is never refuted.
 
-`conn.go` only. `Conn` owns exactly two goroutines:
+Interleaving: B refutes ("alive at 7"), that frame queues at A, B is killed, A's
+select takes PeerDown first (dead at 6) then the frame (alive at 7, unconditional
+overwrite). B is resurrected and nothing ever buries it -- nothing converts missed
+probes into a death; that is Phase 4.
 
-- a reader that is the sole owner of the `Decoder` and sets a fresh read deadline
-  before every `ReadFrame`;
-- a writer that is the sole owner of the socket write side, draining two bounded
-  queues so a heartbeat never queues behind a task payload.
+**Today this needs one unlucky race. Under anti-entropy every node still holding
+"alive at 7" re-asserts it every round and wins every time. One surviving record
+re-infects the swarm and never decays. Do not build 3b until this is fixed.**
+Approved fix: bump the incarnation when recording death.
 
-`Classify` implements the four-way read-error taxonomy (clean close, died mid-frame,
-protocol violation, deadline). Only silence and mid-frame death count as failures.
+**MEDIUM-1 -- OPEN, deferred by the user.** A peer marked dead by `payloadOrPoison`
+(`node.go:735`) keeps its TCP connection. A payload decode failure is a framing
+SUCCESS, so no framing error follows, no PeerDown/PeerUp pair is generated, and
+`Revive` -- reachable only from PeerUp (`node.go:586`) -- never runs. The peer is
+permanently invisible to membership while a healthy connection to it stays open.
+Reachable via version skew. 3b gossip would make this self-heal in one round.
 
-### `pkg/cluster` -- partially built
+**MEDIUM-2 -- OPEN, approved for fixing.** `n.local` and `n.missed` are never pruned
+(only writes are around `node.go:981-986`; nothing deletes). `Table.Remove` and
+`markDead` do not touch them. So `selfScore` takes a median over peers that have
+LEFT: ten short-lived slow workers permanently skew a node's self-report, and the
+stale entries are never re-probed so they never go NaN and never drop out. Both maps
+grow unbounded and are deep-copied on every `Status()` call.
 
-`member.go` and `election.go` only.
+**Not filed, but know about it:** `n.incarnation` is set to a peer-supplied `int64`
+plus one with no sanity check (`node.go:836`). A peer claiming `math.MaxInt64`
+overflows it negative. Needs a malicious or corrupt peer, and Phase 3a has no
+authentication at all, so it is not the weakest link -- but if 3b adds any bound on
+incarnation, that is the place.
 
-- `Table` merges membership by incarnation, with `Snapshot()` returning an immutable,
-  deterministically ordered `View`.
-- `Elect` is a pure function of a view and a score map. Idempotent, order-independent,
-  hysteresis-damped, and it ranks with `health.Better` so a NaN can never win a seat.
+## Benchmark baseline
 
-## What is NOT built
+Established this session; re-measure against these before/after any 3b change.
 
-These were planned for 3a and do not exist:
+- `Table.Upsert`: flat and ZERO-allocation across all branches, 85-99 ns/op from
+  n=10 to n=1000. The steady-state anti-entropy merge is a mutex plus a map lookup.
+  This is the result 3b wants; do not regress it.
+- `Table.Snapshot`: 1 alloc, but per-member CPU still triples 10 -> 1000 (~362 us at
+  n=1000). Profiled: 88% is the sort, and 43% of that is moving 64-byte `Member`
+  values. Removing reflection removed the closure allocations, not the dominant cost.
+  The remaining cost is element width.
+- `protocol.SetPayload` on a 50-member roster: **163 allocs / 125 us**, about 5x the
+  cost of framing the whole envelope. Cause is `MemberRecord.MarshalJSON`
+  (`pkg/protocol/message.go:369`) forcing `encoding/json` down the reflection path per
+  record. `WriteEnvelope` over an ALREADY-populated payload is 1 alloc.
+  At the approved k=1 fan-out this costs 125 us per 2s and does not bite. It would
+  bite hard if fan-out ever goes per-peer.
 
-- `pkg/network/pool.go` -- peer pool, dial dedup with the lower-NodeID tie-break for
-  simultaneous dials, redial backoff.
-- `pkg/network/server.go` -- listener, accept loop, HELLO/HELLO_ACK handshake.
-- `pkg/network/prober.go` -- `MeshProber`, the PING/PONG replacement for
-  `TCPConnectProber`.
-- The `Transport` interface that `pkg/cluster` is meant to consume.
-- `pkg/cluster/affinity.go` -- latency-affinity worker-to-leader assignment.
-- `pkg/cluster/node.go` -- the state machine wiring election triggers together.
-- `pkg/cluster/partition.go` -- degraded-mode detection.
-- `cmd/swarm-node` and `cmd/control-center` are still empty directories.
-- `pkg/telemetry` is still only a `doc.go`.
+## Known trap for Phase 3b
 
-**Nothing currently opens a socket.** There is no runnable binary yet.
+`handleMembershipDelta` calls `n.table.Snapshot()` **once per record**, inside the
+per-record loop (`node.go:765`). Invisible today because deltas are mostly one
+record. Anti-entropy makes every message an N-record delta, and this becomes
+O(N^2 log N) per received delta on the single event loop. Hoist the snapshot out of
+the loop. Note it slightly changes semantics: records within one delta would no
+longer see each other's effects, which for role lookup is arguably more correct.
 
-## Bugs found and fixed during this work
+Also: **anti-entropy as designed repairs liveness but NOT roles.** `node.go:760-768`
+deliberately ignores a relayed role (only `rec.ID == from` is trusted), so a lost
+`announceSelf` role broadcast is never repaired by gossip. Accepted cost or a Phase 4
+item -- undecided.
 
-Two real defects, both caught by tests rather than review:
+## Debt
 
-1. **`Conn.Send` accepted frames after `Close`.** A `select` with both the queue send
-   and the done channel ready picks a ready case at random, so a closed connection
-   reported success for bytes that could never be written, roughly half the time.
-   Fixed with an explicit closed-check before the frame is offered to a queue.
+1. **`docs/WORKLOG.md` is frozen at "Phase 3 Planning"** and is the single largest
+   debt. Unrecorded: Phase 3a completion, all 7 commits above, 4 audit findings,
+   and 6 decisions locked with the user. Its section 4.4 debt table also lists two
+   items as unpaid that are actually done (`why-not-consensus.md` exists;
+   `MeshProber` exists and is wired).
+2. **`README.md:17` and `docs/index.md:61` both still say "Phase 1 of 5 complete".**
+   Three phases stale. README also claims in the present tense that the system runs
+   under `docker compose up` -- there is no Dockerfile or compose file in the repo.
+3. **Concept page citations are stale**, worse than the worklog records.
+   `docs/concepts/gossip-and-anti-entropy.md` cites `Table.Upsert` at `member.go:165`
+   (now 211), `Snapshot` at 245 (now ~352), `Remove` at 232 (now 339), and quotes
+   `sort.Slice`-era code that no longer exists. Its "Epidemics" section describes
+   fanout arithmetic for a mechanism this system does not use -- over a full mesh,
+   push-on-change reaches everyone in one hop.
+   `docs/concepts/failure-detectors.md` reads as though suspicion ships;
+   `StateSuspect` is defined in `member.go:46` and assigned NOWHERE in `pkg/`.
+4. `pkg/telemetry` is still `doc.go` only. `cmd/control-center/`, `web/static/` and
+   `deploy/` are all empty directories.
+5. `Config.ControlCenter` (`cmd/swarm-node/config.go:52`) is parsed, validated, never
+   used. `go.mod` has zero dependencies; Phase 5 pre-decided `github.com/coder/websocket`.
 
-2. **A role change could resurrect a dead node.** In `Table.Upsert`, a record at equal
-   incarnation carrying a different role took a branch that applied the whole record,
-   dragging its stale `alive` state along with it. Fixed by clamping state before role
-   and address are compared.
+## Suggested next session
 
-No defects were found in `pkg/protocol` or `pkg/health` during the Phase 2 test
-hardening pass. That is reported as-is rather than dressed up.
+1. Fix HIGH-2 (`member.go` `SetState` incarnation bump + `member_test.go`
+   regressions). Blocks everything else.
+2. `node.go`: `LEAVE` -> `markDead`, prune `n.local`/`n.missed`, hoist the snapshot
+   out of the per-record loop, add the two owed HIGH-1 regression tests.
+3. Reconcile the docs (items 1-3 above). Needs the no-docs constraint lifted.
+4. Then build 3b: gossip ticker, `gossipRound`, shuffled round-robin peer selection
+   with an injectable `Shuffle` seam, `NodeConfig.GossipInterval`.
 
-## Decisions locked with the user
+## Tooling notes
 
-Phase 1/2 decisions are recorded in `docs/WORKLOG.md` sections 2.1 to 2.5. Phase 3
-decisions taken during planning, not yet written to the worklog:
-
-| Decision | Choice | Why it matters |
-|---|---|---|
-| Phase 3 scope | Split into 3a and 3b | Debugging gossip on an unproven transport means never knowing which layer is lying |
-| Mesh topology | Full mesh | Any node can probe any node; `N^2/2` connections, fine for tens of nodes |
-| Write model | Per-conn writer goroutine, bounded queues | Control blocks briefly, data drops with a counter; a dead peer cannot stall the election loop |
-| Split-brain | AP: any partition elects, marks itself degraded | No consensus algorithm. Minority keeps serving. This is not Raft and the docs must say so |
-
-The approved Phase 3a plan lives at `~/.claude/plans/harmonic-sleeping-lemon.md`.
-
-## Outstanding debt
-
-1. **The worklog has no Phase 3 entry.** Sections 3.1 to 3.6 cover Phase 2. The four
-   Phase 3 decisions above, and the two bugs, still need recording. This did not
-   happen because the session was scoped to Go only and forbidden from editing
-   `docs/`.
-
-2. **Phase 3 owes a documentation deliverable.** `docs/architecture/overview.md`
-   promises an honest Raft/Paxos comparison and an account of what guarantees the
-   system gives up. Not written.
-
-3. **Concept pages need new citations.** Pages written before `pkg/network` and
-   `pkg/cluster` existed state forward commitments instead of `file.go:NN` references.
-   Those can now be promoted to real citations. The standing rule is that a citation
-   is verified with `grep -n` at the moment it is written; fabricated line numbers
-   would poison the one property that makes the curriculum worth reading.
-
-4. **`TCPConnectProber` is still the default health prober**, and it measures the
-   wrong thing. Until `MeshProber` exists, leader election would be driven by kernel
-   handshake time rather than application responsiveness.
-
-## Tooling notes for the next session
-
-- `scripts/check-ascii.mjs` and `scripts/check-mermaid.mjs` enforce the CLAUDE.md
-  section 4 rules. The Mermaid gate matters more than it looks: diagrams render
-  client-side, so a malformed one builds perfectly clean and breaks only in the
-  reader's browser. `npm run docs:check` runs both plus the build.
-- **A semicolon is a statement separator in Mermaid.** It silently truncates label and
-  note text. This has already broken one diagram here.
-- `pkg/` contains **no `time.Sleep`**, and that should stay true. Determinism comes
-  from injectable seams: the `Prober` function type, `ConnConfig.Now`, and gating a
-  fake socket's `Write` so a test can wait on a channel for the writer goroutine to
-  park rather than guessing at scheduling.
-- `net.Pipe` is a useful in-memory `net.Conn` but its `SetReadDeadline` returns
-  `io.ErrClosedPipe` when **either** end is closed, which differs from a real socket.
-  One test was rewritten to engage the reader before closing the peer because of it.
-- Custom subagent types in `.claude/agents/` load at session start. They were not
-  addressable by name in this session, so the four roles were carried verbatim in
-  prompts to general-purpose agents instead.
+- `pkg/` contains NO `time.Sleep` and that must stay true. Determinism comes from
+  injectable seams: the `Prober` func type, `ConnConfig.Now`, `cluster.FakeClock`.
+- `FakeClock.Advance` blocks on each tick until the receiver takes it, so when it
+  returns the loop has observed the tick; `barrier` then guarantees the handler ran.
+  If two tickers share a deadline, `nextDue` breaks the tie on REGISTRATION ORDER --
+  so the order of `NewTicker` calls in `Run` is load-bearing for those tests.
+- A semicolon is a statement separator in Mermaid and silently truncates label text.
+- `npm run docs:check` runs ASCII + Mermaid + build.
+- Subagents sharing a file clobber each other. Two file collisions happened this
+  session, and a stopped agent's writes and commits can land AFTER the stop returns.
+  Split agent work by file, and re-check `git status` and `git log` after any stop.
