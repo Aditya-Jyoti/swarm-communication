@@ -7,8 +7,9 @@
 #
 # Steps:
 #   1. build and start the stack under its own Compose project
-#   2. wait until every node is connected to the control center, at least one
-#      leader exists, and every worker is attached to a live leader
+#   2. wait until every node is connected to the control center, exactly
+#      max(1, ceil(N * threshold)) leaders exist, and every worker is attached
+#      to a live leader
 #   3. submit tasks over HTTP and wait until all are done
 #   4. `docker kill` a current leader
 #   5. wait until a leader other than the victim exists and every surviving
