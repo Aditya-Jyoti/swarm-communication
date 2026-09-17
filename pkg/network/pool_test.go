@@ -1266,8 +1266,71 @@ func waitState(t *testing.T, p *Pool, what string, pred func() bool) {
 	select {
 	case <-done:
 	case <-time.After(failsafe):
+		dumpPool(t, p)
 		t.Fatalf("timed out waiting for %s", what)
 	}
+}
+
+// dumpPool logs the pool's bookkeeping and every goroutine's stack. It tells the
+// two ways a waitState can time out apart: a map still non-empty is a stuck
+// handshake; everything empty is a mutation that forgot to Broadcast. TryLock,
+// because if the pool is deadlocked on mu the dump must still come out.
+func dumpPool(t *testing.T, p *Pool) {
+	t.Helper()
+	if p.mu.TryLock() {
+		t.Logf("%s: peers=%d pending=%d claims=%v dialing=%v deferred=%d downInFlight=%d",
+			p.Self(), len(p.peers), len(p.pending), p.claims, p.dialing, len(p.deferred), len(p.downInFlight))
+		p.mu.Unlock()
+	} else {
+		t.Logf("%s: mu is held; state not dumped", p.Self())
+	}
+	buf := make([]byte, 1<<20)
+	t.Logf("goroutines:\n%s", buf[:runtime.Stack(buf, true)])
+}
+
+// A rejected inbound handshake changes nothing but pending. That removal must
+// still wake Cond waiters, or waitQuiescent sleeps on a condition that is
+// already true (the -cpu 1 flake in TestSimultaneousDialLowerInitiatorWins...).
+// Deterministic: the peer only sends its HELLO after the waiter has evaluated its
+// predicate as false, and Cond.Wait registers the waiter before releasing mu, so
+// every mutation the handshake makes happens after the waiter is parked.
+func TestRejectedInboundHandshakeWakesStateWaiters(t *testing.T) {
+	h := newHarness(t, idA, nil)
+	first, _, err := h.inboundFrom(idB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	h.event(PeerUp)
+
+	// A second inbound from b, same incarnation, initiated by the higher ID: a
+	// must reject it at the handshake without taking a claim.
+	remote, local, err := loopbackPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	h.pool.Admit(local)
+
+	parked := make(chan struct{})
+	var once sync.Once
+	rejected := make(chan error, 1)
+	go func() {
+		<-parked
+		_, err := dialHandshake(remote, idB, nil, far())
+		rejected <- err
+	}()
+	waitState(t, h.pool, "rejected handshake to leave pending", func() bool {
+		if len(h.pool.pending) == 0 {
+			return true
+		}
+		once.Do(func() { close(parked) })
+		return false
+	})
+	if err := <-rejected; !errors.Is(err, ErrHandshakeRejected) {
+		t.Fatalf("second dial from b: got %v, want ErrHandshakeRejected", err)
+	}
+	h.noEvent()
 }
 
 // waitQuiescent blocks until no handshake is in flight and no PeerDown is parked.
