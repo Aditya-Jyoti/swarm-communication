@@ -1,0 +1,53 @@
+# Gates the Go module: formatting, vet, and the test suite under the race detector.
+#
+# Deploy Docs builds the curriculum and nothing else, so until this workflow existed
+# the Go suite was never run by CI at all. The three steps are ordered cheapest-first
+# so a formatting slip fails in seconds rather than after the race build.
+#
+# -race is not optional here. This codebase is goroutine-heavy by design -- a reader
+# and a writer per connection, probe rounds, a node event loop -- and the two defects
+# recorded in docs/WORKLOG.md section 4.3 were both scheduling-dependent. -count=2
+# runs each test twice, which is what turned the first of those two from a pass into
+# a flake.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check gofmt
+        # gofmt -l prints offending files and exits 0, so the exit status has to be
+        # synthesised from the output.
+        run: |
+          unformatted=$(gofmt -l pkg cmd)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race -count=2 ./...
