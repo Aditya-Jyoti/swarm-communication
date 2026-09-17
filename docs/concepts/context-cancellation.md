@@ -350,7 +350,8 @@ so use it rather than `net.Dial` plus your own timer.
 
 ## Why It Matters in This Swarm
 
-No Go code exists yet; the following are commitments the implementation will have to honour.
+`pkg/network` now exists and its paragraph below is cited to the code. The rest remain
+commitments for the packages still landing.
 
 **`cmd/swarm-node/` and `cmd/control-center/` -- the root of the tree.** `main` will build
 its root context with `signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)`
@@ -368,12 +369,16 @@ deadline strictly shorter than the heartbeat interval, and every probe context w
 invariant: if probes can outlive their interval, probes accumulate and the node measures its
 own scheduling backlog rather than the network.
 
-**`pkg/network/` -- the framing codec and connection pool.** Every read of a length-prefixed
-frame will set a read deadline derived from the caller's context before touching the socket,
-using the pattern above, and will refresh it per frame. Idle connections in the pool will
-carry a long read deadline as a dead-peer detector of last resort, since a silently dropped
-TCP connection on a Docker bridge may never produce a `RST`. See
-[TCP Sockets & The Kernel](./tcp-sockets-and-the-kernel).
+**`pkg/network/` -- the connection pool.** The read loop does not take a context at all: it
+sets a fresh idle deadline before every frame (`pkg/network/conn.go:368`) and is unblocked by
+`Close` closing the socket (`pkg/network/conn.go:303`). Contexts bound the things that *do*
+have a caller: the dial shares the handshake budget through `context.WithTimeout`
+(`pkg/network/dial.go:107`), every backoff wait is a `select` against the loop's context
+(`pkg/network/dial.go:169`), and `Pool.Close` cancels the parent before touching a socket so
+parked loops wake first (`pkg/network/pool.go:353`). `Send` honours the caller's context while
+waiting for queue space (`pkg/network/conn.go:291`). See
+[Deadlines & I/O Timeouts](./deadlines-and-io-timeouts) for why the read side uses deadlines
+rather than a context.
 
 **`pkg/cluster/` -- heartbeats and failure detection.** This is where the distinction below
 is load-bearing. The heartbeat loop will classify probe outcomes into three categories, and

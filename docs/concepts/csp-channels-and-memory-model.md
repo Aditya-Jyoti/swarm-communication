@@ -485,7 +485,8 @@ schedules that produce the races a happy-path test never reaches.
 
 ## Why It Matters in This Swarm
 
-No Go code exists yet; the following are commitments the implementation will have to honour.
+`pkg/network` now exists and its paragraph below is cited to the code. The rest remain
+commitments for the packages still landing.
 
 **`pkg/cluster/` -- the membership table.** This is the central shared mutable structure: peer
 ID -> role (leader/worker) -> assigned leader -> last-heartbeat timestamp -> health score.
@@ -510,13 +511,18 @@ live either inside the copy-on-write snapshot or as an `atomic.Int64`; it will n
 plain `int` read without synchronisation, because "worst case we read a stale count" is
 exactly the reasoning the memory model does not permit.
 
-**`pkg/network/` -- the connection pool.** Per-connection read goroutines will hand decoded
-frames to the cluster layer over a buffered channel whose capacity is a stated backpressure
-bound, not a tuning knob. Writes to a socket will be owned by exactly one goroutine per
-connection -- `net.Conn` writes are safe to call concurrently but give no framing guarantee,
-so two concurrent `Write`s of two frames can interleave bytes and corrupt the stream. See
-[Stream Framing](./stream-framing). Ownership of the write side is transferred to a single
-writer goroutine via a channel: CSP used where it fits.
+**`pkg/network/` -- the connection pool.** The reader goroutine delivers decoded frames by
+calling a `Handler` directly on its own goroutine (`pkg/network/conn.go:194`), with the contract
+that the handler must not block; the backpressure bound lives on the *write* side instead. Writes
+to a socket are owned by exactly one goroutine per connection (`pkg/network/conn.go:390`) --
+`net.Conn` writes are safe to call concurrently but give no framing guarantee, so two concurrent
+`Write`s of two frames can interleave bytes and corrupt the stream. See
+[Stream Framing](./stream-framing). Ownership of the write side is transferred to the writer
+goroutine via two bounded channels, control and data (`pkg/network/conn.go:170`), whose depths
+are stated bounds, not tuning knobs. The shutdown signal is a `close(done)` guarded by
+`sync.Once` (`pkg/network/conn.go:176`), and the disposition written before that close is
+published by it (`pkg/network/conn.go:187`). See
+[Backpressure & Bounded Queues](./backpressure-and-bounded-queues).
 
 **`pkg/telemetry/` -- the dashboard fan-out.** Broadcasting to WebSocket subscribers will use
 `select` with `default` to drop samples for subscribers that are behind, rather than blocking.

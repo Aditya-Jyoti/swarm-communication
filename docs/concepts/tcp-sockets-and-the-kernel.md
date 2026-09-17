@@ -266,7 +266,9 @@ Deadlines are the Go-native replacement for `SO_RCVTIMEO`. `SetReadDeadline` is 
 per-call duration, and it is not reset by a successful read -- you re-arm it before every
 operation. An expired deadline yields an error satisfying `errors.Is(err, os.ErrDeadlineExceeded)`
 and, critically, leaves the connection in an undefined read position: if you timed out halfway
-through a frame, the stream is desynchronised and the connection must be discarded.
+through a frame, the stream is desynchronised and the connection must be discarded. The shipped
+read loop re-arms the deadline before every frame (`pkg/network/conn.go:368`) and closes on any
+error; see [Deadlines & I/O Timeouts](./deadlines-and-io-timeouts).
 
 ### The connection state machine
 
@@ -340,25 +342,29 @@ has to be fixed.
 
 ## Why It Matters in This Swarm
 
-No Go code exists yet for `pkg/network` or `pkg/cluster`; what follows are commitments the
-implementation will have to honour.
+`pkg/network` now exists and the commitments below are cited to the code that honours them.
+`pkg/cluster` is landing as this is written; its paragraphs remain commitments.
 
-**`pkg/network/` -- listener and accept loop.** This package will own the TCP listener for each
-node. It commits to: accepting in a dedicated goroutine that does nothing but `Accept` and hand the
-connection to a per-connection goroutine, so the accept queue is drained at the speed of a channel
-send rather than the speed of a protocol handshake; treating `net.Error` temporary conditions with
-a bounded backoff rather than a tight retry; and closing every accepted connection on every error
-path, including the ones that look impossible, because fd exhaustion under container churn is
-exactly the sort of thing that only appears at N=50.
+**`pkg/network/` -- listener and accept loop.** `acceptLoop` (`pkg/network/server.go:111`) does
+nothing but `Accept` and hand the socket to `Pool.Admit`, which runs the handshake on its own
+goroutine (`pkg/network/server.go:145`), so the accept queue is drained at the speed of a
+goroutine spawn rather than the speed of a protocol handshake. Temporary accept errors
+(`pkg/network/server.go:157`) get a bounded backoff from 5 ms to 1 s
+(`pkg/network/server.go:107`). Every accepted socket is closed on every error path: a failed
+handshake closes at `pkg/network/admit.go:29`, a failed dial handshake at
+`pkg/network/dial.go:135`. See [Backoff & Connection Storms](./backoff-and-connection-storms).
 
-**`pkg/network/` -- connection pool.** Because each worker probes *every* elected leader to choose
-its affinity, the number of simultaneously open sockets grows with the leader count, not with one.
-The pool commits to deduplicating dials per peer address, bounding total outbound connections, and
-reaping idle connections -- an unbounded pool in a mesh is a quadratic fd leak.
+**`pkg/network/` -- connection pool.** The mesh is full, so each node holds $N-1$ sockets, and
+the pool guarantees exactly one per peer: `Connect` is idempotent per address
+(`pkg/network/pool.go:230`) and `register` applies the tie-break so a second connection to the
+same `NodeID` is closed, not kept (`pkg/network/registry.go:120`). Idle connections are reaped by
+the per-frame read deadline (`pkg/network/conn.go:368`), not by a sweeper. See
+[The Mesh and the Handshake](/architecture/mesh-and-handshake).
 
-**`pkg/network/` -- framing codec.** Will wrap every connection in a `bufio.Reader` and use
-`io.ReadFull` for every fixed-size read, never a bare `Read`. It commits to enforcing a maximum
-frame size, and to treating any framing violation as fatal to the connection. See
+**`pkg/protocol/` -- framing codec.** Every fixed-size read is an `io.ReadFull`
+(`pkg/protocol/framing.go:320` for the header, `pkg/protocol/framing.go:347` for the body), never a
+bare `Read`. A framing violation is fatal to the connection: the reader classifies it
+(`pkg/network/conn.go:37`) and closes (`pkg/network/conn.go:375`). See
 [Stream Framing](./stream-framing) for why there is no other option.
 
 **`pkg/health/` -- `LatencyHealthStrategy`.** The default strategy measures application-level
@@ -371,7 +377,8 @@ node the swarm must not elect.
 **`pkg/cluster/` -- heartbeats and K-missed-beat failover.** This exists because, as established
 above, TCP will not tell you a peer is gone. TCP keepalive (`SO_KEEPALIVE`, with
 `tcp_keepalive_time` defaulting to 7200 seconds) is useless at swarm timescales; even tuned down it
-only detects a dead *path*, not a hung *process*. Application heartbeats detect both, and they
+only detects a dead *path*, not a hung *process*. The listener deliberately never enables it
+(`pkg/network/server.go:28`). Application heartbeats detect both, and they
 carry payload -- health scores, membership epochs -- that a kernel keepalive never could. The
 cluster package commits to deriving liveness solely from its own heartbeat deadlines, and to
 treating a socket error as a *hint* that accelerates failover rather than as the sole trigger.

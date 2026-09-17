@@ -187,7 +187,8 @@ the fd and re-register the copy. Use `(*net.TCPConn).SyscallConn()` when you nee
 option without leaving the netpoller's world:
 
 ```go
-// Planned pkg/network helper: set SO_RCVBUF without dropping out of the netpoller.
+// A helper of this shape (not currently needed by pkg/network): set SO_RCVBUF
+// without dropping out of the netpoller.
 func setRecvBuf(c *net.TCPConn, bytes int) error {
 	rc, err := c.SyscallConn()
 	if err != nil {
@@ -230,7 +231,8 @@ Properties that follow directly from that implementation:
   as far as both kernels are concerned, and permanently silent.
 
 ```go
-// The read loop shape pkg/network will use. Every read is bounded.
+// The read loop shape. The shipped version is pkg/network/conn.go:360, which
+// delegates the two ReadFull calls to the protocol Decoder. Every read is bounded.
 func (c *peerConn) readLoop(ctx context.Context, idle time.Duration) error {
 	hdr := make([]byte, 4)
 	for {
@@ -318,18 +320,21 @@ for work" strategy would be quadratic and goroutine-per-connection would be unte
 
 ## Why It Matters in This Swarm
 
-No Go code exists yet; the following are commitments the implementation will have to honour.
+`pkg/network` now exists and its commitments below are cited to the code. The `pkg/cluster`,
+`cmd/` and `pkg/telemetry` paragraphs remain commitments.
 
-**`pkg/network/` -- every read and write will carry a deadline, without exception.** The single most
-consequential rule in the package. In a Docker bridge network the most common failure is not a
+**`pkg/network/` -- every read and write carries a deadline, without exception.** The single most
+consequential rule in the package, stated as its first invariant at `pkg/network/doc.go:10` and
+enforced at `pkg/network/conn.go:368` (read) and `pkg/network/conn.go:411` (write). In a Docker bridge network the most common failure is not a
 graceful `FIN` -- it is `docker kill`, a `SIGKILL`ed process, or a chaos control dropping a
 container. In those cases the peer's kernel may never send `RST`, and the local socket stays
 `ESTABLISHED` indefinitely. A `Read` with no deadline parks a goroutine forever, and -- critically --
 that goroutine looks perfectly healthy to the scheduler while doing so. The read deadline is the
-only mechanism in the stack converting "silence" into an error. The idle deadline will be derived
-from the heartbeat parameters: strictly greater than `K * heartbeatInterval`, so that the
+only mechanism in the stack converting "silence" into an error. The idle deadline must be
+strictly greater than `K * heartbeatInterval` (`pkg/network/conn.go:105`), so that the
 application-level failure detector in `pkg/cluster/` makes the liveness decision and the socket
-deadline is only a backstop against a wedged connection.
+deadline is only a backstop against a wedged connection. See
+[Deadlines & I/O Timeouts](./deadlines-and-io-timeouts).
 
 **`pkg/cluster/` -- heartbeat timeouts are read deadlines, not `select` on `time.After`.** Wrapping
 a blocking read in a `select` with a timer requires a second goroutine and leaves the first parked
@@ -340,8 +345,10 @@ and correct.
 listening socket, one accepted conn per inbound peer, one dialled conn per outbound peer, plus the
 Control Center link: `O(N)` fds per node, which is small. Reconnection logic is where fds leak -- a
 dial that fails after the socket is created, a conn replaced in the pool map without closing the old
-one, a `Close` skipped on an error path. Every `net.Conn` the pool creates must have exactly one
-`Close`, and the pool must be the only owner.
+one, a `Close` skipped on an error path. Every `net.Conn` the pool creates has exactly one
+owner: `Conn.Close` is guarded by a `sync.Once` (`pkg/network/conn.go:300`), a tie-break loser is
+closed by `register` (`pkg/network/registry.go:122`), and `Pool.Close` closes every live and
+pending socket before joining its goroutines (`pkg/network/pool.go:334`).
 
 **`cmd/control-center/` -- the WebSocket dashboard multiplies fd usage by viewers.** Each browser tab
 is a long-lived connection with its own reader and writer goroutines. Parked in the netpoller they
@@ -420,8 +427,9 @@ property; it is TCP being a byte stream. Use `io.ReadFull` against a known lengt
 **Concurrent readers on one `net.Conn`.**
 `internal/poll.FD` holds a read lock and a write lock, so concurrent `Read` calls will not corrupt
 runtime state -- but they will interleave *frames*, which corrupts your protocol. The rule for
-`pkg/network/`: exactly one reader goroutine and one writer goroutine per connection, with all other
-producers going through a channel to the writer.
+`pkg/network/`: exactly one reader goroutine and one writer goroutine per connection
+(`pkg/network/conn.go:145`), with all other producers going through a bounded channel to the writer
+(`pkg/network/conn.go:170`).
 
 **Blocked writes silently backing up.**
 *Symptom:* a node's memory grows, and its outbound send channel is always full. *Cause:* a slow or
