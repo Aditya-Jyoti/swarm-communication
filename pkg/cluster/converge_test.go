@@ -49,6 +49,14 @@ type simNet struct {
 	down  map[protocol.NodeID]bool
 	// sent counts frames by type, for thrash accounting.
 	sent map[protocol.MessageType]int
+	// drop, if set, loses matching frames at delivery time.
+	drop func(simFrame) bool
+}
+
+func (s *simNet) setDrop(fn func(simFrame) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drop = fn
 }
 
 type simEndpoint struct {
@@ -132,7 +140,7 @@ func (s *simNet) pop() (simFrame, *Node, bool) {
 	if f.due > s.now {
 		s.now = f.due
 	}
-	if s.down[f.to] {
+	if s.down[f.to] || (s.drop != nil && s.drop(f)) {
 		return f, nil, true
 	}
 	return f, s.nodes[f.to], true
@@ -359,6 +367,47 @@ func (s *sim) run(d time.Duration, each func()) {
 			each()
 		}
 	}
+}
+
+// kill crashes a node: everything it had queued or was being sent is lost, it
+// sends nothing more, every peer sees its socket reset (PeerDown PeerDied), and
+// probes of it fail.
+func (s *sim) kill(id protocol.NodeID) {
+	s.t.Helper()
+	s.net.mu.Lock()
+	s.net.down[id] = true
+	kept := s.net.queue[:0]
+	for _, f := range s.net.queue {
+		if f.from != id && f.to != id {
+			kept = append(kept, f)
+		}
+	}
+	s.net.queue = kept
+	s.net.mu.Unlock()
+	for _, sn := range s.nodes {
+		if sn.id == id {
+			sn.stop()
+			<-sn.done
+			continue
+		}
+		if s.net.isDown(sn.id) {
+			continue
+		}
+		sn.hs.fail(addrOf(id), fmt.Errorf("sim: %s is down", id))
+		sn.ep.events <- network.PeerEvent{Kind: network.PeerDown, Peer: network.PeerInfo{ID: id, Advertise: addrOf(id)}, Disposition: network.DispositionPeerDied}
+	}
+	s.settleAll()
+	s.flush()
+}
+
+func (s *sim) node(id protocol.NodeID) *simNode {
+	for _, sn := range s.nodes {
+		if sn.id == id {
+			return sn
+		}
+	}
+	s.t.Fatalf("no node %s", id)
+	return nil
 }
 
 // agreement describes the swarm at a quiet moment.
