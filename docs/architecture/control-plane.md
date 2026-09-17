@@ -27,6 +27,15 @@ flowchart LR
   `TASK_RESULT` whenever a task led by that node completes
   (`NodeConfig.OnTaskResult`).
 - CC -> node: `TASK` (only to leaders) and `CHAOS` (to any node).
+- CC -> node: `PING` every 5s on every connected link; the node answers `PONG`.
+  Without it the link is one-way and the node's read deadline (`SWARM_IDLE_TIMEOUT`)
+  would reap it. The keep-alive period MUST stay well under the node's idle timeout.
+- The CC's `HELLO_ACK` carries no `Advertise` and an empty `KnownPeers`.
+- A node announces **incarnation 0** on its CC link. If `SWARM_CONTROL_CENTER`
+  wrongly points at a mesh node, that node's pool rejects the older incarnation and
+  the real mesh link survives. If a handshake completes with any peer ID other than
+  `control-center`, the node stops its uplink (`ErrNotControlCenter`) and keeps
+  running without one. The CC ignores the incarnation: the newest link per node wins.
 - A lost CC link is redialled with backoff. Election and heartbeats never depend on it.
 
 Node-side handling:
@@ -37,6 +46,7 @@ Node-side handling:
 | `CHAOS kill` | log, then `os.Exit(1)` (Compose restarts it as a new incarnation) |
 | `CHAOS delay` | `MeshProber.SetDelay(d)` and `Node.SetChaosDelay(d)`; `0 <= delay_ms <= 5000` |
 | `CHAOS clear` | both delays set to 0 |
+| `PING` | reply `PONG` with the same nonce and seq, never delayed by chaos |
 
 ## 2. Tasks
 
@@ -64,6 +74,22 @@ leader, so a result for the same `task_id` may arrive twice. The CC keeps the fi
 | `POST /api/tasks` | body = a `task` client message; returns `{"task_ids":[...]}` |
 | `POST /api/chaos` | body = a `chaos` client message; returns `{"ok":true}` |
 | `GET /healthz` | `ok` |
+
+The `type` field is optional in POST bodies (the path implies it) but must match
+if present. Bodies are capped at 64 KiB. Every non-2xx response is JSON:
+
+```json
+{"error": "bad request: task kind is required"}
+```
+
+| Status | When |
+|---|---|
+| 400 | malformed JSON, wrong `type`, missing `kind` or `node`, negative `count`, invalid chaos action or `delay_ms` |
+| 404 | chaos target is not a connected node |
+| 503 | no connected leader for a task, or the CC is shutting down |
+
+WebSocket requests that fail validation are logged and dropped; there is no error
+message to the browser.
 
 Server to browser, sent once on connect and then every 1s:
 
@@ -93,7 +119,12 @@ Server to browser, sent once on connect and then every 1s:
   `connected: false` for 30s, then disappears.
 - `tasks` holds the newest 200 tasks, newest last. `state` is
   `pending` | `done` | `failed`.
-- `peers` entries are `MemberRecord` exactly as on the wire.
+- `peers` entries are `MemberRecord` exactly as on the wire. `score: -1` means
+  **unmeasured** (`protocol.UnmeasuredScore`), never "excellent". Any negative
+  score must be treated the same way.
+- `scores` are the reporting node's own local measurements, keyed by peer
+  address. NaN and Inf values are omitted.
+- `peers` and `scores` are always `[]` / `{}`, never `null`.
 
 Server to browser, sent as they happen:
 
