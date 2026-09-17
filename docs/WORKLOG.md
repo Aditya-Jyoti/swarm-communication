@@ -1002,7 +1002,7 @@ The site is live at <https://aditya-jyoti.github.io/swarm-communication/>.
 
 | Item | Status |
 |---|---|
-| `TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst` times out at `-cpu 1` (seen on CI) | **OPEN.** A debug agent is investigating. |
+| `TestSimultaneousDialLowerInitiatorWinsWhenItLandsFirst` times out at `-cpu 1` (seen on CI) | **OPEN** at the time of writing. Closed in 6.11. |
 | MEDIUM-1 (5.2) | Open, deferred by the user |
 | A death recorded at `MaxInt64` cannot be refuted | Open |
 | Task bodies over 1KiB cannot be re-issued after failover | Accepted cost (6.4) |
@@ -1032,3 +1032,28 @@ Newly nominated in this phase:
 |---|---|
 | Per-member sequence numbers for fields that are not monotone | Cause 1 in 6.6: why `Seq` is needed alongside the incarnation |
 | Testing what you deploy | Cause 2 in 6.6: undialable test addresses and lower-bound assertions hid a star topology |
+
+### 6.11 The flaky simultaneous-dial test: a lost wake-up
+
+**Agent:** `go-engineer` * **Verification:** 18,000 runs at `-cpu 1,2,4` pinned to 2 loaded
+cores, 0 failures (was about 1 in 250).
+
+The timeout was not the dial logic being slow. At the moment of failure every map the waiter
+watched was already empty, and the waiter was still parked in `sync.Cond.Wait`: a lost wake-up.
+`untrackPending` in `pkg/network/pool.go` removed a socket from `pending` without
+`p.changed.Broadcast()`. On most paths a later claim release broadcasts and hides the gap. A
+HELLO rejected by the lower-NodeID tie-break takes no claim, so the removal was the only state
+change and nobody was woken.
+
+**Fix (`1aa504d`):** broadcast on every mutation of `pending`, and list every field the
+condition variable covers next to its declaration. **Pinned by**
+`TestRejectedInboundHandshakeWakesStateWaiters`, which fails deterministically without the
+broadcast. `waitState` now dumps pool state and all goroutines on timeout.
+
+Four test-side races were found by the same stress run and fixed (`4b1d53b`, `ce633f2`,
+`15d44ac`, `ca861fc`): a gate released before the dial reached it, an `Err()` check racing
+the accept loop's exit, `net.Pipe` failing `SetReadDeadline` once either end closed, and a
+one-slot event buffer filled by a PeerUp the test did not wait for.
+
+**Lesson recorded:** a `sync.Cond` is only as correct as the list of writers that broadcast.
+Default `GOMAXPROCS` on an 8-core machine never showed this; a 2-core CI runner did.
