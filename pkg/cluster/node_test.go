@@ -1056,10 +1056,13 @@ func TestProbeUnreachableIncrementsMissed(t *testing.T) {
 	if st.Missed["node-b"] != 1 {
 		t.Fatalf("Missed = %d, want 1", st.Missed["node-b"])
 	}
-	// With node-b unmeasurable, self (score 0: no valid peers) leads.
+	// We have a peer and could not measure it, so we know nothing about ourselves
+	// either: the self-report is unavailable, not 0. Leadership still lands on
+	// node-a, but through Elect's nobody-is-measurable fallback (lowest alive ID)
+	// rather than because node-a claimed the best score in the swarm.
 	requireIDs(t, "Leaders", st.Leaders, ids("node-a"))
-	if st.Scores["node-a"] != 0 {
-		t.Fatalf("self score = %v with no valid peers, want 0", st.Scores["node-a"])
+	if !math.IsNaN(st.Scores["node-a"]) {
+		t.Fatalf("self score = %v with peers but no valid measurement, want NaN", st.Scores["node-a"])
 	}
 
 	h.probeRound()
