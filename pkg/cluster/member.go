@@ -430,6 +430,14 @@ func (t *Table) Remove(id protocol.NodeID) bool {
 	return true
 }
 
+// Version returns the table's mutation counter without copying anything, so a
+// periodic reader can skip work when nothing has changed.
+func (t *Table) Version() uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.version
+}
+
 // Snapshot returns an immutable, deterministically ordered copy.
 func (t *Table) Snapshot() View {
 	t.mu.RLock()

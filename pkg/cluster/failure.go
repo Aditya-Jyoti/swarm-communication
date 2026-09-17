@@ -37,6 +37,12 @@ import (
 // death, or the member hears the rumour and refutes it. If every node timed every
 // rumour, a single node with a bad link could kill a healthy peer swarm-wide.
 
+// tombstone is one death record being aged.
+type tombstone struct {
+	since       time.Time
+	incarnation int64
+}
+
 // suspicion is one first-hand doubt being timed.
 type suspicion struct {
 	// since is when the doubt was raised, on the node's Clock.
@@ -129,6 +135,9 @@ func (n *Node) controlTick(ctx context.Context) {
 	if n.expireSuspicions(ctx, now) {
 		n.membershipChanged(ctx)
 	}
+	if n.sweepTombstones(now) {
+		n.publish()
+	}
 }
 
 // expireSuspicions confirms every first-hand suspicion older than
@@ -161,4 +170,82 @@ func (n *Node) expireSuspicions(ctx context.Context, now time.Time) bool {
 		}
 	}
 	return changed
+}
+
+// sweepTombstones removes death records older than TombstoneTTL and reports
+// whether it removed any.
+//
+// # Why dead records are kept at all
+//
+// A death record at incarnation k+1 is what outranks every stale "alive at k"
+// still circulating (markLeft, SetState). Delete it and the next such echo
+// re-inserts the member as alive.
+//
+// # Why they cannot be kept forever
+//
+// Every full view carries them, so gossip grows with churn rather than with
+// swarm size, and a long-lived swarm with container restarts accumulates a
+// record per restart.
+//
+// # The trade-off, and the TTL
+//
+// After removal, a stale "alive" record for the member re-infects us. How long
+// can such a record survive elsewhere? Every node that holds it hears the death
+// through anti-entropy within (2N-1) * GossipInterval of the death reaching any
+// peer that gossips to it (gossipRound). With N=10 and 2s that is 38s, so 60s
+// covers swarms up to about N=15 at the default interval; a bigger swarm or a
+// slower interval should raise the TTL. A re-infection past the TTL is not
+// permanent: the ghost is probed, fails, is suspected and dies again within
+// about DeadAfter probe intervals, at the cost of one extra tombstone cycle.
+//
+// Relayed tombstones for members we have already removed are not re-inserted
+// (handleMembershipDelta), which is what stops two nodes that collected a death
+// a few seconds apart from handing it back to each other forever.
+//
+// The clock starts when THIS node first sees the death, whether first-hand or
+// relayed: there is no wall-clock death time on the wire, and a node that
+// joined late has no reason to keep the record shorter than anyone else.
+func (n *Node) sweepTombstones(now time.Time) bool {
+	if v := n.table.Version(); v != n.tombVersion {
+		n.tombVersion = v
+		view := n.table.Snapshot()
+		dead := make(map[protocol.NodeID]int64)
+		for _, m := range view.Members {
+			if m.State == StateDead && m.ID != n.cfg.Self {
+				dead[m.ID] = m.Incarnation
+			}
+		}
+		for id, inc := range dead {
+			// A newer death (the member restarted and died again) restarts
+			// the clock: it is a new record for gossip to carry.
+			if ts, ok := n.tombstones[id]; !ok || ts.incarnation != inc {
+				n.tombstones[id] = tombstone{since: now, incarnation: inc}
+			}
+		}
+		for id := range n.tombstones {
+			if _, ok := dead[id]; !ok {
+				delete(n.tombstones, id) // refuted, restarted, or already gone
+			}
+		}
+	}
+	removed := false
+	for id, ts := range n.tombstones {
+		if now.Sub(ts.since) < n.cfg.TombstoneTTL {
+			continue
+		}
+		delete(n.tombstones, id)
+		if m, ok := n.table.Snapshot().Get(id); ok && m.State == StateDead && m.Incarnation == ts.incarnation {
+			n.table.Remove(id)
+			// The per-peer bookkeeping that outlives a death goes with it. The
+			// address is forgotten too, so if the member really comes back
+			// under a new container, learning its address dials it again.
+			delete(n.claims, id)
+			if m.Addr != n.cfg.Advertise {
+				delete(n.dialed, m.Addr)
+			}
+			n.log.Info("tombstone collected", "peer", id, "incarnation", m.Incarnation)
+			removed = true
+		}
+	}
+	return removed
 }

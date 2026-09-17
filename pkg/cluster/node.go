@@ -50,6 +50,9 @@ const (
 	// that drops and comes straight back must not cost an incarnation bump and a
 	// re-election.
 	DefaultSuspicionTimeout = 3 * time.Second
+	// DefaultTombstoneTTL is how long a death record is kept. See sweepTombstones
+	// for how it relates to the anti-entropy repair bound.
+	DefaultTombstoneTTL = 60 * time.Second
 	// leaveTimeout bounds the LEAVE broadcast on shutdown. It is a real-time bound,
 	// not a synchronisation: shutdown must not wait on a peer whose send queue is
 	// full, and a LEAVE that does not get out costs the peers one failure-detector
@@ -167,6 +170,11 @@ type NodeConfig struct {
 	// confirmed as a death. It is checked on the failure-detector tick, so the
 	// effective timeout is rounded up to the next HeartbeatInterval. Default 3s.
 	SuspicionTimeout time.Duration
+	// TombstoneTTL is how long a dead member's record is kept before it is
+	// removed from the table, measured on the Clock from when this node first
+	// saw the death. Default 60s. It must comfortably exceed the anti-entropy
+	// repair bound, (2N-1) * GossipInterval; see sweepTombstones.
+	TombstoneTTL time.Duration
 }
 
 func (c NodeConfig) withDefaults() NodeConfig {
@@ -214,6 +222,9 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	}
 	if c.SuspicionTimeout <= 0 {
 		c.SuspicionTimeout = DefaultSuspicionTimeout
+	}
+	if c.TombstoneTTL <= 0 {
+		c.TombstoneTTL = DefaultTombstoneTTL
 	}
 	return c
 }
@@ -353,6 +364,11 @@ type Node struct {
 	// probeSeq numbers probe rounds, so a round that started before a suspicion
 	// cannot clear it with a stale success.
 	probeSeq uint64
+	// tombstones times every death record in the table, first-hand or
+	// relayed, keyed by member. tombVersion is the table version they were
+	// last reconciled against. See sweepTombstones.
+	tombstones  map[protocol.NodeID]tombstone
+	tombVersion uint64
 }
 
 type inboundFrame struct {
@@ -408,6 +424,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		unknownLogged: make(map[protocol.MessageType]struct{}),
 		gossipSet:     make(map[protocol.NodeID]struct{}),
 		suspects:      make(map[protocol.NodeID]suspicion),
+		tombstones:    make(map[protocol.NodeID]tombstone),
 	}
 	n.table.Upsert(Member{
 		ID:          cfg.Self,
@@ -1097,6 +1114,15 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 			score = rec.Score
 		}
 		i, known := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID)
+		// A tombstone for a member we do not hold is dropped, not inserted.
+		// Once a node has collected a death (sweepTombstones), a peer that has
+		// not collected it yet would otherwise re-insert it on its next gossip
+		// round, restart our TTL, and the swarm would pass the same tombstone
+		// back and forth forever. Nothing is lost by skipping it: we hold no
+		// "alive" copy of the member for the tombstone to outrank.
+		if !known && ParseState(rec.State) == StateDead {
+			continue
+		}
 		// Roles are ordered by Seq, so a relayed role is as good as a first-hand
 		// one: Upsert keeps whichever claim is newer. A record without Seq
 		// (an older build) is unordered, and for those a role is only believed

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -280,6 +281,100 @@ func TestMarkSuspectIgnoresSelfAndStrangers(t *testing.T) {
 	}
 	if m := h.member("node-a"); m.State != StateAlive {
 		t.Fatalf("self = %+v", m)
+	}
+}
+
+// ---- tombstone GC ----
+
+const testTombstoneTTL = 5 * time.Second
+
+func withTombstones(c *NodeConfig) {
+	phase4(c)
+	c.TombstoneTTL = testTombstoneTTL
+}
+
+// A dead record is kept for TombstoneTTL from the first tick that sees it, and
+// then removed together with the bookkeeping that outlives a death.
+func TestTombstoneIsCollectedAfterTTL(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		dialed []protocol.NodeAddress
+	)
+	h := newHarness(t, "node-a", func(c *NodeConfig) {
+		withTombstones(c)
+		c.Connect = func(a protocol.NodeAddress) {
+			mu.Lock()
+			defer mu.Unlock()
+			dialed = append(dialed, a)
+		}
+	})
+	h.peerUp("node-b", 1)
+	h.frame("node-b", protocol.TypeElectionResult, protocol.ElectionResultPayload{Term: 1, Leaders: ids("node-b")})
+	h.peerDead("node-b")
+	h.step(testTombstoneTTL)
+	if m := h.member("node-b"); m.State != StateDead {
+		t.Fatalf("node-b = %+v before the TTL, want dead", m)
+	}
+	h.step(hbEvery)
+	st := h.status()
+	if _, ok := st.View.Get("node-b"); ok {
+		t.Fatal("tombstone not collected after the TTL")
+	}
+	if _, ok := st.Claims["node-b"]; ok {
+		t.Fatal("claim of a collected member kept")
+	}
+
+	// A peer that has not collected it yet cannot hand it back.
+	h.frame("node-c", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 2, Role: "worker", State: "dead",
+	}}})
+	if _, ok := h.status().View.Get("node-b"); ok {
+		t.Fatal("a relayed tombstone was re-inserted after collection")
+	}
+
+	// The documented trade-off: a stale "alive" arriving after collection is
+	// believed, and the member is dialled again, because its address was
+	// forgotten with it.
+	h.report("node-b", 1, 1.0)
+	if m := h.member("node-b"); m.State != StateAlive {
+		t.Fatalf("stale alive after collection = %+v", m)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 1 || dialed[0] != addrOf("node-b") {
+		t.Fatalf("dialed = %v, want node-b's address once", dialed)
+	}
+}
+
+// A member that refutes its death before the TTL is not collected.
+func TestRefutedTombstoneIsNotCollected(t *testing.T) {
+	h := newHarness(t, "node-a", withTombstones)
+	h.hs.set(addrOf("node-b"), 1.0)
+	h.peerUp("node-b", 1)
+	h.peerDead("node-b")
+	h.step(hbEvery) // the sweep sees the death
+	h.report("node-b", 3, 1.0)
+	h.step(2 * testTombstoneTTL)
+	if m := h.member("node-b"); m.State != StateAlive || m.Incarnation != 3 {
+		t.Fatalf("node-b = %+v, want alive at 3", m)
+	}
+}
+
+// A second death (the member came back and died again) restarts the clock.
+func TestNewerDeathRestartsTombstoneClock(t *testing.T) {
+	h := newHarness(t, "node-a", withTombstones)
+	h.peerUp("node-b", 1)
+	h.peerDead("node-b") // dead at 2
+	h.step(testTombstoneTTL - 2*hbEvery)
+	h.peerUp("node-b", 5) // restarted
+	h.peerDead("node-b")  // dead at 6
+	h.step(testTombstoneTTL)
+	if m := h.member("node-b"); m.State != StateDead || m.Incarnation != 6 {
+		t.Fatalf("node-b = %+v, want still dead at 6", m)
+	}
+	h.step(2 * hbEvery)
+	if _, ok := h.status().View.Get("node-b"); ok {
+		t.Fatal("second tombstone not collected")
 	}
 }
 
