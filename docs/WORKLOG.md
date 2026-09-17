@@ -1230,3 +1230,127 @@ parallel load it failed 35 times in 305 runs. Two causes:
 
 Simulator failures now print the seed and a per-node dump, so a CI failure is actionable
 from its output alone.
+
+---
+
+## 2026-09-17 -- Drone simulation: 3D positions, emulated latency, interactive airspace
+
+This entry covers `3e65d73..c6252a0`. The contract is `docs/architecture/drone-simulation.md`.
+The user had waived phase-gate reviews (see STATE.md), so the lead picked the defaults below
+and records them here. Each can be revisited.
+
+### 8.1 The request
+
+**Request (user, 2026-09-17):**
+
+- Killed nodes must not come back.
+- Give each node a relative location. The control plane emulates latency from it, and that
+  latency drives leader assignment.
+- Put sliders in an advanced dropdown.
+- Use 3D coordinates, like a real drone simulation.
+- Show distances, latency and message propagation visually.
+- Make the topology interactive (orbit, zoom).
+
+### 8.2 Agents and commits
+
+| Agent | Work | Commits |
+|---|---|---|
+| `system-architect` | Contract, defaults, live verification, two fixes | `1b4734d`, `add87c0`, `becc3a5`, `471c61a` |
+| `go-engineer` | `geo`, protocol, network, cluster, telemetry, CC, node | `3e65d73`, `15462df`, `7b892f0`, `49b3f1e`, `ff6fd2a`, `090b421`, `224cd4c`, `e1d0cd0`, `f753695`, `d03f84b`, `ad5562d`, `6e938be`, `5043797` |
+| `sim-engineer` | 3D view, sim panel, Compose, e2e | `4340bdc`, `d2aa708`, `8ba4fbf`, `1594542`, `c6252a0` |
+
+### 8.3 Decisions
+
+```mermaid
+flowchart LR
+    UI[Advanced panel] -->|"POST /api/sim or ws sim"| CC[control-center]
+    CC -->|"SIM_CONFIG v, positions, model"| A[drone A]
+    CC -->|"SIM_CONFIG v, positions, model"| B[drone B]
+    A -->|PING| B
+    B -->|"PONG after delay A to B"| A
+    A -->|"TELEMETRY scores and flows"| CC
+    CC -->|"snapshot pos and flows"| UI
+```
+
+**D1. Where the latency is emulated: at the responder, on PONG only.**
+
+| Option | Failure mode it invites | Cost | Outcome |
+|---|---|---|---|
+| `tc netem` per container | Needs `NET_ADMIN` (we drop all caps), one qdisc per destination, Docker-only | High | Rejected |
+| Delay every mesh frame | Heartbeats slow down with distance, so far drones get false failovers | Medium | Rejected |
+| Delay only the PONG, in process | Distance does not affect heartbeat timing (by design) | Low | **Chosen** |
+
+The prober already turns PONG delay into RTT, so nothing else in the scoring path changed.
+
+**D2. Who owns positions and the model: the CC, as a versioned snapshot.**
+
+| Option | Failure mode it invites | Outcome |
+|---|---|---|
+| Nodes gossip their own positions | No operator control, and a move takes gossip rounds to converge | Rejected |
+| CC pushes `SIM_CONFIG` (full snapshot, `version`) | CC is the single author; a node without the CC keeps its last config | **Chosen** |
+
+A snapshot, not a delta, so a node that missed an update is fixed by the next one. `version`
+starts at the CC start time in ms, so a restarted CC still wins.
+
+**D3. Latency is the election input, with no new election logic.** Leaders come from the
+existing median-RTT score, groups from nearest-leader affinity. Central drones lead, workers
+join the nearest leader. The only cluster change is runtime `threshold` and `hysteresis`
+(`49b3f1e`).
+
+**D4. Killed drones stay down: kill exits 0, nodes use `restart: on-failure`.**
+
+| Option | Failure mode it invites | Outcome |
+|---|---|---|
+| CC refuses reconnects from killed IDs | The container still restarts and flaps against the CC | Rejected |
+| Exit 0 plus `restart: on-failure` | A real crash (non-zero) still restarts; revive with `docker compose up -d` | **Chosen** |
+
+The CC shows a killed node as `killed` for 30s. The same ID reconnecting is treated as new.
+
+**D5. 3D view: a hand-written projection in vanilla JS.** No three.js or similar: the CSP
+and the no-CDN rule forbid it, and orbit, zoom and depth sort fit in a small module.
+
+**D6. Message flows: counts per (to, type) in telemetry.** Rejected: a per-frame event
+stream, whose size grows with traffic. Counts are bounded to 256 entries per sample.
+
+### 8.4 Contract gap resolved mid-build
+
+There was no way to clear an operator override. Now `threshold: 0` and `hysteresis: -1`
+clear it, and the node returns to its own values (`6e938be` CC, `5043797` node).
+
+### 8.5 Bugs found in live verification
+
+1. **Drones stacked on each other.** `geo.DefaultPosition` used plain FNV-1a. Compose names
+   differ only in a trailing digit, so every replica got the same x and z, and `node-1` and
+   `node-5` got the same spot. Fixed with the splitmix64 finalizer, mirrored in the frontend
+   and pinned by a golden test (`471c61a`).
+2. **The dashboard could not clear overrides.** Button added (`c6252a0`).
+
+### 8.6 Verification
+
+| Check | Result |
+|---|---|
+| `go test -race ./...` | all packages pass |
+| Docker e2e | PASS. A chaos-killed worker exited 0, was not restarted, showed as `killed`. `per_unit_ms` 3.5 applied on 4/4 drones. |
+| Live geometry | Every worker on its nearest leader. Leaders were the two lowest median-distance drones. RTT about 2 ms per unit. |
+| Live move | `node-4` moved next to `node-5`: RTT 11.5 ms, and it re-homed |
+| Live override | threshold 0.5 gave 3 leaders; clearing it gave 2 |
+| Frontend | 80 jsdom checks, plus a headless-browser run |
+
+### 8.7 Open items
+
+1. Flow counts include frames queued but lost on a dying connection.
+2. The CC position map is capped at 4096 entries.
+3. Emulated latency affects only PONGs, so heartbeat timing ignores distance (by design, D1).
+4. **LAN exposure.** The user set `BIND_ADDR=0.0.0.0` locally. Without
+   `SWARM_CC_API_TOKEN`, the chaos and sim API is open to the LAN.
+
+### 8.8 Syllabus additions
+
+Nominated for `doc-educator` (pages being written in parallel):
+
+| Page | Why |
+|---|---|
+| `architecture/drone-simulation` (final) | The contract becomes the reference page |
+| Concept: network emulation | Why in-process PONG delay instead of `tc netem`, and what it cannot model |
+| Concept: 3D projection | Orbit camera, perspective divide, depth sort in plain JS |
+| Concept: hash mixing | Why FNV-1a alone clusters similar names, and what a finalizer fixes |
