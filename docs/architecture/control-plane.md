@@ -64,6 +64,19 @@ The CC picks a leader round-robin from the latest telemetry (`role == "leader"`)
 Delivery is at-least-once: a task pending at failover is re-issued by the promoted
 leader, so a result for the same `task_id` may arrive twice. The CC keeps the first.
 
+On the mesh (not the CC link), each `STATE_SYNC` ledger record also carries the task
+itself while it is pending, so a promoted worker can re-issue it
+(`pkg/protocol/message.go:468`):
+
+```json
+{"task_id": "t-1", "assigned_to": "node-2", "state": "pending",
+ "kind": "sleep", "body": {"ms": 100}}
+```
+
+`kind` and `body` are omitted when empty. A body over 1 KiB is not replicated, so that
+task cannot be re-issued after a failover. The body is dropped once the task completes.
+See [Replication and Tasks](/architecture/replication-and-tasks).
+
 ## 3. HTTP and WebSocket (CC, default `:8080`)
 
 | Path | Purpose |
@@ -103,7 +116,7 @@ Server to browser, sent once on connect and then every 1s:
       "leader": "node-1", "degraded": false, "connected": true,
       "last_seen_ms": 120, "dropped": 0, "ledger_size": 4,
       "peers": [{"id": "node-2", "advertise": "node-2:7946", "incarnation": 5,
-                 "role": "worker", "state": "alive", "score": 0.4}],
+                 "role": "worker", "state": "alive", "score": 0.4, "seq": 12}],
       "scores": {"node-2:7946": 0.4}
     }
   ],
@@ -124,6 +137,10 @@ Server to browser, sent once on connect and then every 1s:
   score must be treated the same way.
 - `scores` are the reporting node's own local measurements, keyed by peer
   address. NaN and Inf values are omitted.
+- `peers` entries carry `seq`, the member's own claim counter (`pkg/protocol/message.go:367`).
+  It orders `role` and `score` within one `incarnation`, and a higher `seq` is the newer claim.
+  It is omitted when 0 (a build without it). Two nodes showing different `score` for a member
+  at the same `seq` is a bug; at different `seq` it is propagation in progress.
 - `peers` and `scores` are always `[]` / `{}`, never `null`.
 
 Server to browser, sent as they happen:
