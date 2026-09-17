@@ -1057,3 +1057,128 @@ one-slot event buffer filled by a PeerUp the test did not wait for.
 
 **Lesson recorded:** a `sync.Cond` is only as correct as the list of writers that broadcast.
 Default `GOMAXPROCS` on an 8-core machine never showed this; a 2-core CI runner did.
+
+---
+
+## 2026-09-17 -- Repo restructure and docs simplification
+
+This entry covers `416f5de..b37e5ff` plus the docs follow-up on the same day. Earlier entries
+are not edited. Where this entry changes a standing rule, it says so.
+
+### 7.1 The request
+
+**Decision (user, 2026-09-17):** split the repo into a `backend/` and a `frontend/`, drive the
+local stack from a `.env` file, and make the docs much shorter and simpler.
+
+### 7.2 Backend and frontend split
+
+**Agents:** `go-engineer` (backend move), `sim-engineer` (frontend image, Compose, e2e, CI)
+
+- `backend/` is the Go module: `cmd/`, `pkg/`, `Dockerfile`, `deploy/node-entrypoint.sh`.
+- `frontend/` holds the dashboard files, `nginx.conf.template` and its own `Dockerfile`
+  (nginx, uid 101, port 8080).
+- The CC no longer embeds the dashboard. The `web` package is gone. `GET /` on the CC returns a
+  plain-text pointer.
+
+| Option | Failure mode it invites | Outcome |
+|---|---|---|
+| Keep the dashboard embedded in the CC binary | Any UI change rebuilds and restarts the CC, which drops every node uplink | Rejected |
+| Separate static server, browser calls the CC on another port | Cross-origin: the CC's same-origin WebSocket check fails, or has to be loosened | Rejected |
+| nginx serves the files and proxies `/api/`, `/healthz`, `/ws` to the CC | One more hop, and one more config to get right | **Chosen** |
+
+Why nginx:
+
+- **The CC stays an API.** It only speaks HTTP/JSON and WebSocket.
+- **The frontend image is independent.** It builds and restarts without touching the CC.
+- **Same-origin WS still works.** nginx passes `Host $http_host`, so the `Origin` the browser
+  sends matches the `Host` the CC sees. No CORS, no loosened check.
+- **CC restarts are survivable.** nginx resolves `control-center` through Docker DNS on each
+  request, so it starts without the CC and follows a recreated container. It answers
+  `/frontend-healthz` itself.
+
+```mermaid
+flowchart LR
+    B[browser] -->|"127.0.0.1:8080"| F[frontend nginx]
+    subgraph swarmnet [bridge swarmnet]
+        F -->|"/api/ /healthz /ws"| CC[control-center]
+        S[seed] --> CC
+        N[node replicas] --> CC
+        N -->|first dial| S
+    end
+```
+
+### 7.3 Configuration through .env
+
+**Agent:** `sim-engineer`
+
+- `docker-compose.yml` uses `${VAR:-default}` everywhere. No `env_file`, so the stack runs with
+  no `.env` at all.
+- `.env.example` is committed. `.env` is local and gitignored.
+- `NODE_REPLICAS` (default 5) sets `deploy.replicas`. `--scale` still overrides it.
+- `SWARM_HTTP_PORT` is gone. The published port is now `FRONTEND_PORT`. `CC_HTTP_PORT`
+  (default 18081) is used only if the commented CC `ports:` block is enabled.
+
+Rejected: `env_file:` on each service. It passes every variable into every container, including
+ones meant only for Compose, and hides which service uses what.
+
+### 7.4 Default bind on 127.0.0.1
+
+**Decision:** the frontend is published on `${BIND_ADDR:-127.0.0.1}:${FRONTEND_PORT:-8080}`.
+The CC is not published at all.
+
+**Why:** the HTTP API can submit tasks and kill nodes, and has no authentication. Binding to
+`0.0.0.0` by default would expose that to the whole LAN. Opening it up is now an explicit
+`BIND_ADDR=0.0.0.0`.
+
+### 7.5 Container hardening
+
+**Agent:** `sim-engineer`
+
+Every service sets `cap_drop: [ALL]`, `no-new-privileges:true` and `read_only: true`. No
+service needs a capability: every port is above 1024 and chaos latency is injected in-process,
+not with `tc`. nginx gets tmpfs mounts (owned by uid 101) for its cache, `/tmp` and the rendered
+config.
+
+### 7.6 Docs simplification
+
+**Agent:** `doc-educator`
+
+- Docs went from about 14,500 lines to about 2,900.
+- **Concept page template:** a short definition with an analogy, one diagram, then
+  `## How swarm-net uses it`, `## Common pitfalls`, `## Further reading`.
+- **Architecture consolidated** to `overview`, `mesh-and-handshake`,
+  `failure-detection-and-failover`, `replication-and-tasks`, `control-center`,
+  `running-the-swarm` and `why-not-consensus`. `repo-layout` and `convergence-debugging` are
+  stubs that point to where their content moved. The control-plane contract was merged into
+  `control-center`.
+
+**Standing rule changed -- citations.** This supersedes the constraint recorded at the end of
+section 1.6 (and restated in 4.4), which required `file.go:line` citations verified with
+`grep -n`. From now on, docs cite **paths only** (for example
+`backend/pkg/network/pool.go`), never line numbers.
+
+Why: line numbers drifted with almost every commit. Keeping them true took a follow-up docs
+commit after most code changes (for example `01c045f`), stale ones still slipped through
+(5.6), and they made the pages heavy to read. A path plus a function name is enough to find
+the code and stays true much longer.
+
+### 7.7 Follow-up by `system-architect`
+
+- Stale references fixed in `docs/`: the bridge-networking page showed the CC as the published
+  service; curl examples now use `127.0.0.1`; Go commands and labels use `backend/`.
+- `README.md` rewritten, `STATE.md` replaced with a fresh handover, and path references updated
+  in `CLAUDE.md` and `.claude/agents/`. The user's instructions in `CLAUDE.md` are unchanged.
+
+### 7.8 Security audit
+
+A security audit is running at the same time. Its results will be recorded in a later entry.
+
+### 7.9 Syllabus additions
+
+Nominated for `doc-educator`:
+
+| Concept | Why |
+|---|---|
+| Reverse proxies and WebSocket upgrades | nginx must forward `Upgrade`, `Connection` and `Host` for the CC's same-origin check to pass |
+| DNS resolution at request time in nginx | Why `resolver` plus a variable upstream lets nginx start without the CC and follow a recreated container |
+| Container hardening | What `cap_drop`, `no-new-privileges` and a read-only root filesystem each prevent |
