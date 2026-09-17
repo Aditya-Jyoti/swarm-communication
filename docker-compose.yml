@@ -47,7 +47,7 @@ x-backend-build: &backend-build
   args:
     VERSION: "${SWARM_VERSION:-dev}"
     GO_VERSION: "${GO_VERSION:-1.27}"
-    ALPINE_VERSION: "${ALPINE_VERSION:-3.22}"
+    ALPINE_VERSION: "${ALPINE_VERSION:-3.24}"
 
 x-node-env: &node-env
   SWARM_LISTEN: ":7000"
