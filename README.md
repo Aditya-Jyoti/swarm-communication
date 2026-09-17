@@ -70,6 +70,26 @@ with distance and RTT, and animates messages between drones.
 These are start-up values for the CC. The panel changes them at run time. Details:
 [Drone Simulation](docs/architecture/drone-simulation.md).
 
+## Blender
+
+```bash
+python3 blender/make_swarm_scene.py                        # live swarm -> blender/swarm-scene.json
+blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
+```
+
+`blender/swarm-scene.json` is one self-describing JSON document that holds the whole swarm:
+every drone in both unit systems, the clusters, each link with its measured RTT and the
+model's predicted one-way delay, the traffic on it, the dashboard's colour legend, and the
+exact requests that change the running swarm. That single file is enough to build the scene.
+
+Editing works from both sides. A slider in the dashboard's Advanced panel really moves the
+drone, and Blender follows on the next sync. Moving a cone in Blender and pressing **Push
+positions** POSTs to the same `/api/sim`, so the swarm re-measures and re-groups for real.
+Positions in swarm units are the truth; metres are a rendering of them.
+
+The add-on also live-syncs straight from `/api/state` and can chaos-kill the selected drone.
+Details, options and limits: [`blender/README.md`](blender/README.md).
+
 ## Running without Docker
 
 ```bash
