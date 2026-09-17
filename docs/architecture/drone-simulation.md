@@ -114,7 +114,10 @@ object with `"type": "sim"`:
 - `randomize: true` places every known drone at a new random position.
 - `reset_positions: true` returns every drone to `geo.DefaultPosition`.
 - A position for an unknown node ID is kept and applied when that node connects.
-- A `threshold` outside `(0, 1]` is a 400.
+- `threshold: 0` clears the operator override; a `threshold` below 0 or above 1 is a 400.
+- `hysteresis` is capped at 1500; a negative value clears the override.
+- `version` starts at the CC's start time in milliseconds, so nodes still running accept
+  the first config from a restarted CC.
 - Every change bumps `version`, pushes `SIM_CONFIG` to all nodes, and emits an event
   of kind `sim`.
 - `POST /api/sim` goes through the same mutation guard as `/api/tasks` (token and
