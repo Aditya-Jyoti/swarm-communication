@@ -63,6 +63,8 @@ To be re-run by the lead after merging, and this table updated.
    heals through refutation.
 9. The simultaneous-dial flake is fixed (`1aa504d`). Keep stressing `backend/pkg/network` at
    `-cpu 1` under load after any pool change.
+10. The convergence-test flake is fixed (WORKLOG 7.11): the simulator is now deterministic and a
+   stale JOIN_ACK bug is fixed.
 
 ## Suggested next session
 

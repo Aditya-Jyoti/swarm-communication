@@ -1208,3 +1208,25 @@ decoder, every peer payload, and the task executor, 19M runs, no findings.
 
 Load: 200,000 tasks in 6s, snapshots stayed under 50 KB, memory under 45 MB per container,
 exactly 2 leaders throughout. Chaos: 15 kills in 5 rounds, re-converged in 2s every time.
+
+### 7.11 The flaky convergence test: a nondeterministic simulator and a stale JOIN_ACK
+
+**Agent:** `go-engineer` * **Verification:** seeds 1-4000 pass; a replay test proves every seed
+produces identical frames; stress under load went from 11.5% failures to 0.
+
+The security audit saw `TestSwarmAgreesAtEveryQuietMomentUnderReordering` fail once. Under
+parallel load it failed 35 times in 305 runs. Two causes:
+
+1. **The simulator was not a pure function of its seed (test code).** Several fake timers fire
+   at the same instant, and the node loop picked at random between the next tick and a probe
+   result it had just started. Startup and crash events were also delivered to all nodes at
+   once. Fixed by advancing the fake clock one tick at a time and settling each node in turn.
+   A new determinism test replays a seed three times and compares every frame.
+2. **A real bug: a JOIN_ACK was matched to the pending JOIN by sender only.** A late rejection
+   of an earlier JOIN detached the worker, and the acceptance that followed was then dropped
+   as stale, so the leader listed a worker that believed it was detached. Fixed by matching
+   the reply's correlation ID (`joinID`). Pinned by
+   `TestRejectionOfAnEarlierJoinDoesNotVoidTheCurrentOne`.
+
+Simulator failures now print the seed and a per-node dump, so a CI failure is actionable
+from its output alone.
