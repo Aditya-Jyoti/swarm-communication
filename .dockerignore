@@ -1,0 +1,20 @@
+# Keep the build context to what the Go build needs: cmd/, pkg/, web/, go.mod,
+# go.sum, deploy/. Everything else only slows context upload and busts caches.
+.git
+.github
+.claude
+node_modules
+docs
+scripts
+*.md
+package.json
+package-lock.json
+bin
+*.test
+*.out
+*.log
+.env
+docker-compose.yml
+compose*.yml
+Dockerfile
+.dockerignore

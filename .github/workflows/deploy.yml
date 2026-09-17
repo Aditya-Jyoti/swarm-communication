@@ -29,9 +29,11 @@ jobs:
         with:
           fetch-depth: 0 # lastUpdated timestamps need real history
 
+      # Node 22, not 20: jsdom 30 (used by the Mermaid check) pulls in undici 8,
+      # which calls webidl APIs Node 20 does not have and crashes at import.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci

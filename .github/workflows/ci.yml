@@ -51,3 +51,43 @@ jobs:
 
       - name: Test with race detector
         run: go test -race -count=2 ./...
+
+  # Builds both runtime images and validates the Compose file, so a Dockerfile
+  # or compose edit that breaks `docker compose up` fails here instead of on an
+  # engineer's laptop. Images are built but never pushed. The full e2e run
+  # (scripts/e2e.sh) is not part of CI yet: it needs ~a minute of cluster time
+  # and is run by hand after merges.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Build node image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: node
+          push: false
+          tags: swarm-net/node:ci
+          cache-from: type=gha,scope=swarm-net
+          cache-to: type=gha,scope=swarm-net,mode=max
+
+      - name: Build control-center image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: control-center
+          push: false
+          tags: swarm-net/control-center:ci
+          cache-from: type=gha,scope=swarm-net
+
+      - name: Check dashboard and scripts parse
+        run: |
+          node --check web/static/app.js
+          bash -n scripts/e2e.sh
+          sh -n deploy/node-entrypoint.sh

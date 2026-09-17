@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>swarm-net control center</title>
+  <!-- Everything is local: this page is embedded in the control-center binary
+       and must work with no network access beyond the CC itself. -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>swarm-net <span class="sub">control center</span></h1>
+    <div id="conn" class="conn" data-state="connecting" role="status" aria-live="polite">
+      <span class="conn-dot" aria-hidden="true"></span>
+      <span id="conn-text">connecting</span>
+    </div>
+  </header>
+
+  <section class="summary" aria-label="Cluster summary">
+    <div class="stat"><span class="stat-num" id="sum-nodes">-</span><span class="stat-label">nodes</span></div>
+    <div class="stat"><span class="stat-num" id="sum-leaders">-</span><span class="stat-label">leaders</span></div>
+    <div class="stat"><span class="stat-num" id="sum-healthy">-</span><span class="stat-label">alive + connected</span></div>
+    <div class="stat"><span class="stat-num" id="sum-pending">-</span><span class="stat-label">tasks pending</span></div>
+    <div class="stat"><span class="stat-num" id="sum-age">-</span><span class="stat-label">snapshot age</span></div>
+    <div class="stat stat-wide"><span class="stat-num small" id="sum-last-event">-</span><span class="stat-label">last event</span></div>
+  </section>
+
+  <main class="grid">
+    <section class="panel topo-panel" aria-label="Topology">
+      <div class="panel-head">
+        <h2>Topology</h2>
+        <ul class="legend" aria-label="Legend">
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="n-shape st-alive leader-shape"/></svg>leader (large, L)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-alive"/></svg>alive</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-suspect"/></svg>suspect (dashed)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-dead"/></svg>dead (X)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-disconnected"/></svg>disconnected (hollow)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="halo"/><circle cx="10" cy="10" r="4" class="n-shape st-alive"/></svg>degraded (halo)</li>
+        </ul>
+      </div>
+      <svg id="topo" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Swarm topology">
+        <g id="topo-clusters"></g>
+        <g id="topo-links"></g>
+        <g id="topo-nodes"></g>
+      </svg>
+      <p id="topo-empty" class="empty">No nodes reported yet.</p>
+    </section>
+
+    <section class="panel task-panel" aria-label="Submit tasks">
+      <h2>Broadcast task</h2>
+      <form id="task-form" autocomplete="off">
+        <label>Kind
+          <select id="task-kind">
+            <option value="echo">echo</option>
+            <option value="sleep">sleep</option>
+            <option value="hash">hash</option>
+          </select>
+        </label>
+        <label>Body (JSON)
+          <textarea id="task-body" rows="4" spellcheck="false"></textarea>
+        </label>
+        <label>Count
+          <input id="task-count" type="number" min="1" max="100" value="1">
+        </label>
+        <div class="row">
+          <button type="submit" class="btn primary">Submit</button>
+          <span id="task-msg" class="form-msg" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <h2>Chaos (all nodes)</h2>
+      <div class="row">
+        <button type="button" id="chaos-clear-all" class="btn">Clear all delays</button>
+      </div>
+      <p class="hint">Per-node delay and kill are in the node table. A killed node exits and
+        Compose restarts it, so you can watch failover and rejoin.</p>
+    </section>
+
+    <section class="panel nodes-panel" aria-label="Nodes">
+      <h2>Nodes</h2>
+      <div class="table-wrap">
+        <table id="node-table">
+          <thead>
+            <tr>
+              <th>id</th><th>role</th><th>state</th><th>term</th><th>leader</th>
+              <th>peers</th><th>ledger</th><th>dropped</th><th>last seen</th><th>chaos</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel tasks-panel" aria-label="Tasks">
+      <h2>Tasks <span class="count" id="task-count-label"></span></h2>
+      <div class="table-wrap scroll">
+        <table id="task-table">
+          <thead>
+            <tr><th>task</th><th>kind</th><th>state</th><th>leader / worker</th><th>duration</th><th>output</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel events-panel" aria-label="Event log">
+      <h2>Events</h2>
+      <ol id="event-log" class="event-log" aria-live="polite"></ol>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
