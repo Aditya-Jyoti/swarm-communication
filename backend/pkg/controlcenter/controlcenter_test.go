@@ -1,8 +1,10 @@
 package controlcenter
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -818,6 +820,82 @@ func TestNewListenFailure(t *testing.T) {
 	defer taken.Close()
 	if _, err := New(Config{NodeListen: taken.Addr().String()}); err == nil {
 		t.Fatal("New bound a taken port")
+	}
+}
+
+// hijackAt is a ResponseWriter whose Hijack records how many browsers the hub
+// holds at that instant, and hands the handler one end of a pipe.
+//
+// The hijack is the moment coder/websocket takes the socket over and writes
+// the 101; everything the hub emits after it is something the browser is
+// entitled to see. Recording there turns "registered before the upgrade
+// completes" into an assertion with no timing in it.
+type hijackAt struct {
+	http.ResponseWriter
+	srv     *Server
+	conn    net.Conn
+	clients chan int
+}
+
+func (h *hijackAt) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	n := -1
+	h.srv.do(context.Background(), func(hb *hub) { n = len(hb.clients) })
+	h.clients <- n
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+// TestBrowserRegisteredBeforeUpgrade pins the ordering that made
+// TestRunEndToEnd flaky on CI: the hub must know the browser before the 101
+// goes out. With the registration after websocket.Accept, an event emitted in
+// between (a node connecting and reporting "leader", say) was broadcast to a
+// client set that did not contain this browser yet, and no later snapshot
+// replays an event.
+func TestBrowserRegisteredBeforeUpgrade(t *testing.T) {
+	cc := startCC(t, nil)
+
+	srvConn, cliConn := net.Pipe()
+	// The browser end: read whatever the handler writes (the 101 and the
+	// first snapshot) so no write blocks on an unread pipe.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(io.Discard, cliConn)
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString(make([]byte, 16)))
+	w := &hijackAt{ResponseWriter: httptest.NewRecorder(), srv: cc.srv, conn: srvConn, clients: make(chan int, 1)}
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		cc.srv.Handler().ServeHTTP(w, req)
+	}()
+
+	select {
+	case n := <-w.clients:
+		if n != 1 {
+			t.Fatalf("hub held %d browsers when the upgrade was written, want 1", n)
+		}
+	case <-time.After(testWait):
+		t.Fatal("handler never upgraded")
+	}
+
+	_ = cliConn.Close() // the handler's reader errors out, the handler returns
+	select {
+	case <-served:
+	case <-time.After(testWait):
+		t.Fatal("handler did not return")
+	}
+	<-drained
+	// And the browser is not left behind in the hub.
+	n := -1
+	cc.srv.do(context.Background(), func(h *hub) { n = len(h.clients) })
+	if n != 0 {
+		t.Fatalf("hub still holds %d browsers after the handler returned", n)
 	}
 }
 
