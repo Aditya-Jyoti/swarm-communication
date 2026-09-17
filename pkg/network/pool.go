@@ -7,6 +7,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"swarm-net/pkg/protocol"
@@ -306,13 +307,21 @@ func (p *Pool) Send(ctx context.Context, to protocol.NodeID, env *protocol.Envel
 }
 
 // Broadcast queues env to every connected peer and reports how many accepted it.
+//
+// The sends fan out, one goroutine per peer, joined before returning. A
+// control-plane Send can wait up to CtrlSendTimeout for queue space, so a
+// sequential loop would cost the caller N * CtrlSendTimeout when every peer is
+// slow -- and the caller is the cluster's election loop, which must not be
+// stalled by the peers it is trying to tell about a failover. Fanned out, the
+// worst case is a single CtrlSendTimeout regardless of N. The goroutines are
+// short-lived and cannot leak: each ends when its Send returns, and Send is
+// bounded by ctx, by CtrlSendTimeout, and by the connection closing.
 func (p *Pool) Broadcast(ctx context.Context, env *protocol.Envelope) int {
 	if env == nil {
 		return 0
 	}
-	// Snapshot under the lock, send outside it: Conn.Send can block for up to
-	// CtrlSendTimeout per peer, and holding mu for that long would freeze Admit
-	// and every other Send.
+	// Snapshot under the lock, send outside it: holding mu across the sends
+	// would freeze Admit and every other Send for the duration.
 	p.mu.Lock()
 	conns := make([]*Conn, 0, len(p.peers))
 	for _, e := range p.peers {
@@ -320,13 +329,21 @@ func (p *Pool) Broadcast(ctx context.Context, env *protocol.Envelope) int {
 	}
 	p.mu.Unlock()
 
-	n := 0
+	var (
+		wg sync.WaitGroup
+		n  atomic.Int64
+	)
 	for _, c := range conns {
-		if c.Send(ctx, env) == nil {
-			n++
-		}
+		wg.Add(1)
+		go func(c *Conn) {
+			defer wg.Done()
+			if c.Send(ctx, env) == nil {
+				n.Add(1)
+			}
+		}(c)
 	}
-	return n
+	wg.Wait()
+	return int(n.Load())
 }
 
 // Close shuts everything down: every connection, every dial loop, every pending

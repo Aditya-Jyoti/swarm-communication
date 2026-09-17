@@ -634,6 +634,70 @@ func TestBroadcastCountsOnlyQueuedPeers(t *testing.T) {
 	h.event(PeerDown)
 }
 
+// Two peers whose writers are parked inside the socket and whose control queues
+// are full: a sequential Broadcast would wait CtrlSendTimeout for each in turn.
+// Fanned out, the whole call is bounded by roughly one CtrlSendTimeout, and the
+// one healthy peer is still counted.
+func TestBroadcastFansOutSoOneSlowPeerCannotStallTheCaller(t *testing.T) {
+	const sendTimeout = 200 * time.Millisecond
+	h := newHarness(t, idA, func(c *PoolConfig) {
+		c.Conn.CtrlDepth = 1
+		c.Conn.CtrlSendTimeout = sendTimeout
+	})
+	h.pool.Connect(addrB)
+	peerB := h.acceptAs(idB)
+	defer peerB.Close()
+	h.event(PeerUp)
+
+	// Swap in two stalled connections under the lock, exactly as the pool holds
+	// them. Their writers park on the first Write and the one-slot control queue
+	// is then filled by a single Send, so every further Send waits the full
+	// timeout.
+	type stalledPeer struct {
+		id   protocol.NodeID
+		gate *gateConn
+	}
+	stalled := []stalledPeer{{"stalled-0", newGateConn()}, {"stalled-1", newGateConn()}}
+	h.pool.mu.Lock()
+	for _, sp := range stalled {
+		c := NewConn(sp.id, sp.gate, func(protocol.NodeID, *protocol.Envelope) {}, h.pool.cfg.Conn)
+		h.pool.peers[sp.id] = &peerEntry{info: PeerInfo{ID: sp.id}, conn: c, gone: make(chan struct{})}
+		t.Cleanup(func() { c.Close() })
+	}
+	h.pool.mu.Unlock()
+	for _, sp := range stalled {
+		// First frame parks the writer inside Write; the second fills the
+		// one-slot queue behind it.
+		for i := 0; i < 2; i++ {
+			if err := h.pool.Send(context.Background(), sp.id, mustEnv(t, protocol.TypeHeartbeat)); err != nil {
+				t.Fatalf("priming send %d to %s: %v", i, sp.id, err)
+			}
+		}
+		select {
+		case <-sp.gate.entered:
+		case <-time.After(failsafe):
+			t.Fatal("writer never parked in the socket")
+		}
+	}
+
+	start := time.Now()
+	n := h.pool.Broadcast(context.Background(), mustEnv(t, protocol.TypeHeartbeat))
+	elapsed := time.Since(start)
+
+	if n != 1 {
+		t.Errorf("Broadcast = %d, want 1 (only the healthy peer)", n)
+	}
+	if elapsed < sendTimeout {
+		t.Errorf("Broadcast returned in %v, before a single CtrlSendTimeout (%v) -- did the stalled sends not wait?", elapsed, sendTimeout)
+	}
+	if elapsed >= 2*sendTimeout {
+		t.Errorf("Broadcast took %v with two stalled peers; fan-out should bound it near one CtrlSendTimeout (%v)", elapsed, sendTimeout)
+	}
+	if got := readFrame(t, peerB); got.Type != protocol.TypeHeartbeat {
+		t.Errorf("healthy peer received %s", got.Type)
+	}
+}
+
 // --- tie-break ------------------------------------------------------------------------------------
 
 // We are the higher ID. The peer (lower) dials us while our own dial to it is
