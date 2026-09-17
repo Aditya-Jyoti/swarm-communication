@@ -1,8 +1,20 @@
 # swarm-net local environment.
 #
-#   docker compose up --build                  # control center + seed + 5 nodes = 6 nodes
-#   docker compose up --build --scale node=11  # any N; no Go or YAML edits
-#   open http://localhost:8080
+#   cp .env.example .env                        # optional: every variable has a default
+#   docker compose up -d --build                # control center + seed + 5 nodes + dashboard
+#   docker compose up -d --scale node=11        # any N; no Go or YAML edits
+#   open http://127.0.0.1:8080                  # ${BIND_ADDR}:${FRONTEND_PORT}
+#
+# Services:
+#   control-center  backend/ image, target control-center. NOT published: the
+#                   browser reaches it only through `frontend`.
+#   seed, node      backend/ image, target node. `node` is the scalable one.
+#   frontend        frontend/ image: nginx serving the dashboard and
+#                   proxying /api/, /healthz and /ws to control-center:8080.
+#
+# Tunables come from .env (Compose reads it for ${...} interpolation). Every
+# variable has a default here, so the file also works with no .env at all.
+# See .env.example for the full, commented list.
 #
 # Topology: every container sits on the user-defined bridge `swarmnet`, where
 # Docker's embedded DNS resolves service names (`seed`, `control-center`),
@@ -10,30 +22,50 @@
 #
 # Identity under --scale: replicas of `node` share one definition, so their
 # SWARM_NODE_ID / SWARM_ADVERTISE cannot be written here. The image entrypoint
-# (deploy/node-entrypoint.sh) reverse-resolves its own IP to the container name
-# and uses that for both. `seed` sets them explicitly because every other node
-# needs a fixed address to dial first.
+# (backend/deploy/node-entrypoint.sh) reverse-resolves its own IP to the
+# container name and uses that for both. `seed` sets them explicitly because
+# every other node needs a fixed address to dial first.
+#
+# Security: the HTTP API (tasks, chaos) is unauthenticated, so the published
+# port binds to ${BIND_ADDR:-127.0.0.1}. Set BIND_ADDR=0.0.0.0 only on a
+# trusted network.
 name: swarm-net
+
+x-hardening: &hardening
+  # Nothing here needs a Linux capability: every port is above 1024 and chaos
+  # latency is injected in-process (SetChaosDelay), not with tc/netem.
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-backend-build: &backend-build
+  context: ./backend
+  args:
+    VERSION: "${SWARM_VERSION:-dev}"
+    GO_VERSION: "${GO_VERSION:-1.27}"
+    ALPINE_VERSION: "${ALPINE_VERSION:-3.22}"
 
 x-node-env: &node-env
   SWARM_LISTEN: ":7000"
   SWARM_SEEDS: "seed:7000"
   SWARM_CONTROL_CENTER: "control-center:7000"
-  # LeaderCount = max(1, ceil(N * threshold)); the code default 0.3 gives 2
-  # leaders at N=6, so killing one still leaves a leader while re-election runs.
+  # LeaderCount = max(1, ceil(N * threshold)); 0.3 gives 2 leaders at N=6, so
+  # killing one still leaves a leader while re-election runs.
   SWARM_THRESHOLD: "${SWARM_THRESHOLD:-0.3}"
   SWARM_PROBE_INTERVAL: "${SWARM_PROBE_INTERVAL:-1s}"
   SWARM_IDLE_TIMEOUT: "${SWARM_IDLE_TIMEOUT:-5s}"
   SWARM_GOSSIP_INTERVAL: "${SWARM_GOSSIP_INTERVAL:-2s}"
+  SWARM_ELECTION_FLOOR: "${SWARM_ELECTION_FLOOR:-30s}"
   SWARM_TELEMETRY_INTERVAL: "${SWARM_TELEMETRY_INTERVAL:-1s}"
   SWARM_LOG_LEVEL: "${SWARM_LOG_LEVEL:-info}"
 
 x-node: &node
+  <<: *hardening
   build:
-    context: .
+    <<: *backend-build
     target: node
-  image: swarm-net/node:dev
+  image: "swarm-net/node:${SWARM_IMAGE_TAG:-dev}"
   networks: [swarmnet]
+  read_only: true
   # A CHAOS "kill" makes the node exit(1); `unless-stopped` brings it back as a
   # new incarnation, so the dashboard shows death -> failover -> rejoin. It
   # deliberately does NOT restart a container the operator stopped (`docker
@@ -48,17 +80,25 @@ x-node: &node
 
 services:
   control-center:
+    <<: *hardening
     build:
-      context: .
+      <<: *backend-build
       target: control-center
-    image: swarm-net/control-center:dev
+    image: "swarm-net/control-center:${SWARM_IMAGE_TAG:-dev}"
     hostname: control-center
     networks: [swarmnet]
-    ports:
-      - "${SWARM_HTTP_PORT:-8080}:8080"
+    read_only: true
+    environment:
+      SWARM_LOG_LEVEL: "${SWARM_LOG_LEVEL:-info}"
+    # Not published by default: the dashboard and API are reached through
+    # `frontend`. To expose the CC directly (e.g. to bypass nginx while
+    # debugging), uncomment these two lines and set CC_HTTP_PORT in .env:
+    # ports:
+    #   - "${BIND_ADDR:-127.0.0.1}:${CC_HTTP_PORT:-18081}:8080"
     restart: unless-stopped
     # The CC gives in-flight HTTP requests 5s to finish on SIGTERM
-    # (cmd/control-center/main.go); a shorter grace period would SIGKILL it first.
+    # (backend/cmd/control-center/main.go); a shorter grace period would
+    # SIGKILL it first.
     stop_grace_period: 10s
 
   seed:
@@ -74,14 +114,40 @@ services:
     <<: *node
     environment:
       <<: *node-env
-    # Default N: seed + 5 = 6 nodes. Override with --scale node=N.
+    # Default N = seed + NODE_REPLICAS. `--scale node=N` overrides this.
     deploy:
-      replicas: 5
+      replicas: ${NODE_REPLICAS:-5}
     depends_on:
       control-center:
         condition: service_started
       seed:
         condition: service_started
+
+  frontend:
+    <<: *hardening
+    build:
+      context: ./frontend
+      args:
+        NGINX_VERSION: "${NGINX_VERSION:-1.31-alpine}"
+    image: "swarm-net/frontend:${SWARM_IMAGE_TAG:-dev}"
+    networks: [swarmnet]
+    environment:
+      CONTROL_CENTER_UPSTREAM: "control-center:8080"
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${FRONTEND_PORT:-8080}:8080"
+    # No depends_on on purpose: nginx resolves control-center per request, so
+    # it starts on its own and keeps serving the dashboard (which shows
+    # "reconnecting") while the CC is down or being recreated.
+    read_only: true
+    # The only paths nginx writes: temp/cache dirs, the pid file, and the
+    # config rendered from the template at start-up. Owned by nginx (uid 101).
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0700
+      - /tmp:uid=101,gid=101,mode=0700
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0755
+    restart: unless-stopped
+    # nginx stops on SIGTERM at once; keep `down` fast.
+    stop_grace_period: 3s
 
 networks:
   # Compose names it "<project>_swarmnet". No fixed `name:` on purpose: a fixed
