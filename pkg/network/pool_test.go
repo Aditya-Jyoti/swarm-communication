@@ -1363,6 +1363,13 @@ func TestPeerDownStrictlyPrecedesPeerUpForSamePeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer z.Close()
+	// The dialler's handshake returns on the ACK, which the pool writes before
+	// register emits z's PeerUp. Wait for admit to finish (z registered, claim
+	// released -- both after the emit returns), or a's PeerDown below can take
+	// the free slot first on a slow scheduler and never be "in flight".
+	waitState(t, h.pool, "node-z admitted", func() bool {
+		return h.pool.peers["node-z"] != nil && h.pool.claims["node-z"] == 0
+	})
 
 	// Kill a's connection: its PeerDown is decided but cannot be delivered.
 	first.Close()
