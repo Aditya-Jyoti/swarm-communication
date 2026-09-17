@@ -9,6 +9,11 @@
 //     and TASK_RESULT on demand, and hands inbound TASK and CHAOS frames to
 //     callbacks. The contract is docs/architecture/control-plane.md.
 //
+// Two helpers serve the drone simulation (docs/architecture/drone-simulation.md):
+// Emulation holds the last SIM_CONFIG and turns it into a per-peer PONG delay,
+// and FlowRecorder wraps the mesh transport to count the frames the dashboard
+// animates.
+//
 // The CC link is deliberately walled off from the mesh. The Client owns a
 // private network.Pool, so nothing learned on it (the CC's address, anything in
 // its HELLO_ACK) can reach the mesh pool's known-address set, and the node never
