@@ -5,16 +5,24 @@
 #   E2E_NODES=8 scripts/e2e.sh     # 1 seed + 8 nodes
 #   E2E_KEEP=1 scripts/e2e.sh      # leave the stack running afterwards
 #
+# Everything goes through the FRONTEND port (nginx), so the reverse proxy to
+# the control center is exercised on every request. The CC itself is not
+# published.
+#
 # Steps:
-#   1. build and start the stack under its own Compose project
-#   2. wait until every node is connected to the control center, exactly
+#   1. build and start the stack (backend/ + frontend/) under its own Compose
+#      project
+#   2. check the proxy: the dashboard is served at /, /healthz answers through
+#      nginx, and a same-origin WebSocket upgrade on /ws succeeds while a
+#      cross-origin one is refused
+#   3. wait until every node is connected to the control center, exactly
 #      max(1, ceil(N * threshold)) leaders exist, and every worker is attached
 #      to a live leader
-#   3. submit tasks over HTTP and wait until all are done
-#   4. `docker kill` a current leader
-#   5. wait until a leader other than the victim exists and every surviving
+#   4. submit tasks over HTTP and wait until all are done
+#   5. `docker kill` a current leader
+#   6. wait until a leader other than the victim exists and every surviving
 #      node is attached again
-#   6. submit tasks again and wait until all are done
+#   7. submit tasks again and wait until all are done
 #
 # Exits non-zero with a FAIL line (plus recent logs) on the first failed step.
 # The stack is always torn down (`down -v`) on exit unless E2E_KEEP=1.
@@ -22,7 +30,7 @@
 # Env:
 #   E2E_NODES            replicas of the `node` service       (default 5)
 #   E2E_PROJECT          compose project name                 (default swarm-net-e2e)
-#   E2E_HTTP_PORT        host port for the control center     (default 18080)
+#   E2E_HTTP_PORT        host port for the frontend (nginx)   (default 18080)
 #   E2E_READY_TIMEOUT    seconds for initial convergence      (default 120)
 #   E2E_HEAL_TIMEOUT     seconds for failover to complete     (default 60)
 #   E2E_TASK_TIMEOUT     seconds for a task batch to finish   (default 60)
@@ -31,6 +39,9 @@
 #   E2E_KEEP=1           do not tear down on exit
 #   E2E_JSON=python3     force the python3 JSON path (default: jq if present)
 #   SWARM_THRESHOLD      leader fraction, passed to the stack (default 0.3)
+#
+# The script exports FRONTEND_PORT, BIND_ADDR and SWARM_THRESHOLD, which take
+# precedence over a local .env; the other .env settings still apply.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,7 +58,9 @@ TASKS="${E2E_TASKS:-5}"
 BASE="http://127.0.0.1:${PORT}"
 TOTAL=$((NODES + 1)) # + seed
 
-export SWARM_HTTP_PORT="$PORT"
+# The frontend is the only published port; bind it to loopback for the test.
+export FRONTEND_PORT="$PORT"
+export BIND_ADDR=127.0.0.1
 COMPOSE=(docker compose -f "$ROOT/docker-compose.yml" -p "$PROJECT")
 
 # ------------------------------------------------------------------ output
@@ -217,6 +230,42 @@ run_tasks() {
 	fail "$label: tasks not done within ${TASK_TIMEOUT}s (last: $last)"
 }
 
+# check_proxy
+#
+# The stack is reached only through nginx. Checks that it serves the
+# dashboard itself, proxies /healthz to the CC, and passes a WebSocket upgrade
+# through with Host intact: the CC accepts an upgrade only when Origin matches
+# Host, so a proxy that rewrote Host would fail the first upgrade, and one
+# that skipped the check would pass the second.
+check_proxy() {
+	local deadline=$((SECONDS + READY_TIMEOUT)) page code
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		[ "$(curl -fsS --max-time 3 "$BASE/healthz" 2>/dev/null)" = "ok" ] && break
+		sleep 1
+	done
+	[ "$(curl -fsS --max-time 3 "$BASE/healthz" 2>/dev/null)" = "ok" ] ||
+		fail "proxy: GET /healthz through the frontend did not return ok"
+	page="$(curl -fsS --max-time 3 "$BASE/")" || fail "proxy: GET / failed"
+	grep -q 'src="app.js"' <<<"$page" || fail "proxy: GET / is not the dashboard"
+	curl -fsS --max-time 3 -o /dev/null "$BASE/app.js" || fail "proxy: GET /app.js failed"
+	code="$(ws_upgrade "$BASE")"
+	[ "$code" = "101" ] || fail "proxy: same-origin WebSocket upgrade returned $code, want 101"
+	code="$(ws_upgrade "http://evil.example")"
+	[ "$code" = "403" ] || fail "proxy: cross-origin WebSocket upgrade returned $code, want 403"
+	log "proxy: dashboard served, /healthz ok, /ws upgrade 101 (same origin) / 403 (foreign origin)"
+}
+
+# ws_upgrade ORIGIN -> HTTP status of a WebSocket handshake on $BASE/ws.
+# The key is RFC 6455's sample nonce (it must decode to 16 bytes).
+# curl cannot speak WebSocket frames here, so it only reads the status line;
+# --max-time ends the (then open) connection, hence the `|| true`.
+ws_upgrade() {
+	curl -sS -o /dev/null -w '%{http_code}' --http1.1 --max-time 2 \
+		-H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+		-H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+		-H "Origin: $1" "$BASE/ws" 2>/dev/null || true
+}
+
 # container_for NODE_ID -> container id
 #
 # Node ids are either set explicitly (seed) or derived from the container name
@@ -243,6 +292,7 @@ build=(--build)
 "${COMPOSE[@]}" up -d "${build[@]}" --scale "node=$NODES" ||
 	fail "docker compose up failed"
 
+check_proxy
 wait_healthy "" "$TOTAL" "$READY_TIMEOUT" "converge"
 run_tasks "before"
 
