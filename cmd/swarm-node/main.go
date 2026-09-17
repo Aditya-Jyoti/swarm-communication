@@ -23,6 +23,7 @@ import (
 	"swarm-net/pkg/health"
 	"swarm-net/pkg/network"
 	"swarm-net/pkg/protocol"
+	"swarm-net/pkg/telemetry"
 )
 
 // version is the build string, overridden at link time with
@@ -89,8 +90,8 @@ type listener interface {
 }
 
 // app is the constructed dependency graph. Building it (newApp) is separate from
-// running it (run) so a test can reach the node for Status without the binary
-// growing a telemetry endpoint it does not yet need.
+// running it (run) so a test can reach the node and swap the process-level
+// side effects (exit, delay injection) before anything runs.
 type app struct {
 	cfg    Config
 	log    *slog.Logger
@@ -98,6 +99,15 @@ type app struct {
 	prober *network.MeshProber
 	node   *cluster.Node
 	ln     listener
+	// client is the Control Center uplink; nil when SWARM_CONTROL_CENTER is
+	// unset. The CC is optional: nothing in the mesh depends on it.
+	client *telemetry.Client
+	// exit ends the process on CHAOS kill. os.Exit in production; a test
+	// substitutes a recorder so the test binary survives.
+	exit func(code int)
+	// setDelays applies a CHAOS delay (0 clears it) to both reply paths: the
+	// prober's PONGs and the node's HEARTBEAT_ACKs. A seam for the same reason.
+	setDelays func(d time.Duration)
 }
 
 // newApp builds and binds everything but dials nobody and runs no loop.
@@ -107,17 +117,24 @@ type app struct {
 // There is a cycle in the graph: the pool must be given its frame Handler at
 // construction, the handler is the node's, and the node must be given its
 // Transport (the pool) and its OnFrame hook (the prober's), while the prober
-// needs the pool to send PINGs and the node's table to resolve addresses. None
-// of the pkg constructors offers a setter, so the cycle is broken with two
-// late-bound closures over a *cluster.Node that is nil until the node exists.
+// needs the pool to send PINGs and the node's table to resolve addresses. The
+// Control Center client closes a second loop: the node's OnTaskResult needs
+// the client, while the client's Snapshot, SubmitTask and OnChaos need the
+// node (and the app). None of the pkg constructors offers a setter, so the
+// cycles are broken with late-bound closures over a *cluster.Node that is nil
+// until the node exists, and over an *app that is filled in as we go.
+//
+// The order is therefore: pool, prober, client (closures only), node, and the
+// listener last.
 //
 // This is safe without a lock because of ordering, not luck: the closures are
 // only ever invoked from goroutines the pool starts (connection readers, dial
-// loops) or that the node's loop starts (probes), and every one of those is
-// created by a `go` statement that runs after the assignment below. The Go
-// memory model makes the write visible to them. A test under -race confirms
-// it. If a future change hands the pool a socket before newApp returns, this
-// comment is the thing to reread.
+// loops), that the node's loop starts (probes), or that app.run starts (the
+// client's Run), and every one of those is created by a `go` statement that
+// runs after the assignments below. The Go memory model makes the writes
+// visible to them. A test under -race confirms it. If a future change hands
+// the pool a socket, or starts the client, before newApp returns, this comment
+// is the thing to reread.
 func newApp(cfg Config, stderr io.Writer) (*app, error) {
 	// The node tags its own lines with "node"; the base logger goes to it
 	// untagged so the key is not emitted twice, and the binary's own lines get
@@ -126,6 +143,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 	log := base.With("node", cfg.NodeID)
 
 	var node *cluster.Node
+	a := &app{cfg: cfg, log: log, exit: os.Exit}
 
 	pool := network.NewPool(network.PoolConfig{
 		Self: network.Identity{
@@ -151,7 +169,39 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 
 	strategy := health.NewLatencyHealthStrategy(health.Config{Probe: prober.Probe})
 
-	var err error
+	a.setDelays = func(d time.Duration) {
+		prober.SetDelay(d)
+		node.SetChaosDelay(d)
+	}
+
+	var (
+		client       *telemetry.Client
+		onTaskResult func(protocol.TaskResultPayload)
+		err          error
+	)
+	if cfg.ControlCenter != "" {
+		client, err = telemetry.New(telemetry.Config{
+			Self:     network.Identity{ID: cfg.NodeID, Advertise: cfg.Advertise},
+			Addr:     cfg.ControlCenter,
+			Interval: cfg.TelemetryInterval,
+			Snapshot: func() protocol.TelemetryPayload { return telemetry.FromStatus(node.Status()) },
+			SubmitTask: func(ctx context.Context, t protocol.TaskPayload) error {
+				return node.SubmitTask(ctx, t)
+			},
+			OnChaos: a.applyChaos,
+			Conn:    network.ConnConfig{IdleTimeout: cfg.IdleTimeout},
+			Logger:  base,
+		})
+		if err != nil {
+			prober.Close()
+			_ = pool.Close()
+			return nil, fmt.Errorf("swarm-node %q: build control center client: %w", cfg.NodeID, err)
+		}
+		// SendResult never blocks, which is what OnTaskResult (called on the
+		// node loop) requires.
+		onTaskResult = client.SendResult
+	}
+
 	node, err = cluster.NewNode(cluster.NodeConfig{
 		Self:           cfg.NodeID,
 		Advertise:      cfg.Advertise,
@@ -164,6 +214,7 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		GossipInterval: cfg.GossipInterval,
 		Logger:         base,
 		OnFrame:        prober.HandleFrame,
+		OnTaskResult:   onTaskResult,
 	})
 	if err != nil {
 		prober.Close()
@@ -179,7 +230,23 @@ func newApp(cfg Config, stderr io.Writer) (*app, error) {
 		return nil, fmt.Errorf("swarm-node %q: %w", cfg.NodeID, err)
 	}
 	log.Info("listening", "addr", ln.Addr(), "advertise", cfg.Advertise, "version", version)
-	return &app{cfg: cfg, log: log, pool: pool, prober: prober, node: node, ln: ln}, nil
+	a.pool, a.prober, a.node, a.ln, a.client = pool, prober, node, ln, client
+	return a, nil
+}
+
+// applyChaos acts on a validated CHAOS instruction, on the client's goroutine.
+func (a *app) applyChaos(c telemetry.Chaos) {
+	switch c.Action {
+	case telemetry.ChaosKill:
+		// Deliberately abrupt: no LEAVE, no deferred cleanup. The point of
+		// kill is to look like a crash to the swarm; Compose restarts the
+		// container as a new incarnation.
+		a.log.Error("chaos kill received: exiting")
+		a.exit(exitRuntime)
+	default: // delay and clear; Delay is 0 for clear
+		a.log.Warn("chaos delay applied", "delay", c.Delay)
+		a.setDelays(c.Delay)
+	}
 }
 
 // run builds the app, reports the bound address through onListening (nil is
@@ -199,7 +266,9 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(net
 // run dials the seeds, runs the node loop in the foreground, and shuts down.
 //
 // Shutdown order is the reverse of the data flow: the node goes first so its
-// LEAVE is broadcast while connections still exist; the listener next so no new
+// LEAVE is broadcast while connections still exist; the Control Center uplink
+// next (it has its own pool, so nothing else waits on it, but joining it here
+// means run never returns with the goroutine alive); the listener so no new
 // socket is admitted into a pool about to close; the prober before the pool so
 // its delayed-reply goroutines are joined before the sends they would make have
 // nowhere to go; the pool last, which is also what closes Events and every
@@ -229,9 +298,31 @@ func (a *app) run(ctx context.Context) error {
 		}
 	}()
 
-	a.log.Info("node starting", "seeds", len(a.cfg.Seeds), "threshold", a.cfg.Threshold)
+	// Control Center uplink goroutine: owned by run, joined below via
+	// clientDone. It ends when runCtx is cancelled. An error (a misconfigured
+	// address) is logged and does not stop the node: the mesh never depends
+	// on the CC.
+	var clientDone chan struct{}
+	if a.client != nil {
+		clientDone = make(chan struct{})
+		go func() {
+			defer close(clientDone)
+			if err := a.client.Run(runCtx); err != nil {
+				a.log.Error("control center uplink stopped", "err", err)
+			}
+		}()
+	}
+
+	a.log.Info("node starting", "seeds", len(a.cfg.Seeds), "threshold", a.cfg.Threshold,
+		"control_center", a.cfg.ControlCenter)
 	err := a.node.Run(runCtx)
 	a.log.Info("node loop stopped", "err", err)
+
+	cancel()
+	if clientDone != nil {
+		a.log.Info("closing control center uplink")
+		<-clientDone
+	}
 
 	a.log.Info("closing listener")
 	_ = a.ln.Close()

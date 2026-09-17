@@ -13,6 +13,7 @@ import (
 
 	"swarm-net/pkg/cluster"
 	"swarm-net/pkg/protocol"
+	"swarm-net/pkg/telemetry"
 )
 
 // errConfig is the sentinel every configuration failure wraps, so exitCode can
@@ -48,9 +49,12 @@ type Config struct {
 	// Seeds are the addresses dialled at start-up. SWARM_SEEDS, comma-separated.
 	// Empty is legal: the first node has nobody to call.
 	Seeds []protocol.NodeAddress
-	// ControlCenter is the coordinator's address. SWARM_CONTROL_CENTER, optional.
-	// Parsed and carried now; Phase 5 wires it.
+	// ControlCenter is the coordinator's address. SWARM_CONTROL_CENTER, optional:
+	// empty means this node runs without a Control Center uplink.
 	ControlCenter protocol.NodeAddress
+	// TelemetryInterval is how often TELEMETRY is sent to the Control Center.
+	// SWARM_TELEMETRY_INTERVAL.
+	TelemetryInterval time.Duration
 	// Threshold is the leader fraction in (0,1]. SWARM_THRESHOLD.
 	Threshold float64
 	// ProbeInterval is how often peers are scored. SWARM_PROBE_INTERVAL.
@@ -84,6 +88,7 @@ var settings = []setting{
 	{"advertise", "ADVERTISE", "", "host:port peers dial to reach this node (default: <hostname>:<listen port>)"},
 	{"seeds", "SEEDS", "", "comma-separated peer addresses to dial at start-up"},
 	{"control-center", "CONTROL_CENTER", "", "control-center address (optional)"},
+	{"telemetry-interval", "TELEMETRY_INTERVAL", telemetry.DefaultInterval.String(), "how often telemetry is sent to the control center"},
 	{"threshold", "THRESHOLD", strconv.FormatFloat(cluster.DefaultThreshold, 'g', -1, 64), "leader fraction in (0,1]"},
 	{"probe-interval", "PROBE_INTERVAL", cluster.DefaultProbeInterval.String(), "how often peers are scored"},
 	{"election-floor", "ELECTION_FLOOR", cluster.DefaultElectionFloor.String(), "periodic re-election interval"},
@@ -158,6 +163,10 @@ func Load(args []string, getenv func(string) string, hostname func() (string, er
 		if err := checkHostPort("control-center", string(cfg.ControlCenter), true); err != nil {
 			return Config{}, err
 		}
+	}
+
+	if cfg.TelemetryInterval, err = parseDuration("telemetry-interval", *raw["telemetry-interval"]); err != nil {
+		return Config{}, err
 	}
 
 	if cfg.Threshold, err = strconv.ParseFloat(strings.TrimSpace(*raw["threshold"]), 64); err != nil {
