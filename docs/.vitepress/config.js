@@ -1,6 +1,15 @@
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
-import mathjax3 from 'markdown-it-mathjax3'
+
+// GitHub Pages serves this repo as a *project* site under
+// https://<owner>.github.io/swarm-communication/, not at the domain root. VitePress
+// emits root-absolute asset URLs (/assets/app.js), so without a matching `base` every
+// script 404s and the page stays blank. DOCS_BASE overrides it (e.g. DOCS_BASE=/ for a
+// custom domain or a user site); the value is normalised to "/x/" form.
+function resolveBase(raw) {
+  const trimmed = (raw ?? '/swarm-communication/').trim().replace(/^\/+|\/+$/g, '')
+  return trimmed ? `/${trimmed}/` : '/'
+}
 
 // Sidebar groups are extended dynamically by the `doc-educator` agent after every
 // Concept Discovery pass. Keep groups ordered from "how this system works" toward
@@ -11,6 +20,7 @@ export default withMermaid(defineConfig({
   description:
     'A self-healing peer-to-peer swarm network in Go -- built in the open, documented as a curriculum.',
   lang: 'en-US',
+  base: resolveBase(process.env.DOCS_BASE),
   cleanUrls: true,
   lastUpdated: true,
 
@@ -93,10 +103,12 @@ export default withMermaid(defineConfig({
   },
 
   // LaTeX: $inline$ and $$block$$, per CLAUDE.md 4.3.
+  // VitePress's built-in `math` switch drives markdown-it-mathjax3 (still a devDependency)
+  // AND registers the <mjx-*> tags as Vue custom elements. Calling md.use(mathjax3) by
+  // hand skips the latter, so Vue treats <mjx-container> as an unresolved component and
+  // every math page logs "Hydration completed but contains mismatches".
   markdown: {
-    config: (md) => {
-      md.use(mathjax3)
-    }
+    math: true
   },
 
   // Mermaid replaces ASCII art entirely, per CLAUDE.md 4.2.
