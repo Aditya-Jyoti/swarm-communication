@@ -147,11 +147,14 @@ type Pool struct {
 	wg     sync.WaitGroup
 
 	mu sync.Mutex
-	// changed is broadcast, with mu held, after every mutation of peers, claims,
-	// dialing or deferred. Nothing in the pool waits on it. It exists because the
-	// tie-break's silent transitions are, by design, invisible on Events, and a
-	// test that needs to observe "the winner is registered on both sides" would
-	// otherwise have to poll. A Cond is the honest primitive for that.
+	// changed is broadcast, with mu held, after every mutation of peers, pending,
+	// claims, dialing, deferred or downInFlight. Nothing in the pool waits on it.
+	// It exists because the tie-break's silent transitions are, by design,
+	// invisible on Events, and a test that needs to observe "the winner is
+	// registered on both sides" would otherwise have to poll. A Cond is the
+	// honest primitive for that -- but only if *every* mutation a waiter's
+	// predicate reads is followed by a Broadcast. One that is not is a lost
+	// wakeup: the waiter sleeps on a condition that is already true, for ever.
 	changed *sync.Cond
 	// peers maps a connected peer's ID to its registered connection.
 	peers map[protocol.NodeID]*peerEntry
@@ -261,6 +264,7 @@ func (p *Pool) Admit(raw net.Conn) {
 		return
 	}
 	p.pending[raw] = struct{}{}
+	p.changed.Broadcast()
 	p.wg.Add(1)
 	p.mu.Unlock()
 	go p.admitLoop(raw)
@@ -399,12 +403,19 @@ func (p *Pool) trackPending(raw net.Conn) bool {
 		return false
 	}
 	p.pending[raw] = struct{}{}
+	p.changed.Broadcast()
 	return true
 }
 
+// untrackPending must broadcast. On the paths that go on to release a claim or a
+// dial, a later Broadcast would cover it anyway; but an inbound handshake that
+// fails or is rejected before admitPolicy takes a claim -- the loser of a
+// simultaneous dial, for one -- touches nothing else, so this is the only signal
+// that pending has emptied.
 func (p *Pool) untrackPending(raw net.Conn) {
 	p.mu.Lock()
 	delete(p.pending, raw)
+	p.changed.Broadcast()
 	p.mu.Unlock()
 }
 

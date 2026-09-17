@@ -453,7 +453,13 @@ func TestCloseIsIdempotentAndUnblocksEverything(t *testing.T) {
 // as a death. Mistaking one for the other makes a graceful scale-down look like a
 // failure and triggers a needless re-election.
 func TestPeerCloseIsRecordedAsCleanClose(t *testing.T) {
-	client, server := net.Pipe()
+	// A real socket, not net.Pipe: net.Pipe fails SetReadDeadline with
+	// io.ErrClosedPipe once EITHER end is closed, so the reader's per-frame
+	// SetReadDeadline races the peer's close and the result depends on the
+	// scheduler. (A priming frame does not fix that: it only proves the reader
+	// reached the handler, not that it has re-armed its deadline.) On TCP a
+	// peer close is io.EOF on the next read regardless of timing.
+	client, server := tcpPair(t)
 
 	got := make(chan struct{}, 1)
 	c := NewConn("node-2", server, func(protocol.NodeID, *protocol.Envelope) {
@@ -461,13 +467,11 @@ func TestPeerCloseIsRecordedAsCleanClose(t *testing.T) {
 	}, ConnConfig{})
 	defer c.Close()
 
-	// Send one frame first so the reader is provably inside ReadFrame before the
-	// peer goes away. Without this the test races the reader's first
-	// SetReadDeadline call, and net.Pipe reports io.ErrClosedPipe from SetDeadline
-	// when EITHER end is closed -- an artifact of the double, not of real sockets,
-	// where a peer close surfaces as io.EOF on the next read.
-	enc := protocol.NewEncoder(client)
-	go func() { _ = enc.WriteEnvelope(mustEnvelopeNoT()) }()
+	// Still send one frame first, so the close lands after a completed frame --
+	// the "exactly at a frame boundary" half of the clean-close definition.
+	if err := protocol.NewEncoder(client).WriteEnvelope(mustEnvelopeNoT()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
