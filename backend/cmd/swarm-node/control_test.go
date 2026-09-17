@@ -173,10 +173,14 @@ func TestControlCenterWiring(t *testing.T) {
 		return err == nil && tp.SimVersion == 1 && tp.Threshold == 1 && tp.Hysteresis == 0
 	})
 
-	// CHAOS kill calls exit(1) and nothing else.
+	// CHAOS kill exits with exitKilled (0, so on-failure does not restart
+	// it) and does nothing else.
 	cc.send(protocol.TypeChaos, "wired", protocol.ChaosPayload{Action: "kill"})
-	if code := recvT(t, rec.exits); code != exitRuntime {
-		t.Fatalf("exit code %d", code)
+	if code := recvT(t, rec.exits); code != exitKilled {
+		t.Fatalf("exit code %d, want %d", code, exitKilled)
+	}
+	if exitKilled != 0 {
+		t.Fatalf("exitKilled = %d; restart: on-failure would restart a killed node", exitKilled)
 	}
 
 	cancel()

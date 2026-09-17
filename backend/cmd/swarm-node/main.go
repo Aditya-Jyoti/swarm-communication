@@ -36,6 +36,11 @@ const (
 	exitOK      = 0
 	exitRuntime = 1
 	exitConfig  = 2
+	// exitKilled is the status for CHAOS kill. It is 0 on purpose: node
+	// containers run with `restart: on-failure`, which restarts a real crash
+	// (non-zero) but leaves a success alone, so a drone the operator killed
+	// stays dead instead of coming straight back as a new incarnation.
+	exitKilled = 0
 )
 
 // noOverride is the election override in force before any SIM_CONFIG sets
@@ -308,10 +313,10 @@ func (a *app) applyChaos(c telemetry.Chaos) {
 	switch c.Action {
 	case telemetry.ChaosKill:
 		// Deliberately abrupt: no LEAVE, no deferred cleanup. The point of
-		// kill is to look like a crash to the swarm; Compose restarts the
-		// container as a new incarnation.
+		// kill is to look like a crash to the swarm. The exit status is
+		// exitKilled (0) so Compose's on-failure policy leaves it dead.
 		a.log.Error("chaos kill received: exiting")
-		a.exit(exitRuntime)
+		a.exit(exitKilled)
 	default: // delay and clear; Delay is 0 for clear
 		a.log.Warn("chaos delay applied", "delay", c.Delay)
 		a.setDelays(c.Delay)
