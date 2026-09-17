@@ -838,7 +838,10 @@ func (n *Node) refuteIfNeeded(ctx context.Context, from protocol.NodeID, rec pro
 	if ParseState(rec.State) == StateAlive || rec.Incarnation < n.incarnation {
 		return
 	}
-	n.incarnation = rec.Incarnation + 1
+	// rec.Incarnation is peer-supplied and unauthenticated. A bare +1 on
+	// math.MaxInt64 wraps negative, and a node with a negative incarnation loses
+	// every merge about itself for the rest of its life. NextIncarnation clamps.
+	n.incarnation = NextIncarnation(rec.Incarnation)
 	self, _ := n.table.Snapshot().Get(n.cfg.Self)
 	n.table.Upsert(Member{
 		ID:          n.cfg.Self,

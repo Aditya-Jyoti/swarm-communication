@@ -962,6 +962,23 @@ func TestDeadRumourAboutSelfBumpsIncarnation(t *testing.T) {
 	}
 }
 
+// A rumour at the top of the int64 range must not wrap our incarnation
+// negative, which would make every future record about us lose every merge.
+func TestRefutationOfMaxIncarnationRumourSaturates(t *testing.T) {
+	h := newHarness(t, "node-a", func(c *NodeConfig) { c.Incarnation = 5 })
+	h.peerUp("node-b", 1)
+	h.frame("node-b", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-a", Advertise: addrOf("node-a"), Incarnation: math.MaxInt64, Role: "worker", State: "dead",
+	}}})
+	st := h.status()
+	if st.Incarnation != math.MaxInt64 {
+		t.Fatalf("Incarnation = %d, want clamped to MaxInt64", st.Incarnation)
+	}
+	if m, _ := st.View.Get("node-a"); m.State != StateAlive || m.Incarnation != math.MaxInt64 {
+		t.Fatalf("self record = %+v, want alive at MaxInt64", m)
+	}
+}
+
 func TestElectionResultIsRecordedAsClaimOnly(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 1)
