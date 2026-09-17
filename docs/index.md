@@ -58,7 +58,24 @@ cross-link heavily, and they get more out of you if read in order.
 
 ## Status
 
-Phases 1-3 of 5 complete: scaffolding and CI, the wire protocol and pluggable health strategy, the
-TCP mesh with leader election and latency affinity, and gossip with anti-entropy (Phase 3b).
-Phase 4 (heartbeat failover, suspicion, state replication) and Phase 5 (Control Center, dashboard,
-Docker Compose) have not started. Every decision so far is recorded in the [Worklog](/WORKLOG).
+All 5 phases are implemented:
+
+| Phase | What it built |
+|---|---|
+| 1 | Scaffolding, CI, this site |
+| 2 | Wire protocol, pluggable health strategy |
+| 3 | TCP mesh, leader election, latency affinity, gossip with anti-entropy |
+| 4 | Suspicion, heartbeat failover, `STATE_SYNC` replication, at-least-once task routing |
+| 5 | Control Center, live dashboard, Docker Compose, end-to-end test |
+
+## Run it
+
+```bash
+docker compose up --build
+```
+
+Open `http://localhost:8080`. Scale with `--scale node=11`. To check self-healing end to end,
+run `scripts/e2e.sh`, which kills a leader and waits for the swarm to recover. See
+[Running the Swarm](/architecture/running-the-swarm).
+
+Every decision is recorded in the [Worklog](/WORKLOG), and the open items are in its section 6.9.
