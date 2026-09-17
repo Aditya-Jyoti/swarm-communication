@@ -215,6 +215,39 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // (ping, close), which coder/websocket only handles while someone is reading.
 // The handler does not return until its reader has, so nothing outlives it.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	// Decided once, at the upgrade: the browser API cannot set headers on a
+	// WebSocket, so the token (when configured) arrives from nginx on the
+	// upgrade request or not at all. Without it the socket is read-only.
+	canCommand := s.authorized(r)
+
+	// The request context is the right parent here: it is cancelled when this
+	// handler returns, and up to the hijack it also follows the client going
+	// away. After the hijack nothing cancels it, which is why registration
+	// below carries its own timeout.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	cl := &wsClient{out: make(chan []byte, s.cfg.ClientBuffer), cancel: cancel}
+
+	// Registration happens BEFORE the upgrade is accepted, so that by the time
+	// the browser sees the 101 it is already in the hub's client set. The
+	// other order loses events: the hub could emit a leader_change in the
+	// window between the 101 being written and this goroutine being scheduled
+	// again (measured at 9ms on a loaded 2-core box), and an event broadcast
+	// to a client the hub does not know about yet is gone for good -- the
+	// event feed is append-only, no later snapshot replays it.
+	//
+	// The cost is that addClient's snapshot sits in cl.out until writeWS
+	// starts, which is what that buffer is for. If registration fails the
+	// upgrade never happens and the browser gets a plain 503 it can retry,
+	// rather than a WebSocket that closes immediately.
+	rctx, rcancel := context.WithTimeout(ctx, s.cfg.WSWriteTimeout)
+	registered := s.do(rctx, func(h *hub) { h.addClient(cl) })
+	rcancel()
+	if !registered {
+		writeError(w, ErrUnavailable)
+		return
+	}
+
 	// Default AcceptOptions: same-origin only, i.e. the Origin header's
 	// host[:port] must equal the request's Host. A cross-origin page has no
 	// business injecting chaos. The dashboard is served by the frontend's
@@ -223,27 +256,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		s.log.Warn("websocket accept failed", "remote", r.RemoteAddr, "err", err)
+		// Registered a moment ago, so it has to be taken back out; bounded by
+		// hubDone, and a no-op if the hub has already dropped it.
+		s.do(context.Background(), func(h *hub) { h.removeClient(cl) })
 		return
 	}
 	c.SetReadLimit(maxRequestBytes)
-	// Decided once, at the upgrade: the browser API cannot set headers on a
-	// WebSocket, so the token (when configured) arrives from nginx on the
-	// upgrade request or not at all. Without it the socket is read-only.
-	canCommand := s.authorized(r)
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	cl := &wsClient{out: make(chan []byte, s.cfg.ClientBuffer), cancel: cancel}
-	// A hijacked request's context is not cancelled when the browser goes
-	// away, so registration gets its own bound: a hub that is not running
-	// must not park this handler for ever.
-	rctx, rcancel := context.WithTimeout(ctx, s.cfg.WSWriteTimeout)
-	registered := s.do(rctx, func(h *hub) { h.addClient(cl) })
-	rcancel()
-	if !registered {
-		_ = c.Close(websocket.StatusTryAgainLater, "control center shutting down")
-		return
-	}
 	s.log.Debug("dashboard client connected", "remote", r.RemoteAddr)
 
 	// The reader gets its own context, NOT ctx. coder/websocket closes the

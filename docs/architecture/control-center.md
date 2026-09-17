@@ -55,6 +55,10 @@ flowchart LR
 
 - Every second the hub sends a `snapshot` to each browser. The same tick expires old nodes and
   flushes pending sim changes (see below).
+- A browser joins the hub's client set *before* the upgrade is answered. By the time it holds
+  the `101`, every event the hub emits reaches it; events are never replayed, so the other order
+  would silently lose the ones raised in between. A hub that is gone answers `503` instead of
+  opening a socket that closes at once.
 - A browser that falls 64 messages behind is dropped. It reconnects and gets a fresh snapshot.
   Waiting for it would stall every node.
 - If a node connects twice, the newest link wins and the old one is closed quietly.
