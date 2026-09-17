@@ -383,8 +383,10 @@ func (t *Table) Revive(id protocol.NodeID, incarnation int64) bool {
 	return true
 }
 
-// Remove drops a member outright. Used for a voluntary LEAVE, where there is no
-// rumour to outlive.
+// Remove drops a member outright. The node no longer calls it: a LEAVE is
+// recorded as a death (Node.markLeft), because a deleted record has nothing to
+// outrank the stale "alive" copies that anti-entropy keeps re-sending. It is
+// kept for callers that own a table outright and need to bound it.
 func (t *Table) Remove(id protocol.NodeID) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

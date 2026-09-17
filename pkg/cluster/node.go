@@ -600,10 +600,9 @@ func (n *Node) handlePeerEvent(ctx context.Context, ev network.PeerEvent) {
 		delete(n.attached, id)
 		switch {
 		case ev.Disposition == network.DispositionCleanClose:
-			// The peer told us it was leaving. There is no rumour to outlive, so
-			// the record goes rather than lingering as dead.
-			changed = n.table.Remove(id)
-			n.log.Info("peer left", "peer", id)
+			// The peer told us it was leaving. Recorded as a death, not deleted:
+			// see markLeft.
+			changed = n.markLeft(id)
 		case ev.Disposition == network.DispositionProtocolViolation:
 			// Not evidence of death, but the link cannot be resynchronised and
 			// the pool will not redial it in a loop, so for membership purposes
@@ -652,6 +651,26 @@ func (n *Node) markDead(id protocol.NodeID, reason string, err error) bool {
 	changed := n.table.SetState(id, StateDead)
 	if changed {
 		n.log.Warn("peer marked dead", "peer", id, "reason", reason, "err", err)
+	}
+	return changed
+}
+
+// markLeft records a voluntary departure (LEAVE, or a clean close) and reports
+// whether the table changed.
+//
+// It records a death rather than deleting the member. A deleted record has no
+// incarnation left to defend, so the first peer that has not yet heard the
+// LEAVE -- and under anti-entropy every peer re-sends its whole view -- would
+// re-insert the node as alive, and it would be gossiped around a swarm it has
+// already left. A dead record at inc+1 outranks every such echo (SetState).
+//
+// It does not go through markDead: a goodbye is a fact, not an inference, so
+// Phase 4's suspicion step must not apply to it, and it is not worth a warning.
+func (n *Node) markLeft(id protocol.NodeID) bool {
+	delete(n.attached, id)
+	changed := n.table.SetState(id, StateDead)
+	if changed {
+		n.log.Info("peer left", "peer", id)
 	}
 	return changed
 }
@@ -714,9 +733,7 @@ func (n *Node) handleFrame(ctx context.Context, f inboundFrame) {
 		}
 	case protocol.TypeLeave:
 		// The payload is informational; a LEAVE with a bad body is still a LEAVE.
-		delete(n.attached, f.peer)
-		if n.table.Remove(f.peer) {
-			n.log.Info("peer left", "peer", f.peer)
+		if n.markLeft(f.peer) {
 			n.membershipChanged(ctx)
 		}
 	default:

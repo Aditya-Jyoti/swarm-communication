@@ -841,7 +841,7 @@ func TestPeerDownDispositions(t *testing.T) {
 		alive bool // still present in the view
 		state State
 	}{
-		{"clean close removes", network.DispositionCleanClose, false, StateAlive},
+		{"clean close marks dead", network.DispositionCleanClose, true, StateDead},
 		{"protocol violation marks dead", network.DispositionProtocolViolation, true, StateDead},
 		{"timeout marks dead", network.DispositionTimeout, true, StateDead},
 		{"other marks dead", network.DispositionOther, true, StateDead},
@@ -999,7 +999,7 @@ func TestElectionResultIsRecordedAsClaimOnly(t *testing.T) {
 	}
 }
 
-func TestLeaveRemovesPeer(t *testing.T) {
+func TestLeaveMarksPeerDead(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 1)
 	h.frame("node-b", protocol.TypeJoinCluster, protocol.JoinClusterPayload{Worker: "node-b"})
@@ -1007,13 +1007,33 @@ func TestLeaveRemovesPeer(t *testing.T) {
 
 	h.frame("node-b", protocol.TypeLeave, protocol.LeavePayload{Reason: "scale-down"})
 	st := h.status()
-	if _, ok := st.View.Get("node-b"); ok {
-		t.Fatal("node-b still in view after LEAVE")
+	m, ok := st.View.Get("node-b")
+	if !ok || m.State != StateDead || m.Incarnation != 2 {
+		t.Fatalf("node-b after LEAVE = %+v (present=%v), want dead at 2", m, ok)
 	}
 	requireIDs(t, "Attached", st.Attached, nil)
 
+	// The point of keeping the record: a peer that has not heard the LEAVE
+	// echoes node-b as alive at its old incarnation, and must not re-insert it.
+	h.frame("node-c", protocol.TypeMembershipDelta, protocol.MembershipDeltaPayload{Members: []protocol.MemberRecord{{
+		ID: "node-b", Advertise: addrOf("node-b"), Incarnation: 1, Role: "worker", State: "alive",
+	}}})
+	if m, _ := h.status().View.Get("node-b"); m.State != StateDead {
+		t.Fatalf("stale echo resurrected a node that left: %+v", m)
+	}
+
+	// The clean close that follows a LEAVE is a no-op, not a second bump.
+	version := h.status().View.Version
+	h.peerDown("node-b", network.DispositionCleanClose)
+	if st := h.status(); st.View.Version != version {
+		t.Fatalf("clean close after LEAVE changed the table: %d -> %d", version, st.View.Version)
+	}
+
 	// A LEAVE for a peer we never knew is harmless.
 	h.frame("node-q", protocol.TypeLeave, nil)
+	if _, ok := h.status().View.Get("node-q"); ok {
+		t.Fatal("a LEAVE from a stranger created a record")
+	}
 }
 
 func TestUnknownAndUnhandledTypesAreDropped(t *testing.T) {
@@ -1441,7 +1461,7 @@ func TestOnFrameConsumesBeforeDispatch(t *testing.T) {
 	})
 	h.peerUp("node-b", 1)
 	h.frame("node-b", protocol.TypeLeave, protocol.LeavePayload{})
-	if _, ok := h.status().View.Get("node-b"); !ok {
+	if m, _ := h.status().View.Get("node-b"); m.State != StateAlive {
 		t.Fatal("a consumed LEAVE reached the node")
 	}
 	h.frame("node-b", protocol.TypeElectionResult, protocol.ElectionResultPayload{Term: 3})
