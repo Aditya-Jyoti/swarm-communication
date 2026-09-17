@@ -448,6 +448,10 @@ func TestNewNodeValidation(t *testing.T) {
 		if c.ProbeInterval != DefaultProbeInterval || c.ElectionFloor != DefaultElectionFloor ||
 			c.GossipInterval != DefaultGossipInterval || c.Shuffle == nil ||
 			c.ProbeTimeout != DefaultProbeTimeout || c.Rehome != DefaultHysteresis ||
+			c.Election.Hysteresis != DefaultHysteresis ||
+			c.HeartbeatInterval != DefaultHeartbeatInterval || c.HeartbeatMisses != DefaultHeartbeatMisses ||
+			c.SuspectAfter != DefaultSuspectAfter || c.DeadAfter != DefaultDeadAfter ||
+			c.SuspicionTimeout != DefaultSuspicionTimeout ||
 			c.ProbeTimeout <= health.DefaultProbeTimeout ||
 			c.QueueDepth != DefaultQueueDepth || c.Logger == nil {
 			t.Fatalf("defaults not applied: %+v", c)
@@ -2140,6 +2144,8 @@ func TestNoConnectHookIsFine(t *testing.T) {
 	h.settle()
 }
 
+// Records without Seq (an older build) are unordered, so their roles keep the
+// first-hand-only rule. Seq-ordered relays are covered in converge_test.go.
 func TestRelayedRoleIsNotBelieved(t *testing.T) {
 	h := newHarness(t, "node-a", nil)
 	h.peerUp("node-b", 1)

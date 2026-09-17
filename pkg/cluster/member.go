@@ -87,6 +87,10 @@ type Member struct {
 	// measurement of the member: a measured round trip is observer-relative and
 	// feeding it to Elect gives every node a different answer. See node.go.
 	Score float64
+	// Seq orders the member's own claims (Role, Score) within an incarnation.
+	// Only the member bumps it (SetRole, SetScore on its own table); every other
+	// node just carries it. See protocol.MemberRecord.Seq and Upsert.
+	Seq uint64
 }
 
 // View is an immutable snapshot of membership.
@@ -206,9 +210,18 @@ func NewTable() *Table {
 //     peer that simply has not heard yet.
 //   - A lower incarnation is ignored entirely. That is a stale rumour arriving late,
 //     and applying it would resurrect information the swarm has already moved past.
+//   - At equal incarnation, the member's own claims (Role, Score) are taken only
+//     from a record with a newer Seq. A record at an older or equal Seq keeps the
+//     claims we already hold, whoever relayed it.
 //
 // Without the second rule, two nodes with different beliefs would flip each other
-// back and forth forever, which is the classic membership oscillation.
+// back and forth forever, which is the classic membership oscillation. The fourth
+// rule is the same argument for claims: before it existed, Role and Score were
+// last-writer-wins by arrival order, a stale full view regularly arrived after a
+// fresher announcement on another link, and nodes elected from different scores.
+//
+// Two records that both have Seq 0 come from a build without Seq and fall back to
+// the old rule: a valid score is taken, a missing one is silence.
 func (t *Table) Upsert(m Member) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -234,13 +247,25 @@ func (t *Table) Upsert(m Member) bool {
 		if m.State < existing.State {
 			m.State = existing.State
 		}
-		// A record with no score is silent about the score, not a claim that
-		// it is unknown: a relayed rumour from a peer that has not heard the
-		// member's report must not erase the report we already hold.
-		if !health.IsValidScore(m.Score) {
-			m.Score = existing.Score
+		switch {
+		case m.Seq > existing.Seq:
+			// A newer claim from the member, relayed or not. Taken whole, an
+			// unmeasured score included: a member that has gone blind says so
+			// with a newer Seq, and must become ineligible everywhere (HIGH-1).
+		case m.Seq == 0 && existing.Seq == 0:
+			// Unordered records (a build without Seq). A record with no score
+			// is silent about the score, not a claim that it is unknown: a
+			// relayed rumour from a peer that has not heard the member's report
+			// must not erase the report we already hold.
+			if !health.IsValidScore(m.Score) {
+				m.Score = existing.Score
+			}
+		default:
+			// Not newer: the claims we hold stand.
+			m.Role, m.Score, m.Seq = existing.Role, existing.Score, existing.Seq
 		}
-		if m.State == existing.State && m.Role == existing.Role && m.Addr == existing.Addr && sameScore(m.Score, existing.Score) {
+		if m.State == existing.State && m.Role == existing.Role && m.Addr == existing.Addr &&
+			m.Seq == existing.Seq && sameScore(m.Score, existing.Score) {
 			return false
 		}
 	}
@@ -251,7 +276,9 @@ func (t *Table) Upsert(m Member) bool {
 }
 
 // SetScore records a member's self-reported score without touching liveness,
-// role or incarnation. Used for this node's own record after each probe round.
+// role or incarnation, and bumps the record's Seq. It is the author's write:
+// only a node's own record is ever set this way (after each probe round), which
+// is what makes Seq a per-member order.
 func (t *Table) SetScore(id protocol.NodeID, score float64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -261,6 +288,7 @@ func (t *Table) SetScore(id protocol.NodeID, score float64) bool {
 		return false
 	}
 	m.Score = score
+	m.Seq++
 	t.members[id] = m
 	t.version++
 	return true
@@ -275,7 +303,9 @@ func sameScore(a, b float64) bool {
 	return a == b
 }
 
-// SetRole records a role change without touching liveness or incarnation.
+// SetRole records a role change without touching liveness or incarnation, and
+// bumps the record's Seq. Like SetScore it is the author's write, used only on a
+// node's own record.
 func (t *Table) SetRole(id protocol.NodeID, r Role) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -285,6 +315,7 @@ func (t *Table) SetRole(id protocol.NodeID, r Role) bool {
 		return false
 	}
 	m.Role = r
+	m.Seq++
 	t.members[id] = m
 	t.version++
 	return true

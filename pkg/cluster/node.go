@@ -55,6 +55,15 @@ const (
 	// full, and a LEAVE that does not get out costs the peers one failure-detector
 	// round, which they must survive anyway (a SIGKILL never sends one).
 	leaveTimeout = 500 * time.Millisecond
+	// maxRejectionsPerRound bounds how many rejected JOINs a worker answers with
+	// another JOIN before the next probe round. A rejection re-evaluates at once
+	// and may follow the rejecter's hint, which is right when one node is
+	// behind. When two nodes disagree about who leads, though, each rejection
+	// names the other, and without a bound the worker and the two "leaders"
+	// exchange JOIN / JOIN_ACK at network speed (a run under reordering sent
+	// ~100k of each in one simulated instant). Past the bound the worker waits,
+	// detached, for the next round, by which time the views have converged.
+	maxRejectionsPerRound = 3
 )
 
 // ErrAlreadyRunning is returned by Run when the node's loop is already running or
@@ -82,6 +91,13 @@ type NodeConfig struct {
 	// Clock defaults to RealClock.
 	Clock Clock
 	// Election parameterises Elect. The zero value takes election.go's defaults.
+	//
+	// Election.Hysteresis follows the Rehome convention at this level: zero
+	// means DefaultHysteresis, not "no damping". Elect itself reads zero as
+	// "no damping", and before this rule a caller that set only the threshold
+	// (cmd/swarm-node does) ran the swarm with no damping at all: every score
+	// wobble was re-announced and could move the leader set. A node that
+	// really wants no damping passes a tiny positive margin.
 	Election Config
 	// ProbeInterval is how often every alive peer is scored. Default 1s.
 	ProbeInterval time.Duration
@@ -174,6 +190,9 @@ func (c NodeConfig) withDefaults() NodeConfig {
 	}
 	if c.Rehome == 0 {
 		c.Rehome = DefaultHysteresis
+	}
+	if c.Election.Hysteresis == 0 {
+		c.Election.Hysteresis = DefaultHysteresis
 	}
 	if c.QueueDepth <= 0 {
 		c.QueueDepth = DefaultQueueDepth
@@ -294,8 +313,11 @@ type Node struct {
 	leaders     []protocol.NodeID
 	leader      protocol.NodeID
 	// hint is a leader named by a JOIN_ACK rejection; consumed by the next evaluate.
-	hint     protocol.NodeID
-	attached map[protocol.NodeID]struct{}
+	hint protocol.NodeID
+	// rejections counts JOIN_ACK rejections since the last probe round; see
+	// maxRejectionsPerRound.
+	rejections int
+	attached   map[protocol.NodeID]struct{}
 	// local is my measured score per peer, plus my own self-score. Affinity only.
 	local map[protocol.NodeID]float64
 	// reported is each member's self-reported score as of the last evaluate,
@@ -399,6 +421,9 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		// on that claim alone. A node that really is alone still leads, via Elect's
 		// nobody-is-measurable fallback.
 		Score: health.ScoreUnavailable(),
+		// Seq starts at 1 so that anything we ever say about ourselves outranks
+		// the Seq-0 placeholder a peer creates from our handshake.
+		Seq: 1,
 	})
 	n.dialed[cfg.Advertise] = struct{}{}
 	n.publish()
@@ -1071,23 +1096,23 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 		if rec.Measured() {
 			score = rec.Score
 		}
-		// A role is only believed first-hand: the sender speaking about itself.
-		// Relayed roles are whatever the relay knew when it last looked, and a
-		// full view sent at connect time routinely predates the announcements
-		// that changed them; applying one would erase an incumbency on this
-		// node alone and split the election. A member's role therefore moves
-		// only when that member says so, and otherwise keeps what we hold.
+		i, known := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID)
+		// Roles are ordered by Seq, so a relayed role is as good as a first-hand
+		// one: Upsert keeps whichever claim is newer. A record without Seq
+		// (an older build) is unordered, and for those a role is only believed
+		// first-hand: a relayed one is whatever the relay knew when it last
+		// looked, and applying it could erase an incumbency on this node alone.
 		//
 		// Looked up by binary search rather than View.Get, which scans: a scan
 		// per record would leave the loop O(N^2) even with the snapshot hoisted.
 		// before came from Snapshot, so it is sorted by ID; View.Get cannot
 		// assume that for an arbitrary View.
-		role := RoleWorker
-		if i, ok := slices.BinarySearchFunc(before.Members, rec.ID, compareMemberID); ok {
-			role = before.Members[i].Role
-		}
-		if rec.ID == from {
-			role = ParseRole(rec.Role)
+		role := ParseRole(rec.Role)
+		if rec.Seq == 0 && rec.ID != from {
+			role = RoleWorker
+			if known {
+				role = before.Members[i].Role
+			}
 		}
 		// Dial before merging: once the record is in the table, Resolve knows
 		// the address and connect would take it for an existing peer.
@@ -1101,12 +1126,38 @@ func (n *Node) handleMembershipDelta(ctx context.Context, from protocol.NodeID, 
 			Role:        role,
 			State:       ParseState(rec.State),
 			Score:       score,
+			Seq:         rec.Seq,
 		}) {
 			changed = true
 		}
 	}
 	if changed {
+		n.voidAttachmentIfLeaderStepped(before)
 		n.membershipChanged(ctx)
+	}
+}
+
+// voidAttachmentIfLeaderStepped forgets our attachment when the leader we are
+// attached to has just claimed to be a worker.
+//
+// A leader that steps down clears its attached set (evaluate), and it does
+// not get it back when it steps up again. Our own election may never have
+// dropped it -- views pass through different intermediate states on different
+// nodes -- so without this we would stay "attached" to a leader that no longer
+// lists us, and never JOIN again. The claim is Seq-ordered, so a stale one
+// cannot trigger this. Voiding makes the next evaluate re-JOIN if the node is
+// still our best leader, which is exactly the repair.
+func (n *Node) voidAttachmentIfLeaderStepped(before View) {
+	if n.leader == "" || n.leader == n.cfg.Self {
+		return
+	}
+	i, ok := slices.BinarySearchFunc(before.Members, n.leader, compareMemberID)
+	if !ok || before.Members[i].Role != RoleLeader {
+		return
+	}
+	if m, ok := n.table.Snapshot().Get(n.leader); ok && m.Role != RoleLeader {
+		n.log.Info("leader stepped down; attachment void", "leader", n.leader)
+		n.leader = ""
 	}
 }
 
@@ -1124,6 +1175,7 @@ func memberRecord(m Member) protocol.MemberRecord {
 		Role:        m.Role.String(),
 		State:       m.State.String(),
 		Score:       m.Score,
+		Seq:         m.Seq,
 	}
 }
 
@@ -1171,6 +1223,7 @@ func (n *Node) refuteIfNeeded(ctx context.Context, from protocol.NodeID, rec pro
 		Role:        self.Role,
 		State:       StateAlive,
 		Score:       self.Score,
+		Seq:         self.Seq,
 	})
 	n.log.Warn("refuting rumour about self", "from", from, "rumour", rec.State, "incarnation", n.incarnation)
 	n.announceSelf(ctx)
@@ -1207,6 +1260,15 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		if leader == "" {
 			leader = from
 		}
+		// An acceptance only counts for the JOIN we are still waiting on. One
+		// that arrives after we were promoted, or after we moved on to another
+		// leader, is stale: applying it would leave a leader attached to someone
+		// else, or a worker pointing at a leader it has abandoned. The sender
+		// learns from our next HEARTBEAT_ACK that we are not its worker.
+		if n.isLeader() || n.leader != leader {
+			n.log.Debug("stale JOIN_ACK ignored", "from", from, "leader", leader, "current", n.leader)
+			return
+		}
 		n.leader = leader
 		n.hint = ""
 		n.log.Info("attached to leader", "leader", leader)
@@ -1220,6 +1282,7 @@ func (n *Node) handleJoinAck(ctx context.Context, from protocol.NodeID, p protoc
 		n.leader = ""
 	}
 	n.hint = p.Leader
+	n.rejections++
 	n.evaluate(ctx)
 }
 
@@ -1305,6 +1368,7 @@ func (n *Node) startProbeRound(ctx context.Context) {
 // mandated in WORKLOG 3.4. Loop goroutine only.
 func (n *Node) applyProbeRound(ctx context.Context, r probeRound) {
 	n.probing = false
+	n.rejections = 0
 	view := n.table.Snapshot()
 	// Sorted, so that when several peers cross a threshold in one round the
 	// pushes and log lines come out in the same order every run.
@@ -1500,9 +1564,15 @@ func (n *Node) evaluate(ctx context.Context) {
 		// ours to lead. A suspect worker stays: its suspicion resolves one way
 		// or the other within SuspicionTimeout, and dropping it on the doubt
 		// would force a re-JOIN for nothing if it is refuted.
+		//
+		// "Promoted" means the worker CLAIMS leadership, not that our election
+		// momentarily includes it. Views pass through different intermediate
+		// states on different nodes; dropping a worker on our own transient
+		// result leaves it believing it is attached (it never promoted, so it
+		// never re-JOINs) while we no longer list it.
 		for id := range n.attached {
 			m, ok := view.Get(id)
-			if !ok || m.State == StateDead || contains(res.Leaders, id) {
+			if !ok || m.State == StateDead || m.Role == RoleLeader {
 				delete(n.attached, id)
 			}
 		}
@@ -1526,6 +1596,9 @@ func (n *Node) evaluate(ctx context.Context) {
 			best, ok = n.hint, true
 		}
 		n.hint = ""
+		if n.rejections > maxRejectionsPerRound {
+			ok = false
+		}
 		if ok && ShouldRehome(n.leader, best, n.local, usable, n.cfg.Rehome) {
 			n.join(ctx, best)
 		}

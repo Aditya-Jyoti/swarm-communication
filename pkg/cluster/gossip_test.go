@@ -349,10 +349,10 @@ func TestDeadRecordConvergesAndStaysDead(t *testing.T) {
 	}
 }
 
-// A lost self-announcement leaves n1 with a wrong role and score for n2.
-// Anti-entropy from n2 carries n2's own record, which n1 trusts because
-// rec.ID == from, so both are repaired without any announcement getting
-// through.
+// Phase 1: a claim older than the one n1 holds (n2's boot-time leadership,
+// delivered late) is ignored outright, because claims are Seq-ordered.
+// Phase 2: n2's newer claims are all lost in transit, and anti-entropy from n2
+// carries them anyway, since a full view includes the sender's own record.
 func TestAntiEntropyRepairsSendersOwnRoleAndScore(t *testing.T) {
 	local := map[protocol.NodeID]map[protocol.NodeID]float64{
 		"n1": {"n2": 10},
@@ -364,27 +364,25 @@ func TestAntiEntropyRepairsSendersOwnRoleAndScore(t *testing.T) {
 	// Every self-announcement from n2 to n1 is lost from here on.
 	hub.setDrop(dropDeltaBroadcasts("n2", "n1"))
 
-	// A stale leadership claim from n2, delivered late.
+	held := memberOf(t, n1, "n2")
+	if held.Role != RoleWorker || held.Seq < 2 {
+		t.Fatalf("setup: n1 holds n2 = %+v, want a worker claim past Seq 1", held)
+	}
+	// n2's boot-time leadership claim (every node leads itself when alone),
+	// arriving after the demotion that superseded it.
 	stale, err := protocol.NewEnvelope(protocol.TypeMembershipDelta, "n2", "n1", protocol.MembershipDeltaPayload{
-		Members: []protocol.MemberRecord{{ID: "n2", Advertise: addrOf("n2"), Incarnation: 1, Role: "leader", State: "alive", Score: protocol.UnmeasuredScore}},
+		Members: []protocol.MemberRecord{{ID: "n2", Advertise: addrOf("n2"), Incarnation: 1, Role: "leader", State: "alive", Score: protocol.UnmeasuredScore, Seq: held.Seq - 1}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	n1.node.Handler()("n2", stale)
 	quiesce(t, ctx, nodes)
-	if m := memberOf(t, n1, "n2"); m.Role != RoleLeader {
-		t.Fatalf("setup: n1 holds n2 = %+v, want the stale leader claim", m)
+	if m := memberOf(t, n1, "n2"); m.Role != RoleWorker || m.Seq != held.Seq {
+		t.Fatalf("an older claim was applied: n1 holds n2 = %+v", m)
 	}
 	if st := n2.node.Status(); st.Role != RoleWorker {
 		t.Fatalf("setup: n2 is %s, want worker", st.Role)
-	}
-
-	// Phase 1: n2 gossips. Its only peer is n1, and its view says "worker".
-	n2.clock.Advance(gossipEvery)
-	quiesce(t, ctx, nodes)
-	if m := memberOf(t, n1, "n2"); m.Role != RoleWorker {
-		t.Fatalf("n1 still holds n2 as %s after anti-entropy, want worker", m.Role)
 	}
 	requireIDs(t, "n1 View.Leaders after phase 1", n1.node.Status().View.Leaders(), ids("n1"))
 

@@ -354,6 +354,17 @@ type MemberRecord struct {
 	// carry NaN or Inf, so MarshalJSON substitutes it; receivers must treat a
 	// negative score as unmeasured, never as excellent.
 	Score float64 `json:"score"`
+	// Seq orders the member's own claims (Role and Score) within one
+	// incarnation. The member bumps it every time it changes either; a receiver
+	// takes a claim only if its Seq is newer than the one it holds.
+	//
+	// Without it, Role and Score have no merge order at equal incarnation, and a
+	// full view relayed by anti-entropy can carry an old score in after a newer
+	// announcement that arrived first on a faster link. Different nodes then
+	// hold different scores for the same member, elect different leaders, and
+	// the relaying never stops. Zero means "unordered" (a build without Seq);
+	// omitempty keeps such records byte-identical on the wire.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // UnmeasuredScore is the wire value of MemberRecord.Score for a node that has no
