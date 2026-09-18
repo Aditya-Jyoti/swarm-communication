@@ -20,3 +20,7 @@ docs/.vitepress/cache/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Python bytecode (the Blender tooling)
+__pycache__/
+*.pyc
