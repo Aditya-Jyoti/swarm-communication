@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import signal
 import sys
 import time
 import urllib.request
@@ -402,7 +403,8 @@ def main() -> int:
     ap.add_argument("--url", default="http://127.0.0.1:8080", help="dashboard base URL (default: %(default)s)")
     ap.add_argument("--out", default="blender/swarm-scene.json", help="output file, - for stdout")
     ap.add_argument("--scale", type=float, default=METRES_PER_UNIT, help="metres per swarm unit")
-    ap.add_argument("--frames", type=int, default=0, help="samples to record as a timeline (0: still snapshot)")
+    ap.add_argument("--frames", type=int, default=0,
+                    help="samples to record as a timeline (0: still snapshot); Ctrl-C stops early and still writes")
     ap.add_argument("--interval", type=float, default=1.0, help="seconds between samples with --frames")
     args = ap.parse_args()
 
@@ -418,17 +420,27 @@ def main() -> int:
 
     timeline = []
     if args.frames > 0:
+        # Recording is open-ended in practice: you start it, make the swarm do
+        # something, then stop it. Ctrl-C or SIGTERM therefore ends sampling and
+        # still WRITES the frames gathered so far, instead of losing them.
+        def stop(_signum, _frame):
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, stop)
         start = time.monotonic()
         timeline.append(sample_frame(state, args.scale, 0.0, args.interval))
-        for _ in range(args.frames - 1):
-            time.sleep(args.interval)
-            try:
-                s = fetch(state_url)
-            except Exception as e:  # noqa: BLE001
-                print(f"sample failed, stopping early: {e}", file=sys.stderr)
-                break
-            timeline.append(sample_frame(s, args.scale, time.monotonic() - start, args.interval))
-            state = s
+        try:
+            for _ in range(args.frames - 1):
+                time.sleep(args.interval)
+                try:
+                    s = fetch(state_url)
+                except Exception as e:  # noqa: BLE001
+                    print(f"sample failed, stopping early: {e}", file=sys.stderr)
+                    break
+                timeline.append(sample_frame(s, args.scale, time.monotonic() - start, args.interval))
+                state = s
+        except KeyboardInterrupt:
+            print(f"recording stopped after {len(timeline)} frames", file=sys.stderr)
         state["_source_url"] = state_url
 
     scene = build_scene(state, args.scale, timeline)
