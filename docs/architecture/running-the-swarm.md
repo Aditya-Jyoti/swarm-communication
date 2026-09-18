@@ -278,6 +278,35 @@ E2E_KILL_WAIT=20 scripts/e2e.sh
 The full list is at the top of the script. It needs `docker`, `curl`, and `jq` or
 `python3`.
 
+## Scenario run
+
+`scripts/simulate.py` drives a running stack through seven phases over HTTP only, the way
+an operator would, and checks each against what the design predicts:
+
+| Phase | Change | Expected |
+|---|---|---|
+| 1 baseline | reset positions | the most central drones lead, every worker on its nearest leader |
+| 2 workload | 30 tasks | all done, spread over the clusters |
+| 3 fly | park a worker beside another leader | it re-homes, or is elected leader if that spot made it central |
+| 4 stretch | `per_unit_ms` 2 to 5 | every RTT scales, so the groups hold |
+| 5 kill leader | CHAOS kill the busiest leader | a new leader, its workers re-home, the victim stays down |
+| 6 threshold | `threshold` 0.5 | more leaders |
+| 7 restore | clear the overrides | back to $\max(1, \lceil N \times 0.3 \rceil)$ |
+
+```bash
+NODE_REPLICAS=9 docker compose up -d          # 10 drones
+python3 scripts/simulate.py --record blender/scenario-10-drones.json
+docker compose up -d                          # bring the killed drone back
+```
+
+A phase passes only once the swarm is correct **and unchanged for 8s**. Scores are
+EWMA-smoothed and hysteresis holds a leader, so a swarm can look right for a moment and
+then legitimately re-elect; judging too early blames the next phase for it.
+
+`--record` writes a Blender timeline of the whole run. `blender/scenario-10-drones.json`
+is one such recording from 10 drones: the failover at about 41s and the threshold change
+at about 51s are both in it.
+
 ## Without Docker
 
 Run from `backend/`. Each node needs its own port and an address others can dial:

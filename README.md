@@ -110,6 +110,7 @@ flag also has a `SWARM_*` env var (flags win). See
 ```bash
 cd backend && go test -race ./...    # unit tests (Go 1.27+)
 scripts/e2e.sh                       # full stack: kill a leader, check it heals
+python3 scripts/simulate.py          # 7-phase scenario against a running stack
 npm ci && npm run docs:check         # docs: ASCII, Mermaid, build (Node 22)
 ```
 
