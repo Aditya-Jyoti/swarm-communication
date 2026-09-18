@@ -568,4 +568,13 @@ tr.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tick-label { fill: var(--muted); font: 11px var(--mono); text-anchor: middle; dominant-baseline: central; }
 .tick-label.tick-y { text-anchor: end; }
 .n-alt { fill: var(--muted); font-size: 11px; font-weight: 400; }
+/* Label slots chosen by the label layout (app.js layoutLabels): right of the
+   drone reads left-to-right from its edge, left of it ends at its edge. */
+.drone.lbl-r .n-label { text-anchor: start; }
+.drone.lbl-l .n-label { text-anchor: end; }
+/* Discs that overlap on screen: a see-through fill and a thin outline, so
+   the lower one shows through and both edges stay visible. */
+.stack-edge { display: none; fill: none; stroke: var(--fg); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.drone.stacked .stack-edge { display: inline; }
+.drone.stacked .n-shape { fill-opacity: 0.45; }
 .mode-cap { fill: var(--muted); font: 700 12px var(--sans); letter-spacing: 0.04em; pointer-events: none; }

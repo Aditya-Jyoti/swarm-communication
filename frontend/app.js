@@ -1111,6 +1111,8 @@
     var parts = {
       flashRing: s("circle", { "class": "flash-ring", r: R0 + 6 }),
       promo: s("circle", { "class": "promo-ring", r: R0 + 10, display: "none" }),
+      // Shown by CSS only when discs overlap on screen (class "stacked").
+      edge: s("circle", { "class": "stack-edge", r: R0 + 1.5 }),
       sel: s("circle", { "class": "sel-ring", r: R0 + 8, display: "none" }),
       cring: s("circle", { "class": "cluster-ring", r: R0 + 3.5, display: "none" }),
       halo: s("circle", { "class": "halo", r: R0 + 6, display: "none" }),
@@ -1123,7 +1125,7 @@
     parts.c2 = s("line", { "class": "n-cross", x1: -k, y1: k, x2: k, y2: -k });
     parts.cross.appendChild(parts.c1);
     parts.cross.appendChild(parts.c2);
-    ["flashRing", "promo", "sel", "cring", "halo", "shape", "glyph", "cross"].forEach(function (p) {
+    ["flashRing", "promo", "sel", "cring", "halo", "shape", "edge", "glyph", "cross"].forEach(function (p) {
       body.appendChild(parts[p]);
     });
     // The label is the short id plus, on the 2D map, the altitude ("z 42"):
@@ -1476,7 +1478,9 @@
       d.guess = p.guess;
       d.node = n;
       styleGlyph(d, n);
-      attr(d.g, "class", "drone" + (n.id === selectedId ? " selected" : "") + (n.isLeader ? " is-leader" : ""));
+      // The label slot and "stacked" classes are added per frame (layoutLabels).
+      d.baseCls = "drone" + (n.id === selectedId ? " selected" : "") + (n.isLeader ? " is-leader" : "");
+      attr(d.g, "class", d.baseCls + (d.slot ? " lbl-" + d.slot : "") + (d.stackedNow ? " stacked" : ""));
       show(d.sel, n.id === selectedId);
       attr(d.drop, "class", "drop" + (n.eff === "alive" ? "" : " faint"));
     });
@@ -1611,14 +1615,157 @@
     return true;
   }
 
-  // Labels on links shorter than this on screen would only overlap the drones.
-  var LABEL_MIN_PX = 70;
-  function placeLabel(L, p, q, visible) {
-    if (!visible || !p || !q || Math.hypot(q.x - p.x, q.y - p.y) < LABEL_MIN_PX) { show(L.label, false); return; }
-    show(L.label, true);
-    var mx = ((p.x + q.x) / 2).toFixed(1), my = ((p.y + q.y) / 2 - 6).toFixed(1);
-    attr(L.label, "x", mx); attr(L.label, "y", my);
-    attr(L.t1, "x", mx); attr(L.t2, "x", mx);
+  // ---------------------------------------------------------------- label layout
+  //
+  // Greedy, per frame, in view-box pixels. Drone labels go first, then link
+  // labels, each into the first free slot:
+  //   drones: the previous frame's slot if still free, else right, left,
+  //           above, below; if nothing is free, the slot overlapping least
+  //           (a drone is never left unnamed)
+  //   links:  the previous position if still free, else points along the
+  //           link, midpoint first; if nothing is free the label is hidden
+  //           (the link's hover tooltip still has it)
+  // "Free" = no overlap with a label placed earlier or another drone's disc.
+  // The selected and hovered items are placed first, so they win conflicts,
+  // and the selected drone's links are always labelled. Everything else is
+  // placed in id order, so the result is deterministic and does not jitter.
+  // Text boxes are estimated from character counts (the fonts are
+  // monospace), which costs nothing and needs no layout pass.
+
+  var LABEL_MIN_PX = 70;       // shorter links on screen get no label
+  var CH_NAME = 7.3, CH_ALT = 6.7, CH_SUB = 6.1, CH_LINK = 6.1; // px per char (mono 12/11/10/10)
+  var DRONE_SLOTS = ["r", "l", "a", "b"];
+  var LINK_TS = [0.5, 0.36, 0.64, 0.24, 0.76];
+  var hoverLink = null;        // "w:<worker id>" or "p:<a|b>" while a link is hovered
+  var labelBoxes = [];         // last layout, for the test hook
+
+  function boxOverlap(a, b) {
+    var w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    var hh = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return w > 0 && hh > 0 ? w * hh : 0;
+  }
+
+  // Overlap with everything placed so far, plus any part outside the view.
+  function boxCost(box, taken, self) {
+    var c = 0;
+    for (var i = 0; i < taken.length; i++) if (taken[i].owner !== self) c += boxOverlap(box, taken[i]);
+    var inside = boxOverlap(box, { x: 0, y: 0, w: VIEW_W, h: VIEW_H });
+    return c + (box.w * box.h - inside);
+  }
+
+  function droneLabelSize(d) {
+    var name = d.name.textContent.length, alt = d.alt.textContent.length, sub = d.sub.textContent.length;
+    var w = name * CH_NAME + (alt ? 5 + alt * CH_ALT : 0);
+    return { w: Math.max(w, sub * CH_SUB) + 6, h: sub ? 28 : 16 };
+  }
+
+  function droneSlotBox(d, slot, sz) {
+    var R = d.clear + 5, x = d.p.x, y = d.p.y;
+    if (slot === "r") return { x: x + R, y: y - sz.h / 2, w: sz.w, h: sz.h };
+    if (slot === "l") return { x: x - R - sz.w, y: y - sz.h / 2, w: sz.w, h: sz.h };
+    if (slot === "a") return { x: x - sz.w / 2, y: y - R - sz.h, w: sz.w, h: sz.h };
+    return { x: x - sz.w / 2, y: y + R - 3, w: sz.w, h: sz.h };
+  }
+
+  // Move the two text lines into the chosen box (coordinates are relative
+  // to the drone; the anchor class on the drone's <g> sets text-anchor).
+  function applyDroneSlot(d, slot, box) {
+    var lx = slot === "r" ? box.x + 3 : slot === "l" ? box.x + box.w - 3 : box.x + box.w / 2;
+    lx -= d.p.x;
+    var top = box.y - d.p.y;
+    attr(d.label, "x", lx.toFixed(1)); attr(d.label, "y", (top + 12).toFixed(1));
+    attr(d.sub, "x", lx.toFixed(1)); attr(d.sub, "y", (top + 24).toFixed(1));
+    d.slot = slot;
+  }
+
+  function droneRank(d) {
+    var id = d.node ? d.node.id : "";
+    if (id === selectedId) return 0;
+    if (id === hoverId) return 1;
+    return d.node && d.node.isLeader ? 2 : 3;
+  }
+
+  function byRankThenKey(a, b) { return a.rank - b.rank || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0); }
+
+  // list: the drones on screen, already projected and sized.
+  // links: [{L, p, q, visible, force, key}]
+  function layoutLabels(list, links) {
+    var taken = [];
+    // Every disc is an obstacle. Discs that overlap on screen are "stacked":
+    // they get a see-through fill and an outline, so both stay visible.
+    list.forEach(function (d) {
+      d.stackedNow = false;
+      d.clear = d.r; // radius the label must clear: its own disc, or the whole stack
+      var pad = d.r + 3;
+      taken.push({ x: d.p.x - pad, y: d.p.y - pad, w: 2 * pad, h: 2 * pad, owner: d, kind: "disc" });
+    });
+    for (var i = 0; i < list.length; i++) {
+      for (var j = i + 1; j < list.length; j++) {
+        var a = list[i], b = list[j];
+        var dd = Math.hypot(a.p.x - b.p.x, a.p.y - b.p.y);
+        if (dd < a.r + b.r) {
+          a.stackedNow = true; b.stackedNow = true;
+          a.clear = Math.max(a.clear, dd + b.r + 3);
+          b.clear = Math.max(b.clear, dd + a.r + 3);
+        }
+      }
+    }
+
+    var order = list.map(function (d) { return { d: d, rank: droneRank(d), key: d.node ? d.node.id : "" }; });
+    order.sort(byRankThenKey);
+    order.forEach(function (o) {
+      var d = o.d;
+      var sz = droneLabelSize(d);
+      var tries = d.slot ? [d.slot].concat(DRONE_SLOTS.filter(function (s2) { return s2 !== d.slot; })) : DRONE_SLOTS;
+      var best = null, bestCost = Infinity, bestSlot = null;
+      for (var k = 0; k < tries.length; k++) {
+        var box = droneSlotBox(d, tries[k], sz);
+        var cost = boxCost(box, taken, d);
+        if (cost < bestCost) { best = box; bestCost = cost; bestSlot = tries[k]; }
+        if (cost === 0) break;
+      }
+      applyDroneSlot(d, bestSlot, best);
+      best.owner = d; best.kind = "drone"; best.id = o.key;
+      taken.push(best);
+      attr(d.g, "class", d.baseCls + " lbl-" + bestSlot + (d.stackedNow ? " stacked" : ""));
+    });
+
+    links.forEach(function (it) { it.rank = it.force ? 0 : it.first ? 1 : 2; });
+    links.slice().sort(byRankThenKey).forEach(function (it) {
+      var L = it.L, p = it.p, q = it.q;
+      var len = p && q ? Math.hypot(q.x - p.x, q.y - p.y) : 0;
+      // A forced label (the selected drone's link, a hovered link) shows even
+      // on a short link; it may then sit beside the link instead of on it.
+      if (!it.visible || !p || !q || (len < LABEL_MIN_PX && !it.force)) { show(L.label, false); return; }
+      var w = Math.max(L.t1.textContent.length, L.t2.textContent.length) * CH_LINK + 6;
+      var spots = LINK_TS.map(function (t) { return [t, 0]; });
+      if (it.force && len > 0) {
+        // Beside the midpoint, on either side, clear of the endpoint discs.
+        [30, -30, 48, -48].forEach(function (o) { spots.push([0.5, o]); });
+      }
+      // The previous frame's spot first (a stable sort keeps the rest in order).
+      var prev = L.t !== undefined ? L.t + "," + L.off : "";
+      spots.sort(function (a, b) { return (b[0] + "," + b[1] === prev) - (a[0] + "," + a[1] === prev); });
+      var nx = len ? -(q.y - p.y) / len : 0, ny = len ? (q.x - p.x) / len : 0;
+      var best = null, bestCost = Infinity, bestT = null, bestOff = 0;
+      for (var k = 0; k < spots.length; k++) {
+        var mx = p.x + (q.x - p.x) * spots[k][0] + nx * spots[k][1];
+        var my = p.y + (q.y - p.y) * spots[k][0] + ny * spots[k][1];
+        var box = { x: mx - w / 2, y: my - 16, w: w, h: 26 };
+        var cost = boxCost(box, taken, null);
+        if (cost < bestCost) { best = box; bestCost = cost; bestT = spots[k][0]; bestOff = spots[k][1]; }
+        if (cost === 0) break;
+      }
+      if (bestCost > 0 && !it.force) { show(L.label, false); return; }
+      show(L.label, true);
+      var lx = (best.x + w / 2).toFixed(1), ly = (best.y + 10).toFixed(1);
+      attr(L.label, "x", lx); attr(L.label, "y", ly);
+      attr(L.t1, "x", lx); attr(L.t2, "x", lx);
+      L.t = bestT; L.off = bestOff;
+      best.kind = "link"; best.id = it.key;
+      taken.push(best);
+    });
+    labelBoxes = taken;
   }
 
   // Per-frame geometry. Returns true while drones are still easing.
@@ -1682,22 +1829,29 @@
       list.forEach(function (d) { root.appendChild(d.g); });
     }
 
+    var labelled = [];
     links3.forEach(function (L, wid) {
       var w = drones3.get(wid), l = drones3.get(L.leader);
       var p = w && w.p, q = l && l.p;
       setLine(L.line, p, q);
       setLine(L.hit, p, q);
-      // With a selection, only the selected drone's links keep their labels.
-      var mine = !selectedId || selectedId === wid || selectedId === L.leader;
-      placeLabel(L, p, q, showLabels && mine);
+      // With a selection, only the selected drone's links keep their labels,
+      // and those always show.
+      var sel = !!selectedId && (selectedId === wid || selectedId === L.leader);
+      labelled.push({ L: L, p: p, q: q, key: "w:" + wid,
+        visible: showLabels && (!selectedId || sel), force: sel || hoverLink === "w:" + wid });
     });
-    peers3.forEach(function (P) {
+    peers3.forEach(function (P, key) {
       var a = drones3.get(P.a), b = drones3.get(P.b);
       var p = a && a.p, q = b && b.p;
       setLine(P.line, p, q);
       setLine(P.hit, p, q);
-      placeLabel(P, p, q, showLabels && P.showLabel);
+      // Peer labels exist only for the selected drone's links: placed early,
+      // but hidden when there is no room (there can be dozens).
+      labelled.push({ L: P, p: p, q: q, key: "p:" + key, visible: showLabels && P.showLabel,
+        first: true, force: hoverLink === "p:" + key });
     });
+    layoutLabels(list, labelled);
     hulls3.forEach(function (poly, lid) {
       var members = [lid].concat((groupsNow.get(lid) || []).map(function (m) { return m.id; }));
       var pts = [];
@@ -1966,10 +2120,20 @@
 
   function hideTip() {
     show($("tip"), false);
+    setHoverLink(null);
     if (hoverId !== null) {
       hoverId = null;
       if (!selectedId) renderInspector();
+      relabel();
     }
+  }
+
+  // Hovered items win label conflicts, so a hover change re-runs the layout.
+  function relabel() { sceneDirty = true; kick(); }
+  function setHoverLink(key) {
+    if (hoverLink === key) return;
+    hoverLink = key;
+    relabel();
   }
 
   function hoverTarget(el) {
@@ -1992,9 +2156,11 @@
     var lines = target.kind === "drone" ? tipForDrone(target.id)
       : target.kind === "link" ? tipForLink(target.id) : tipForPeer(target.id);
     showTip(lines, vx, vy);
+    setHoverLink(target.kind === "link" ? "w:" + target.id : target.kind === "peer" ? "p:" + target.id : null);
     if (target.kind === "drone" && hoverId !== target.id) {
       hoverId = target.id;
       if (!selectedId) renderInspector();
+      relabel();
     }
   }
 
@@ -2822,7 +2988,8 @@
     rtt: rtt,
     queueSim: queueSim,
     flushSim: flushSim,
-    dotCount: function () { return dots.length; }
+    dotCount: function () { return dots.length; },
+    labelBoxes: function () { return labelBoxes.map(function (b) { return { x: b.x, y: b.y, w: b.w, h: b.h, kind: b.kind, id: b.id || (b.owner && b.owner.node ? b.owner.node.id : "") }; }); }
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
