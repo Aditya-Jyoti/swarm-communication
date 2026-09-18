@@ -39,6 +39,10 @@
             <button type="button" class="btn" id="view-2d" aria-pressed="true" title="Top-down map (v toggles)">2D map</button>
             <button type="button" class="btn" id="view-3d" aria-pressed="false" title="Perspective airspace (v toggles)">3D</button>
           </span>
+          <!-- Moving message dots: off by default, since a full mesh sends
+               hundreds of probes a second and hides the structure. Key: m. -->
+          <button type="button" class="btn" id="flows-on" aria-pressed="false"
+            title="Show messages moving between drones (m toggles)">Show messages</button>
           <!-- 2D only: the true-position map, or the older grouped-by-cluster diagram. -->
           <span class="layout-ctl" id="layout-ctl">
             <span class="muted" id="layout-lbl">Layout:</span>
@@ -104,10 +108,11 @@
       <p id="topo-empty" class="empty">No drones reported yet.</p>
       <p class="hint" id="topo-hint">Top-down map: on-screen distance is ground distance, altitude is the
         z on each label, and link labels give the true 3D distance. Drag or arrows to pan. Wheel, pinch
-        or + / - to zoom. Click a drone to select it. Keys: f fit, 0 reset, v 3D, Esc.</p>
+        or + / - to zoom. Click a drone to select it. Keys: f fit, 0 reset, v 3D, m messages, Esc.</p>
 
-      <div class="flow-bar">
-        <label class="chk strong"><input type="checkbox" id="flows-on" checked> message animation</label>
+      <!-- Per-type filters; only shown while message animation is on. -->
+      <div class="flow-bar" id="flow-bar" hidden>
+        <span class="muted">Message types:</span>
         <ul class="legend flow-legend" id="flow-legend" aria-label="Message types"></ul>
       </div>
 

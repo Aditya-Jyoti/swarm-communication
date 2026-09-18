@@ -489,7 +489,6 @@ label.chk.strong { font-weight: 600; }
 
 .flow-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; }
 .flow-legend { margin: 0; }
-.flow-legend.off { opacity: 0.4; }
 .legend svg.swatch { width: 14px; height: 14px; }
 
 /* ---------- tooltip (inside the SVG) ---------- */

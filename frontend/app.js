@@ -916,21 +916,21 @@
         "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
       hint: "Top-down map: on-screen distance is ground distance, altitude is the z on each label, and link labels give the " +
         "true 3D distance. Drag or arrows to pan. Wheel, pinch or + / - to zoom. Click a drone to select it. " +
-        "Keys: f fit, 0 reset, v 3D, Esc."
+        "Keys: f fit, 0 reset, v 3D, m messages, Esc."
     },
     grouped: {
       cap: "2D GROUPED -- arranged by cluster, not by position",
       aria: "Swarm clusters, grouped layout: drones arranged by cluster, not by position. " +
         "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
       hint: "Grouped layout: each leader with its workers; positions are ignored. Drag or arrows to pan. " +
-        "Wheel, pinch or + / - to zoom. Keys: f fit, 0 reset, v 3D, Esc."
+        "Wheel, pinch or + / - to zoom. Keys: f fit, 0 reset, v 3D, m messages, Esc."
     },
     "3d": {
       cap: "3D -- drop lines show altitude",
       aria: "Swarm airspace in 3D. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, " +
         "plus and minus zoom, 0 resets, f fits, v switches to the 2D map, Escape clears the selection.",
       hint: "Drag to orbit. Shift-drag, right-drag or two fingers to pan. Wheel or pinch to zoom. " +
-        "Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, v 2D map, Esc."
+        "Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, v 2D map, m messages, Esc."
     }
   };
 
@@ -1869,7 +1869,10 @@
 
   // ---------------------------------------------------------------- message animation
 
-  var flowsOn = true;
+  // Off by default: a full mesh of N drones probes N*(N-1) links a second, so
+  // at 10 drones about 86% of all dots are PING/PONG and they bury the leader
+  // and worker structure. The user opts in, and the choice is remembered.
+  var flowsOn = false;
   var dots = [];     // active: {el, from, to, start, dur, group}
   var dotPool = [];  // idle path elements
   var lastSample = new Map(); // node id -> {key, sig}
@@ -1989,11 +1992,29 @@
       li.appendChild(lab);
       ul.appendChild(li);
     });
-    $("flows-on").addEventListener("change", function () {
-      flowsOn = $("flows-on").checked;
-      ul.classList.toggle("off", !flowsOn);
-      if (!flowsOn) releaseAllDots();
+    setFlows(loadPref("swarm-net.flows", ["on", "off"], "off") === "on", false);
+    $("flows-on").addEventListener("click", function () { setFlows(!flowsOn, true); });
+    // "m" toggles messages from anywhere on the page, except while typing.
+    document.addEventListener("keydown", function (e) {
+      if (e.altKey || e.ctrlKey || e.metaKey || (e.key !== "m" && e.key !== "M")) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select" || (t && t.isContentEditable)) return;
+      setFlows(!flowsOn, true);
+      e.preventDefault();
     });
+  }
+
+  function setFlows(on, persist) {
+    flowsOn = !!on;
+    var btn = $("flows-on");
+    btn.setAttribute("aria-pressed", String(flowsOn));
+    // The label says what a click will do, so the state is never colour alone.
+    btn.textContent = flowsOn ? "Hide messages" : "Show messages";
+    $("flow-bar").hidden = !flowsOn;
+    if (!flowsOn) releaseAllDots();
+    if (persist) savePref("swarm-net.flows", flowsOn ? "on" : "off");
+    kick();
   }
 
   // ---------------------------------------------------------------- tooltip, selection, inspector
