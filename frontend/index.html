@@ -32,12 +32,23 @@
   <main class="grid">
     <section class="panel topo-panel" id="topo-panel" aria-label="Airspace">
       <div class="panel-head">
-        <h2>Airspace</h2>
-        <div class="toolbar" role="toolbar" aria-label="View controls">
-          <span class="seg" role="group" aria-label="View mode">
-            <button type="button" class="btn" id="view-3d" aria-pressed="true">3D airspace</button>
-            <button type="button" class="btn" id="view-2d" aria-pressed="false">Grouped</button>
+        <div class="view-switch">
+          <h2>Airspace</h2>
+          <!-- The primary view toggle: 2D map (default) or 3D. Key: v. -->
+          <span class="seg seg-big" role="group" aria-label="View">
+            <button type="button" class="btn" id="view-2d" aria-pressed="true" title="Top-down map (v toggles)">2D map</button>
+            <button type="button" class="btn" id="view-3d" aria-pressed="false" title="Perspective airspace (v toggles)">3D</button>
           </span>
+          <!-- 2D only: the true-position map, or the older grouped-by-cluster diagram. -->
+          <span class="layout-ctl" id="layout-ctl">
+            <span class="muted" id="layout-lbl">Layout:</span>
+            <span class="seg" role="group" aria-labelledby="layout-lbl">
+              <button type="button" class="btn small" id="layout-map" aria-pressed="true" title="Drones at their ground position">map</button>
+              <button type="button" class="btn small" id="layout-grouped" aria-pressed="false" title="Drones grouped by cluster; positions ignored">grouped</button>
+            </span>
+          </span>
+        </div>
+        <div class="toolbar" role="toolbar" aria-label="View controls">
           <button type="button" class="btn icon" id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
           <button type="button" class="btn icon" id="zoom-out" title="Zoom out (-)" aria-label="Zoom out">-</button>
           <button type="button" class="btn" id="view-fit" title="Frame every drone (f)">Fit</button>
@@ -64,7 +75,7 @@
       <div class="topo-wrap">
         <svg id="topo" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet"
              tabindex="0" role="img"
-             aria-label="Swarm airspace. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, plus and minus zoom, 0 resets, f fits, Escape clears the selection.">
+             aria-label="Swarm airspace, 2D top-down map. Screen position is ground position; altitude is written on each label. Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.">
           <g id="v3d">
             <g id="g3-grid"></g>
             <g id="g3-hulls"></g>
@@ -83,6 +94,7 @@
               <g id="topo-nodes"></g>
             </g>
           </g>
+          <text id="mode-cap" class="mode-cap" x="10" y="20">2D MAP</text>
           <g id="tip" class="tip" display="none" aria-hidden="true">
             <rect id="tip-bg" rx="4" ry="4"></rect>
             <text id="tip-text"></text>
@@ -90,8 +102,9 @@
         </svg>
       </div>
       <p id="topo-empty" class="empty">No drones reported yet.</p>
-      <p class="hint">Drag to orbit. Shift-drag, right-drag or two fingers to pan. Wheel or pinch to
-        zoom. Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, Esc.</p>
+      <p class="hint" id="topo-hint">Top-down map: on-screen distance is ground distance, altitude is the
+        z on each label, and link labels give the true 3D distance. Drag or arrows to pan. Wheel, pinch
+        or + / - to zoom. Click a drone to select it. Keys: f fit, 0 reset, v 3D, Esc.</p>
 
       <div class="flow-bar">
         <label class="chk strong"><input type="checkbox" id="flows-on" checked> message animation</label>

@@ -50,7 +50,13 @@
   var PITCH_MIN = 0.03;
   var PITCH_MAX = 1.55;
   var HOME_3D = { yaw: -2.25, pitch: 0.55, zoom: 1, panX: 0, panY: 0, tx: 0.5, ty: 0.5, tz: 0.25 };
-  var HOME_2D = { zoom: 1, panX: 0, panY: 0 };
+  var HOME_FLAT = { zoom: 1, panX: 0, panY: 0 };  // 2D map and grouped layout
+  // 2D map: an orthographic top-down camera. One airspace side is MAP_SCALE
+  // view-box pixels at zoom 1, so the whole square fits with room for ticks.
+  var MAP_SCALE = 470;
+  // Persisted view choice. A first visit (or blocked storage) gets the map.
+  var VIEW_KEY = "swarm-net.view";
+  var LAYOUT_KEY = "swarm-net.layout2d";
 
   // Message animation.
   var FLOW_WINDOW_MS = 1000;  // telemetry interval the counts cover
@@ -629,10 +635,7 @@
       var n = byId.get(id);
       if (n && n.isLeader) promote(id);
     });
-    if (!autoFitted && nodes.length) {
-      autoFitted = true;
-      fitView(true);
-    }
+    autoFit();
     kick();
   }
 
@@ -674,16 +677,29 @@
 
   // ---------------------------------------------------------------- view + camera
 
-  var view = "3d";
-  var autoFitted = false;
+  // Two primary views, picked by the toggle at the top of the Airspace panel:
+  //   "2d" -- the default. A top-down map, or the older grouped diagram.
+  //   "3d" -- the perspective airspace.
+  // `mode` is what is actually drawn: "map" | "grouped" | "3d". The map and
+  // 3D share one renderer (render3d); only the projection differs. Each mode
+  // keeps its own camera, so switching back returns to where the user was.
+  var primary = "2d";
+  var layout2d = "map";
+  var mode = "map";
   var cams = {
-    "3d": { cur: Object.assign({}, HOME_3D), goal: Object.assign({}, HOME_3D) },
-    "2d": { cur: Object.assign({}, HOME_2D), goal: Object.assign({}, HOME_2D) }
+    "3d": { cur: Object.assign({}, HOME_3D), goal: Object.assign({}, HOME_3D), fitted: false },
+    // The map and grouped homes already frame everything: no auto-fit.
+    map: { cur: Object.assign({}, HOME_FLAT), goal: Object.assign({}, HOME_FLAT), fitted: true },
+    grouped: { cur: Object.assign({}, HOME_FLAT), goal: Object.assign({}, HOME_FLAT), fitted: true }
   };
-  var CAM_KEYS = { "3d": ["yaw", "pitch", "zoom", "panX", "panY", "tx", "ty", "tz"], "2d": ["zoom", "panX", "panY"] };
+  var CAM_KEYS = {
+    "3d": ["yaw", "pitch", "zoom", "panX", "panY", "tx", "ty", "tz"],
+    map: ["zoom", "panX", "panY"],
+    grouped: ["zoom", "panX", "panY"]
+  };
 
   function camSet(patch, animate) {
-    var c = cams[view];
+    var c = cams[mode];
     for (var k in patch) {
       var v = patch[k];
       if (k === "zoom") v = clamp(v, ZOOM_MIN, ZOOM_MAX);
@@ -697,9 +713,9 @@
 
   // Ease the current camera toward the goal. Returns true while moving.
   function easeCamera() {
-    var c = cams[view];
+    var c = cams[mode];
     var moving = false;
-    CAM_KEYS[view].forEach(function (k) {
+    CAM_KEYS[mode].forEach(function (k) {
       var d = c.goal[k] - c.cur[k];
       var eps = (k === "panX" || k === "panY") ? 0.3 : 0.0005;
       if (Math.abs(d) <= eps) {
@@ -714,9 +730,9 @@
   }
 
   // Zoom by factor, keeping the view point (vx, vy) fixed on screen.
-  // Both views map screen = centre + pan + zoom * q, so the same maths works.
+  // Every mode maps screen = centre + pan + zoom * q, so the same maths works.
   function zoomAt(vx, vy, factor, animate) {
-    var g = cams[view][animate ? "goal" : "cur"];
+    var g = cams[mode][animate ? "goal" : "cur"];
     var z1 = g.zoom;
     var z2 = clamp(z1 * factor, ZOOM_MIN, ZOOM_MAX);
     var qx = (vx - VIEW_W / 2 - g.panX) / z1;
@@ -725,26 +741,40 @@
   }
 
   function panBy(dx, dy, animate) {
-    var g = cams[view][animate ? "goal" : "cur"];
+    var g = cams[mode][animate ? "goal" : "cur"];
     camSet({ panX: g.panX + dx, panY: g.panY + dy }, animate);
   }
 
   function orbitBy(dyaw, dpitch, animate) {
-    if (view !== "3d") { panBy(-dyaw * 250, dpitch * 250, animate); return; }
+    if (mode !== "3d") return;
     var g = cams["3d"][animate ? "goal" : "cur"];
     camSet({ yaw: g.yaw + dyaw, pitch: g.pitch + dpitch }, animate);
   }
 
+  // 3D: back to the home angle, then frame the drones around the home
+  // target. 2D: back to the home framing (the whole airspace on the map).
   function resetView() {
-    camSet(Object.assign({}, view === "3d" ? HOME_3D : HOME_2D), true);
-    fitView(true, true);
+    if (mode === "3d") {
+      camSet(Object.assign({}, HOME_3D), true);
+      fitView(true, true);
+    } else {
+      camSet(Object.assign({}, HOME_FLAT), true);
+    }
+  }
+
+  // First visit to a mode with drones on screen: frame them once.
+  function autoFit() {
+    var c = cams[mode];
+    if (c.fitted || !model.nodes.length) return;
+    c.fitted = true;
+    fitView(true);
   }
 
   // Frame every drone. keepTarget: keep the orbit centre (used by reset).
   function fitView(animate, keepTarget) {
     var pts = [];
-    if (view === "3d") {
-      var S = worldSize();
+    var S = worldSize();
+    if (mode === "3d") {
       var g = cams["3d"].goal;
       var cam = { yaw: g.yaw, pitch: g.pitch, zoom: 1, panX: 0, panY: 0, tx: g.tx, ty: g.ty, tz: g.tz };
       var list = model.nodes.map(posOf);
@@ -767,12 +797,20 @@
       }
       var fit = fitBox(pts, 60);
       camSet({ tx: cam.tx, ty: cam.ty, tz: cam.tz, zoom: fit.zoom, panX: fit.panX, panY: fit.panY }, animate);
+      return;
+    }
+    if (mode === "map") {
+      var Bm = basisFor("map", HOME_FLAT);
+      model.nodes.forEach(function (n) {
+        var p = posOf(n);
+        pts.push(project(Bm, p.x / S, p.y / S, p.z / S));
+      });
     } else {
       drawn.forEach(function (d) { pts.push({ x: d.tx, y: d.ty }); });
-      if (!pts.length) { camSet(Object.assign({}, HOME_2D), animate); return; }
-      var f2 = fitBox(pts, 50);
-      camSet({ zoom: f2.zoom, panX: f2.panX, panY: f2.panY }, animate);
     }
+    if (!pts.length) { camSet(Object.assign({}, HOME_FLAT), animate); return; }
+    var f2 = fitBox(pts, mode === "map" ? 60 : 50);
+    camSet({ zoom: f2.zoom, panX: f2.panX, panY: f2.panY }, animate);
   }
 
   // pts are screen points at zoom 1 and pan 0.
@@ -792,13 +830,19 @@
   function focusOn(id) {
     var n = model.byId.get(id);
     if (!n) return;
-    if (view === "3d") {
-      var p = posOf(n), S = worldSize();
+    var p = posOf(n), S = worldSize();
+    if (mode === "3d") {
       camSet({ tx: p.x / S, ty: p.y / S, tz: p.z / S, panX: 0, panY: 0 }, true);
+    } else if (mode === "map") {
+      // A map should hold still: pan only when the drone is near an edge.
+      var now_ = project(basisFor("map", cams.map.goal), p.x / S, p.y / S, p.z / S);
+      if (now_.x > VIEW_W * 0.12 && now_.x < VIEW_W * 0.88 && now_.y > VIEW_H * 0.12 && now_.y < VIEW_H * 0.88) return;
+      var q = project(basisFor("map", { zoom: cams.map.goal.zoom, panX: 0, panY: 0 }), p.x / S, p.y / S, p.z / S);
+      camSet({ panX: VIEW_W / 2 - q.x, panY: VIEW_H / 2 - q.y }, true);
     } else {
       var d = drawn.get(id);
       if (!d) return;
-      var z = cams["2d"].goal.zoom;
+      var z = cams.grouped.goal.zoom;
       camSet({ panX: -(d.tx - VIEW_W / 2) * z, panY: -(d.ty - VIEW_H / 2) * z }, true);
     }
   }
@@ -820,8 +864,29 @@
     };
   }
 
+  // The map's camera: orthographic, looking straight down. There is no eye
+  // position, so it needs only zoom and pan.
+  function basisFor(m, c) {
+    if (m === "map") return { ortho: true, zoom: c.zoom, panX: c.panX, panY: c.panY };
+    return camBasis(c);
+  }
+
   // World point (unit cube) to view box coordinates. null when behind the eye.
+  //
+  // Orthographic (the 2D map): screen x from x, screen y from y (north up),
+  // and z is ignored, so on-screen distance is ground distance times a
+  // constant. `depth` still orders by altitude (higher drones paint on top),
+  // and `k` keeps glyphs a steady size that grows gently with zoom.
   function project(B, x, y, z) {
+    if (B.ortho) {
+      var m = MAP_SCALE * B.zoom;
+      return {
+        x: VIEW_W / 2 + B.panX + (x - 0.5) * m,
+        y: VIEW_H / 2 + B.panY - (y - 0.5) * m,
+        depth: 2 - z,
+        k: (FOCAL / CAM_DIST) * Math.sqrt(B.zoom)
+      };
+    }
     var vx = x - B.ex, vy = y - B.ey, vz = z - B.ez;
     var depth = vx * B.fx + vy * B.fy + vz * B.fz;
     if (depth < 0.05) return null;
@@ -831,19 +896,84 @@
     return { x: VIEW_W / 2 + B.panX + xc * k, y: VIEW_H / 2 + B.panY - yc * k, depth: depth, k: k };
   }
 
-  function setView(v) {
-    if (v === view) return;
-    releaseAllDots();
-    hideTip();
-    view = v;
-    show($("v3d"), v === "3d");
-    show($("v2d"), v === "2d");
-    $("view-3d").setAttribute("aria-pressed", String(v === "3d"));
-    $("view-2d").setAttribute("aria-pressed", String(v === "2d"));
-    // Snap the 2D positions: they were not animated while hidden.
-    drawn.forEach(function (d) { d.x = d.tx; d.y = d.ty; });
+  function loadPref(key, allowed, fallback) {
+    try {
+      var v = window.localStorage.getItem(key);
+      return allowed.indexOf(v) >= 0 ? v : fallback;
+    } catch (e) {
+      return fallback; // storage disabled or blocked
+    }
+  }
+
+  function savePref(key, v) {
+    try { window.localStorage.setItem(key, v); } catch (e) { /* not persisted; the page still works */ }
+  }
+
+  var MODE_TEXT = {
+    map: {
+      cap: "2D MAP -- top-down, altitude as z on each label",
+      aria: "Swarm airspace, 2D top-down map. Screen position is ground position; altitude is written on each label. " +
+        "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
+      hint: "Top-down map: on-screen distance is ground distance, altitude is the z on each label, and link labels give the " +
+        "true 3D distance. Drag or arrows to pan. Wheel, pinch or + / - to zoom. Click a drone to select it. " +
+        "Keys: f fit, 0 reset, v 3D, Esc."
+    },
+    grouped: {
+      cap: "2D GROUPED -- arranged by cluster, not by position",
+      aria: "Swarm clusters, grouped layout: drones arranged by cluster, not by position. " +
+        "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
+      hint: "Grouped layout: each leader with its workers; positions are ignored. Drag or arrows to pan. " +
+        "Wheel, pinch or + / - to zoom. Keys: f fit, 0 reset, v 3D, Esc."
+    },
+    "3d": {
+      cap: "3D -- drop lines show altitude",
+      aria: "Swarm airspace in 3D. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, " +
+        "plus and minus zoom, 0 resets, f fits, v switches to the 2D map, Escape clears the selection.",
+      hint: "Drag to orbit. Shift-drag, right-drag or two fingers to pan. Wheel or pinch to zoom. " +
+        "Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, v 2D map, Esc."
+    }
+  };
+
+  // Show the current mode: buttons, layers, help text. Idempotent.
+  function applyMode() {
+    var m = primary === "3d" ? "3d" : layout2d;
+    if (m !== mode) {
+      releaseAllDots();
+      hideTip();
+      mode = m;
+      currentBasis = null;
+      lastCamSig = "";
+      lastOrder = "";
+      // Snap the grouped positions: they were not animated while hidden.
+      if (m === "grouped") drawn.forEach(function (d) { d.x = d.tx; d.y = d.ty; });
+      sync3d(); // drone and link labels differ between the map and 3D
+    }
+    show($("v3d"), m !== "grouped");
+    show($("v2d"), m === "grouped");
+    $("view-2d").setAttribute("aria-pressed", String(primary === "2d"));
+    $("view-3d").setAttribute("aria-pressed", String(primary === "3d"));
+    $("layout-map").setAttribute("aria-pressed", String(layout2d === "map"));
+    $("layout-grouped").setAttribute("aria-pressed", String(layout2d === "grouped"));
+    $("layout-ctl").hidden = primary !== "2d";
+    var t = MODE_TEXT[m];
+    setText($("mode-cap"), t.cap);
+    if ($("topo").getAttribute("aria-label") !== t.aria) $("topo").setAttribute("aria-label", t.aria);
+    setText($("topo-hint"), t.hint);
     sceneDirty = true;
+    autoFit();
     kick();
+  }
+
+  function setView(v) {
+    primary = v === "3d" ? "3d" : "2d";
+    savePref(VIEW_KEY, primary);
+    applyMode();
+  }
+
+  function setLayout(l) {
+    layout2d = l === "grouped" ? "grouped" : "map";
+    savePref(LAYOUT_KEY, layout2d);
+    applyMode();
   }
 
   // ---------------------------------------------------------------- frame loop
@@ -859,13 +989,13 @@
   function frame(t) {
     rafId = 0;
     var busy = easeCamera();
-    if (view === "3d") busy = render3d() || busy;
-    else busy = step2d() || busy;
+    if (mode === "grouped") busy = step2d() || busy;
+    else busy = render3d() || busy;
     busy = stepDots(typeof t === "number" ? t : now()) || busy;
     if (busy) kick();
   }
 
-  // ---------------------------------------------------------------- 2D grouped view
+  // ---------------------------------------------------------------- 2D grouped layout
 
   // Deterministic layout: same membership -> same picture, so a change on
   // screen always means a change in the cluster.
@@ -996,7 +1126,13 @@
     ["flashRing", "promo", "sel", "cring", "halo", "shape", "glyph", "cross"].forEach(function (p) {
       body.appendChild(parts[p]);
     });
+    // The label is the short id plus, on the 2D map, the altitude ("z 42"):
+    // a top-down view cannot show height any other way.
     var label = s("text", { "class": "n-label" });
+    var name = s("tspan");
+    var alt = s("tspan", { "class": "n-alt", dx: "5" });
+    label.appendChild(name);
+    label.appendChild(alt);
     var sub = s("text", { "class": "n-label n-sublabel" });
     g.appendChild(body);
     g.appendChild(label);
@@ -1004,16 +1140,25 @@
     parts.g = g;
     parts.body = body;
     parts.label = label;
+    parts.name = name;
+    parts.alt = alt;
     parts.sub = sub;
     parts.sig = "";
     parts.r = -1;
     return parts;
   }
 
+  function altText(d, n) {
+    if (mode !== "map" || !d.drop) return ""; // only the map's drones (not the grouped glyphs)
+    return "z " + Math.round(posOf(n).z);
+  }
+
   function styleGlyph(d, n) {
     var cl = clusterOf(n);
     var colour = cl ? leaderColour.get(cl) : "";
     var promoted = promoted_.has(n.id);
+    var alt = altText(d, n);
+    setText(d.alt, alt);
     var sig = [n.eff, n.isLeader, n.degraded, n.term, n.role, n.leader, colour, promoted].join("|");
     if (sig === d.sig) return;
     d.sig = sig;
@@ -1034,7 +1179,7 @@
     attr(d.c1, "class", "n-cross" + (n.eff === "killed" ? " killed" : ""));
     attr(d.c2, "class", "n-cross" + (n.eff === "killed" ? " killed" : ""));
 
-    setText(d.label, shortId(n.id));
+    setText(d.name, shortId(n.id));
     var parts = [];
     if (promoted) parts.push("NEW LEADER");
     if (n.eff !== "alive") parts.push(n.eff.toUpperCase());
@@ -1123,7 +1268,7 @@
   // Ease every node toward its target; lines and hulls follow the eased
   // positions so nothing jumps. Returns true while anything moves.
   function step2d() {
-    var c = cams["2d"].cur;
+    var c = cams.grouped.cur;
     attr($("v2d-cam"), "transform",
       "translate(" + (VIEW_W / 2 + c.panX).toFixed(1) + " " + (VIEW_H / 2 + c.panY).toFixed(1) + ") " +
       "scale(" + c.zoom.toFixed(4) + ") translate(" + (-VIEW_W / 2) + " " + (-VIEW_H / 2) + ")");
@@ -1231,17 +1376,38 @@
       root.appendChild(l);
       grid.edges.push([l, e[0], e[1]]);
     });
-    [["x", [1.07, 0, 0]], ["y", [0, 1.07, 0]], ["z", [0, 0, 1.07]], ["0", [-0.03, -0.03, 0]]].forEach(function (t) {
+    // Axis names: [text, 3D anchor, map anchor or null (hidden on the map)].
+    // On the map, each name sits beside the middle of its tick row.
+    [["x", [1.07, 0, 0], [0.5, -0.075, 0]], ["y", [0, 1.07, 0], [-0.085, 0.5, 0]],
+      ["z", [0, 0, 1.07], null], ["0", [-0.03, -0.03, 0], null]].forEach(function (t) {
       var tx = s("text", { "class": "axis-label" });
       tx.textContent = t[0];
       root.appendChild(tx);
-      grid.axes.push([tx, t[1]]);
+      grid.axes.push([tx, t[1], t[2]]);
     });
+    // Map only: the airspace boundary and 0..size ticks along x and y.
+    grid.bound = s("polygon", { "class": "map-bound" });
+    root.appendChild(grid.bound);
+    grid.ticks = [];
+    for (var j = 0; j <= 10; j++) {
+      var tk = s("text", { "class": "tick-label" });
+      root.appendChild(tk);
+      grid.ticks.push([tk, [j / 10, -0.035, 0], j / 10]);
+      if (j === 0) continue; // one "0" at the corner is enough
+      var ty = s("text", { "class": "tick-label tick-y" });
+      root.appendChild(ty);
+      grid.ticks.push([ty, [-0.018, j / 10, 0], j / 10]);
+    }
   }
+
+  function fmtTick(v) { return String(Math.round(v * 10) / 10); }
 
   function drawGrid(B) {
     if (!grid) buildGrid();
-    grid.ground.concat(grid.edges).forEach(function (g) {
+    var flat = !!B.ortho;
+    // Seen from straight above, the cube's vertical edges collapse to points
+    // and its top face sits on the boundary: the map draws neither.
+    grid.ground.concat(flat ? [] : grid.edges).forEach(function (g) {
       var p = project(B, g[1][0], g[1][1], g[1][2]);
       var q = project(B, g[2][0], g[2][1], g[2][2]);
       if (!p || !q) { show(g[0], false); return; }
@@ -1249,10 +1415,28 @@
       attr(g[0], "x1", p.x.toFixed(1)); attr(g[0], "y1", p.y.toFixed(1));
       attr(g[0], "x2", q.x.toFixed(1)); attr(g[0], "y2", q.y.toFixed(1));
     });
+    if (flat) grid.edges.forEach(function (g) { show(g[0], false); });
     grid.axes.forEach(function (a) {
-      var p = project(B, a[1][0], a[1][1], a[1][2]);
+      var at = flat ? a[2] : a[1];
+      var p = at && project(B, at[0], at[1], at[2]);
       show(a[0], !!p);
       if (p) { attr(a[0], "x", p.x.toFixed(1)); attr(a[0], "y", p.y.toFixed(1)); }
+    });
+    show(grid.bound, flat);
+    if (flat) {
+      attr(grid.bound, "points", [[0, 0], [1, 0], [1, 1], [0, 1]].map(function (c) {
+        var p = project(B, c[0], c[1], 0);
+        return p.x.toFixed(1) + "," + p.y.toFixed(1);
+      }).join(" "));
+    }
+    var S = worldSize();
+    grid.ticks.forEach(function (t) {
+      show(t[0], flat);
+      if (!flat) return;
+      var p = project(B, t[1][0], t[1][1], 0);
+      attr(t[0], "x", p.x.toFixed(1));
+      attr(t[0], "y", p.y.toFixed(1));
+      setText(t[0], fmtTick(S * t[2]));
     });
   }
 
@@ -1325,8 +1509,10 @@
       var hl = selectedId === n.id || selectedId === n.leader;
       attr(L.line, "class", "link3" + (bad ? " bad" : "") + (hl ? " hl" : ""));
       attr(L.line, "stroke", leaderColour.get(n.leader) || NEUTRAL);
+      // Always the true 3D distance: that is what drives the latency model,
+      // even when the map only shows the ground distance.
       var dd = dist(n, lead);
-      setText(L.t1, dd.toFixed(1) + " u");
+      setText(L.t1, dd.toFixed(1) + " u" + (mode === "map" ? " (3D)" : ""));
       var pr = predicted(dd);
       setText(L.t2, "rtt " + fmtMs(rtt(n, n.leader)) + (pr === null ? "" : " | model " + fmtMs(pr)));
     });
@@ -1369,7 +1555,7 @@
             var me = model.byId.get(selectedId);
             var other = model.byId.get(selectedId === a ? b : a);
             var d2 = other ? dist(me, other) : 0;
-            setText(P.t1, d2.toFixed(1) + " u");
+            setText(P.t1, d2.toFixed(1) + " u" + (mode === "map" ? " (3D)" : ""));
             setText(P.t2, "rtt " + fmtMs(rtt(me, selectedId === a ? b : a)));
           }
         });
@@ -1450,12 +1636,13 @@
         sceneDirty = true;
       }
     });
-    var c = cams["3d"].cur;
-    var sig = [c.yaw, c.pitch, c.zoom, c.panX, c.panY, c.tx, c.ty, c.tz].map(function (v) { return v.toFixed(4); }).join(",");
+    // The map and 3D share this renderer; only the camera basis differs.
+    var c = cams[mode].cur;
+    var sig = mode + ":" + worldSize() + ":" + CAM_KEYS[mode].map(function (k) { return c[k].toFixed(4); }).join(",");
     if (sig !== lastCamSig) { sceneDirty = true; }
     if (!sceneDirty) return moving;
     sceneDirty = false;
-    var B = camBasis(c);
+    var B = basisFor(mode, c);
     if (sig !== lastCamSig) { drawGrid(B); lastCamSig = sig; }
     currentBasis = B;
 
@@ -1475,11 +1662,13 @@
       var r = base * clamp(d.p.k / (FOCAL / CAM_DIST), 0.45, 2.6);
       sizeGlyph(d, r);
       attr(d.g, "transform", "translate(" + d.p.x.toFixed(1) + " " + d.p.y.toFixed(1) + ")");
-      if (setLine(d.drop, d.p, d.gp)) {
+      // Drop lines show altitude in 3D; from straight above they have no length.
+      if (!B.ortho && setLine(d.drop, d.p, d.gp)) {
         show(d.shadow, true);
         attr(d.shadow, "cx", d.gp.x.toFixed(1));
         attr(d.shadow, "cy", d.gp.y.toFixed(1));
       } else {
+        show(d.drop, false);
         show(d.shadow, false);
       }
     });
@@ -1531,7 +1720,7 @@
   var dotPool = [];  // idle path elements
   var lastSample = new Map(); // node id -> {key, sig}
 
-  function dotLayer() { return $(view === "3d" ? "g3-dots" : "topo-dots"); }
+  function dotLayer() { return $(mode === "grouped" ? "topo-dots" : "g3-dots"); }
 
   function acquireDot() {
     var el = dotPool.pop() || s("path");
@@ -1566,7 +1755,7 @@
     if (!flowsOn || document.hidden) return;
     var t0 = now();
     var reduce = reducedMotion();
-    var positions = view === "3d" ? drones3 : drawn;
+    var positions = mode === "grouped" ? drawn : drones3;
     nodes.forEach(function (n) {
       if (!n.flows.length || n.eff === "killed") return;
       var key = model.atMs !== null && n.lastSeen !== null ? model.atMs - n.lastSeen : null;
@@ -1601,7 +1790,7 @@
 
   function stepDots(t) {
     if (!dots.length) return false;
-    var B = view === "3d" ? (currentBasis || camBasis(cams["3d"].cur)) : null;
+    var B = mode === "grouped" ? null : (currentBasis || basisFor(mode, cams[mode].cur));
     var keep = [];
     for (var i = 0; i < dots.length; i++) {
       var d = dots[i];
@@ -1696,8 +1885,11 @@
     var n = model.byId.get(id);
     if (!n) return null;
     var lines = droneLines(n);
+    if (mode === "map") {
+      lines.splice(3, 0, "altitude: z " + posOf(n).z.toFixed(1) + " (the map shows ground position)");
+    }
     var rows = peerRows(n);
-    if (rows.length) lines.push("RTT to peers (measured / distance):");
+    if (rows.length) lines.push("RTT to peers (measured / 3D distance):");
     rows.slice(0, 10).forEach(function (r) {
       lines.push("  " + shortId(r.id) + (r.role === "leader" ? " (L)" : "") + "  " + fmtMs(r.rtt) +
         "  d " + (r.d === null ? "-" : r.d.toFixed(1)));
@@ -1712,10 +1904,17 @@
     if (!w || !l) return null;
     var d = dist(w, l);
     return [
-      shortId(w.id) + " -> " + shortId(l.id) + " (leader)",
-      "distance: " + d.toFixed(1) + " units",
+      shortId(w.id) + " -> " + shortId(l.id) + " (leader)"
+    ].concat(distLines(d), [
       "measured RTT: " + fmtMs(rtt(w, l.id)) + " (worker's EWMA)"
-    ].concat(modelLines(d));
+    ], modelLines(d));
+  }
+
+  // Link distances are always 3D: that is what the latency model uses.
+  function distLines(d) {
+    var out = ["distance: " + d.toFixed(1) + " units"];
+    if (mode === "map") out.push("3D distance; the map shows ground position");
+    return out;
   }
 
   function tipForPeer(key) {
@@ -1724,11 +1923,11 @@
     if (!a || !b) return null;
     var d = dist(a, b);
     return [
-      shortId(a.id) + " <-> " + shortId(b.id),
-      "distance: " + d.toFixed(1) + " units",
+      shortId(a.id) + " <-> " + shortId(b.id)
+    ].concat(distLines(d), [
       "RTT " + shortId(a.id) + " -> " + shortId(b.id) + ": " + fmtMs(rtt(a, b.id)),
       "RTT " + shortId(b.id) + " -> " + shortId(a.id) + ": " + fmtMs(rtt(b, a.id))
-    ].concat(modelLines(d));
+    ], modelLines(d));
   }
 
   function showTip(lines, vx, vy) {
@@ -1896,7 +2095,7 @@
       pointers.set(e.pointerId, p);
       hideTip();
       if (pointers.size === 1) {
-        var pan = e.button === 2 || e.button === 1 || e.shiftKey || view === "2d";
+        var pan = e.button === 2 || e.button === 1 || e.shiftKey || mode !== "3d";
         gesture = { mode: pan ? "pan" : "orbit", last: p, start: p, moved: false, target: hoverTarget(e.target) };
       } else if (pointers.size === 2) {
         var ps = pinchState();
@@ -1968,10 +2167,11 @@
       if (e.altKey || e.ctrlKey || e.metaKey) return;
       var handled = true;
       switch (e.key) {
-        case "ArrowLeft": orbitBy(0.15, 0, true); break;
-        case "ArrowRight": orbitBy(-0.15, 0, true); break;
-        case "ArrowUp": orbitBy(0, 0.1, true); break;
-        case "ArrowDown": orbitBy(0, -0.1, true); break;
+        // 3D: arrows orbit. 2D: arrows pan (move the view that way).
+        case "ArrowLeft": if (mode === "3d") orbitBy(0.15, 0, true); else panBy(40, 0, true); break;
+        case "ArrowRight": if (mode === "3d") orbitBy(-0.15, 0, true); else panBy(-40, 0, true); break;
+        case "ArrowUp": if (mode === "3d") orbitBy(0, 0.1, true); else panBy(0, 40, true); break;
+        case "ArrowDown": if (mode === "3d") orbitBy(0, -0.1, true); else panBy(0, -40, true); break;
         case "+": case "=": zoomAt(VIEW_W / 2, VIEW_H / 2, 1.25, true); break;
         case "-": case "_": zoomAt(VIEW_W / 2, VIEW_H / 2, 1 / 1.25, true); break;
         case "0": resetView(); break;
@@ -2027,8 +2227,19 @@
   }
 
   function initToolbar() {
-    $("view-3d").addEventListener("click", function () { setView("3d"); });
     $("view-2d").addEventListener("click", function () { setView("2d"); });
+    $("view-3d").addEventListener("click", function () { setView("3d"); });
+    $("layout-map").addEventListener("click", function () { setLayout("map"); });
+    $("layout-grouped").addEventListener("click", function () { setLayout("grouped"); });
+    // "v" flips 2D / 3D from anywhere on the page, except while typing.
+    document.addEventListener("keydown", function (e) {
+      if (e.altKey || e.ctrlKey || e.metaKey || (e.key !== "v" && e.key !== "V")) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select" || (t && t.isContentEditable)) return;
+      setView(primary === "3d" ? "2d" : "3d");
+      e.preventDefault();
+    });
     $("zoom-in").addEventListener("click", function () { zoomAt(VIEW_W / 2, VIEW_H / 2, 1.3, true); });
     $("zoom-out").addEventListener("click", function () { zoomAt(VIEW_W / 2, VIEW_H / 2, 1 / 1.3, true); });
     $("view-fit").addEventListener("click", function () { fitView(true); });
@@ -2570,6 +2781,9 @@
     initToolbar();
     initFlowControls();
     initSimPanel();
+    primary = loadPref(VIEW_KEY, ["2d", "3d"], "2d");
+    layout2d = loadPref(LAYOUT_KEY, ["map", "grouped"], "map");
+    applyMode();
     sceneDirty = true;
     kick();
     setInterval(tick, 1000);
@@ -2597,6 +2811,9 @@
     model: model,
     cams: cams,
     project: function (x, y, z) { return project(camBasis(cams["3d"].cur), x, y, z); },
+    projectIn: function (m, x, y, z) { return project(basisFor(m, cams[m].cur), x, y, z); },
+    mode: function () { return mode; },
+    setLayout: setLayout,
     frame: function (t) { frame(t); },
     select: select,
     setView: setView,
