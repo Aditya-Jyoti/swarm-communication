@@ -1532,3 +1532,41 @@ coder/websocket takes the socket over. It fails deterministically without the fi
 A subscribe-then-stream feed has to subscribe before it acknowledges the subscription.
 Acknowledging first leaves a window whose length is a scheduling accident -- 1 ms on an idle
 box, 9 ms on a loaded 2-core runner -- and anything emitted in it is gone.
+
+## 2026-09-22 -- Dropping the drone framing, a plain task form
+
+### 11.1 Why
+
+The swarm is a communication project. Calling nodes "drones" suggested a flight system the
+code never had.
+
+### 11.2 What changed
+
+| Before | After |
+|---|---|
+| drone / drones | node / nodes |
+| Drone simulation (`drone-simulation.md`) | Latency simulation (`latency-simulation.md`) |
+| Airspace panel, altitude | Topology panel, height |
+| `swarm-scene/1` key `drones` | `nodes` (generator and Blender add-on together) |
+| `blender/scenario-10-drones.json` | `blender/scenario-10-nodes.json` |
+
+Nothing on the wire changed. The only schema change is the Blender scene key, and both
+readers and writers live in `blender/`.
+
+### 11.3 Task form
+
+The old "Broadcast task" form asked for a kind and a raw JSON body. It was also misnamed:
+the CC round-robins tasks to leaders, it does not broadcast them.
+
+The new "Send a task" form:
+
+- Echo / Hash / Sleep buttons, each with a one-line description.
+- One plain input (text, or milliseconds for Sleep). The form builds the body:
+
+```js
+echo:  { msg: text }
+hash:  { data: text }
+sleep: { ms: Number(text) }   // 0..10000, checked before sending
+```
+
+- A count, as before.
