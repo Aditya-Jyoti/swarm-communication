@@ -2932,7 +2932,7 @@
     Object.keys(TASK_KINDS).forEach(function (k) { values[k] = TASK_KINDS[k].value; });
 
     function pick(k) {
-      values[kind] = input.value;
+      if (k !== kind) values[kind] = input.value;
       kind = k;
       var def = TASK_KINDS[k];
       kindBtns.forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.kind === k)); });
