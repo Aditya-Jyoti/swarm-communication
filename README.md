@@ -140,4 +140,3 @@ list is in [`.env.example`](.env.example).
 | `SWARM_VERSION` | `dev` | Version baked into the binaries |
 | `GO_VERSION`, `ALPINE_VERSION`, `NGINX_VERSION` | `1.27`, `3.22`, `1.31-alpine` | Base images |
 
-Known open items are in [`STATE.md`](STATE.md).
