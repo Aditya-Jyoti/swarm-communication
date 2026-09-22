@@ -130,7 +130,7 @@ See [Backpressure and Bounded Queues](/concepts/backpressure-and-bounded-queues)
 | `backend/deploy/node-entrypoint.sh` | Gives each scaled replica a readable ID |
 | `frontend/` | Dashboard (`index.html`, `app.js`, `style.css`): 3D space, grouped view, message animation, simulation panel. Plus `nginx.conf.template` and `Dockerfile`. |
 | `blender/` | `make_swarm_scene.py` (live state -> `swarm-scene.json`), `swarm_blender.py` (Blender add-on and headless CLI), tests, and a committed example scene |
-| `docs/` | This site. `package.json` sits at the repo root. |
+| `docs/` | This site, with its own `package.json` and the doc checks in `docs/scripts/`. |
 | `docker-compose.yml` | Services `frontend`, `control-center`, `seed`, `node` |
 | `.env.example` | Every tunable. Copy it to `.env`. |
 | `scripts/e2e.sh` | End-to-end test: self-healing, chaos kill, sim changes |

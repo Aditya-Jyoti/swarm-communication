@@ -1,4 +1,4 @@
-// CLAUDE.md 4.1: generated markdown must be strict ASCII.
+// .claude/CLAUDE.md 4.1: generated markdown must be strict ASCII.
 // Non-ASCII slips in invisibly (em dashes, smart quotes, box-drawing left over
 // from an ASCII diagram), so this is enforced mechanically rather than by review.
 import fs from 'node:fs';

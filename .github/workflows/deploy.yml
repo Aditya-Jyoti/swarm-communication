@@ -40,17 +40,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: docs/package-lock.json
 
+      # The docs site is its own npm project; every npm step runs inside docs/.
       - run: npm ci
+        working-directory: docs
 
-      - name: Check strict ASCII (CLAUDE.md 4.1)
-        run: npm run docs:check:ascii
+      - name: Check strict ASCII (.claude/CLAUDE.md 4.1)
+        run: npm run check:ascii
+        working-directory: docs
 
-      - name: Check Mermaid diagrams parse (CLAUDE.md 4.2)
-        run: npm run docs:check:mermaid
+      - name: Check Mermaid diagrams parse (.claude/CLAUDE.md 4.2)
+        run: npm run check:mermaid
+        working-directory: docs
 
       - name: Build VitePress
-        run: npm run docs:build
+        run: npm run build
+        working-directory: docs
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

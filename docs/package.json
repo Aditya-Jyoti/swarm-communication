@@ -5,12 +5,12 @@
   "type": "module",
   "description": "Documentation site for swarm-net: a self-healing P2P swarm network in Go.",
   "scripts": {
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs",
-    "docs:check:ascii": "node scripts/check-ascii.mjs docs/*.md docs/**/*.md",
-    "docs:check:mermaid": "node scripts/check-mermaid.mjs docs/*.md docs/**/*.md",
-    "docs:check": "npm run docs:check:ascii && npm run docs:check:mermaid && npm run docs:build"
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview .",
+    "check:ascii": "node scripts/check-ascii.mjs *.md architecture/*.md concepts/*.md",
+    "check:mermaid": "node scripts/check-mermaid.mjs *.md architecture/*.md concepts/*.md",
+    "check": "npm run check:ascii && npm run check:mermaid && npm run build"
   },
   "devDependencies": {
     "markdown-it-mathjax3": "^4.3.2",
