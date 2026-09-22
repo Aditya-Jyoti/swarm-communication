@@ -1570,3 +1570,24 @@ sleep: { ms: Number(text) }   // 0..10000, checked before sending
 ```
 
 - A count, as before.
+
+## 2026-09-22 -- Repo layout: one folder per project
+
+Each top-level folder now owns its own tooling:
+
+| Folder | Holds |
+|---|---|
+| `backend/` | Go module, Dockerfile |
+| `frontend/` | Dashboard, nginx config, Dockerfile |
+| `docs/` | VitePress site, its `package.json`, and the doc checks in `docs/scripts/` |
+| `blender/` | Scene generator, add-on, robot model |
+| `scripts/` | Whole-stack tests: `e2e.sh`, `simulate.py` |
+| `.claude/` | `CLAUDE.md` and the agent definitions |
+
+The root keeps only what spans projects: `docker-compose.yml`, `.env.example`, `README.md`.
+
+Docs commands now run inside `docs/`:
+
+```bash
+cd docs && npm ci && npm run check   # ASCII, Mermaid, build
+```
