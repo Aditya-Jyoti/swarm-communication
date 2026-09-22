@@ -913,7 +913,7 @@ func TestPeerReconnectAtOldIncarnationHealsByRefutation(t *testing.T) {
 	}
 }
 
-// HIGH-2, the STATE.md interleaving at node level: node-b's refutation ("alive
+// HIGH-2, the review interleaving at node level: node-b's refutation ("alive
 // at 7") is queued behind the PeerDown that reports its death. Whichever order
 // the loop takes them in, node-b ends dead -- before the fix, death-first
 // recorded "dead at 6" and the refutation resurrected it.

@@ -207,7 +207,7 @@ func TestSetStateSuspectKeepsIncarnation(t *testing.T) {
 	}
 }
 
-// The STATE.md interleaving at table level: B refuted a rumour with "alive at 7",
+// The review interleaving at table level: B refuted a rumour with "alive at 7",
 // then died; the death is recorded first, the queued refutation arrives second.
 func TestRefutationAtOldIncarnationLosesToDeath(t *testing.T) {
 	tbl := NewTable()
