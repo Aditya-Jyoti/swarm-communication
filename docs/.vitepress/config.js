@@ -126,7 +126,7 @@ export default withMermaid(defineConfig({
     }
   },
 
-  // LaTeX: $inline$ and $$block$$, per CLAUDE.md 4.3.
+  // LaTeX: $inline$ and $$block$$, per .claude/CLAUDE.md 4.3.
   // VitePress's built-in `math` switch drives markdown-it-mathjax3 (still a devDependency)
   // AND registers the <mjx-*> tags as Vue custom elements. Calling md.use(mathjax3) by
   // hand skips the latter, so Vue treats <mjx-container> as an unresolved component and
@@ -135,7 +135,7 @@ export default withMermaid(defineConfig({
     math: true
   },
 
-  // Mermaid replaces ASCII art entirely, per CLAUDE.md 4.2.
+  // Mermaid replaces ASCII art entirely, per .claude/CLAUDE.md 4.2.
   mermaid: {
     theme: 'base',
     securityLevel: 'strict'
