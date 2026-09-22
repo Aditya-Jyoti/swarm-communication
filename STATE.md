@@ -12,13 +12,13 @@ and runs work in parallel worktree agents.
 ## Latest feature: Blender scene tooling (WORKLOG 9)
 
 - `blender/make_swarm_scene.py` turns `GET /api/state` into one self-describing
-  `swarm-scene/1` JSON document: drones in both unit systems, clusters, links with measured
+  `swarm-scene/1` JSON document: nodes in both unit systems, clusters, links with measured
   RTT and predicted one-way delay, per-link traffic, a legend and a `write_back` section.
   `--scale`, `--frames`/`--interval` (timeline), `--out`.
-- `blender/swarm-scene.json` is a committed example from a live 6-drone swarm.
+- `blender/swarm-scene.json` is a committed example from a live 6-node swarm.
 - `blender/swarm_blender.py` is a Blender 4.x add-on and a headless CLI: a pure core with no
   `bpy` plus a thin `bpy` layer, live sync by polling `/api/state`, push-back with
-  `POST /api/sim`, and CHAOS kill of the selected drone.
+  `POST /api/sim`, and CHAOS kill of the selected node.
 - Editing works both ways through `/api/sim`. Positions in swarm units are the truth; metres
   are a rendering. Sync updates objects (matched by the `swarm_id` custom property) rather
   than rebuilding, so selection, parenting and extra materials survive.
@@ -27,18 +27,18 @@ and runs work in parallel worktree agents.
 - The dashboard's Advanced panel shows the two commands. Reference: `blender/README.md` and
   `docs/architecture/blender-scene.md` (parallel docs branch).
 
-## Previous feature: drone simulation (WORKLOG 8)
+## Previous feature: latency simulation (WORKLOG 8)
 
-- Each node is a drone at a 3D position (`backend/pkg/geo`). The CC owns positions and the
+- Each node sits at a 3D position (`backend/pkg/geo`). The CC owns positions and the
   latency model and pushes them as a versioned `SIM_CONFIG` snapshot.
 - A node delays each PONG by `base + distance * per_unit + jitter`. The existing median-RTT
   election and nearest-leader affinity then follow the geometry. Heartbeats are not delayed.
 - `threshold: 0` and `hysteresis: -1` clear the operator override.
 - Telemetry carries `flows` (frame counts per destination and type). The dashboard animates
   them in a hand-written 3D view with an Advanced panel.
-- Chaos kill exits 0, and nodes use `restart: on-failure`, so killed drones stay down until
+- Chaos kill exits 0, and nodes use `restart: on-failure`, so killed nodes stay down until
   `docker compose up -d`.
-- Contract: `docs/architecture/drone-simulation.md`. Config: `SWARM_SIM_*` (README).
+- Contract: `docs/architecture/latency-simulation.md`. Config: `SWARM_SIM_*` (README).
 
 ## Layout
 
@@ -71,10 +71,10 @@ Run by the lead at `c6252a0` (WORKLOG 8.6), plus the Blender checks at `627ce33`
 |---|---|
 | `cd backend && go test -race -count=1 ./...` | all packages pass |
 | `scripts/e2e.sh` through the frontend port | PASS, including kill-stays-down and sim-change steps |
-| Live geometry check | workers on nearest leader, leaders are the most central drones, about 2 ms RTT per unit |
+| Live geometry check | workers on nearest leader, leaders are the most central nodes, about 2 ms RTT per unit |
 | Frontend | 80 jsdom checks, plus a headless-browser run |
 | `python3 blender/test_swarm_blender.py` | 26 pure-core tests pass |
-| Blender generator against the live swarm | 6 drones, 2 leaders, 15 links; `--frames` records a timeline; a link predicted 151.06 ms one-way and measured 152.0 ms RTT |
+| Blender generator against the live swarm | 6 nodes, 2 leaders, 15 links; `--frames` records a timeline; a link predicted 151.06 ms one-way and measured 152.0 ms RTT |
 | The `bpy` half of `swarm_blender.py` | **NOT VERIFIED.** Blender is not installed here. |
 | `npm run docs:check` (Node 22) | re-run after the parallel docs branch merges |
 
@@ -122,7 +122,7 @@ Run by the lead at `c6252a0` (WORKLOG 8.6), plus the Blender checks at `627ce33`
 
 1. Offer the user frontend auth (nginx basic auth) or a return to `127.0.0.1` while
    `BIND_ADDR=0.0.0.0` is in use. The API token alone does not protect the proxied API.
-2. Merge the parallel docs branch (drone-simulation final, blender-scene, network emulation,
+2. Merge the parallel docs branch (latency-simulation final, blender-scene, network emulation,
    3D projection, hash mixing), then run `npm run docs:check`.
 3. Decide whether to add peer authentication to the node protocol.
 4. The user decides on MEDIUM-1 and on a tombstone TTL that grows with N.
@@ -150,7 +150,7 @@ Run by the lead at `c6252a0` (WORKLOG 8.6), plus the Blender checks at `627ce33`
   reproduce convergence bugs. Only the Docker e2e run catches dialling bugs.
 - `geo.DefaultPosition` is mirrored in the frontend and pinned by a golden test. Change both
   together.
-- Killed drones do not restart. Run `docker compose up -d` before re-running checks by hand.
+- Killed nodes do not restart. Run `docker compose up -d` before re-running checks by hand.
 - A semicolon in a Mermaid label silently cuts off the rest of the label.
 - **Blender is NOT installed on this machine.** Only the pure core of
   `blender/swarm_blender.py` can be tested here (`python3 blender/test_swarm_blender.py`).

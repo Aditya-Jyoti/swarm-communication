@@ -2,7 +2,7 @@
 """Build a swarm-scene file from the Control Center's live state.
 
 The scene file is ONE self-describing JSON document that is enough, on its own,
-to build a Blender project of the swarm: where every drone is, who leads whom,
+to build a Blender project of the swarm: where every node is, who leads whom,
 how far apart they are, how long a message takes to fly between them, and what
 traffic is on each link right now.
 
@@ -26,7 +26,7 @@ the swarm moving, re-electing and re-homing instead of showing one still frame.
 Why a file and not a live socket: Blender's Python runs on its own thread and a
 .blend is a document, not a process. A file (or one HTTP GET of the same JSON)
 is replayable, diffable, and can be committed next to a render. The Blender
-add-on polls the same JSON, so editing a drone in the dashboard moves the drone
+add-on polls the same JSON, so editing a node in the dashboard moves the node
 in Blender within a second.
 """
 
@@ -45,8 +45,8 @@ SCHEMA = "swarm-scene/1"
 
 # Blender is Z-up and metres-based, and the swarm's own coordinates are an
 # abstract 0..100 cube (backend/pkg/geo). One unit becomes METRES_PER_UNIT
-# metres, so the default 100-unit cube is a 2km x 2km x 2km block of airspace:
-# large enough that drones do not intersect at default scale, small enough to
+# metres, so the default 100-unit cube is a 2km x 2km x 2km block of space:
+# large enough that nodes do not intersect at default scale, small enough to
 # stay inside Blender's default clip range.
 METRES_PER_UNIT = 20.0
 
@@ -80,7 +80,7 @@ CLUSTER_COLOURS = [
     [0.30, 0.75, 0.80, 1.0],
 ]
 
-# State colours for the drone body, so a still render shows liveness.
+# State colours for the node body, so a still render shows liveness.
 STATE_COLOURS = {
     "alive": [0.85, 0.87, 0.90, 1.0],
     "suspect": [0.95, 0.75, 0.25, 1.0],
@@ -99,9 +99,9 @@ def fetch(url: str, timeout: float = 5.0) -> dict:
 def to_metres(pos: dict, scale: float) -> list:
     """Swarm units -> Blender metres, Z-up, origin at the cube's floor centre.
 
-    X and Y are centred so the airspace straddles the world origin (nicer for
-    orbiting a camera), while Z is left as an altitude above the ground plane:
-    a drone at z=0 sits on the ground, not below it.
+    X and Y are centred so the space straddles the world origin (nicer for
+    orbiting a camera), while Z is left as a height above the ground plane:
+    a node at z=0 sits on the ground, not below it.
     """
     size = 100.0
     return [
@@ -135,7 +135,7 @@ def predicted_ms(d: float, sim: dict) -> float:
 def safe_name(node_id: str) -> str:
     """A Blender-safe object name. Blender allows most characters but spaces
     and dots make scripting and drivers awkward."""
-    return "Drone_" + "".join(c if (c.isalnum() or c in "-_") else "_" for c in node_id)
+    return "Node_" + "".join(c if (c.isalnum() or c in "-_") else "_" for c in node_id)
 
 
 def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict:
@@ -147,14 +147,14 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
     leaders = sorted(n["id"] for n in nodes if n.get("role") == "leader" and n.get("connected"))
     colour_of_cluster = {lid: CLUSTER_COLOURS[i % len(CLUSTER_COLOURS)] for i, lid in enumerate(leaders)}
 
-    drones = []
+    scene_nodes = []
     for n in sorted(nodes, key=lambda x: x["id"]):
         pos = n.get("pos") or {}
         state_name = n.get("state") or "alive"
         if not n.get("connected") and state_name not in ("killed", "dead"):
             state_name = "disconnected"
         cluster = n.get("leader") or ""
-        drones.append({
+        scene_nodes.append({
             "id": n["id"],
             "object_name": safe_name(n["id"]),
             "role": n.get("role") or "worker",
@@ -164,7 +164,7 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
             "cluster_colour": colour_of_cluster.get(cluster, OTHER_COLOUR),
             "state_colour": STATE_COLOURS.get(state_name, OTHER_COLOUR),
             # Both coordinate systems are kept on purpose: `position_units` is
-            # what you POST back to /api/sim to move the drone, `location_m` is
+            # what you POST back to /api/sim to move the node, `location_m` is
             # what Blender puts in object.location.
             "position_units": {
                 "x": round(float(pos.get("x", 0.0)), 4),
@@ -250,21 +250,21 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
             "what": "One self-describing snapshot of the swarm, enough to build or update a Blender scene.",
             "coordinates": (
                 "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks "
-                "metres, Z up. Every drone therefore carries BOTH: position_units (what you "
+                "metres, Z up. Every node therefore carries BOTH: position_units (what you "
                 "POST to /api/sim to move it) and location_m (what goes in object.location). "
                 "world.metres_per_unit is the only conversion factor; X and Y are centred on "
-                "the origin, Z stays an altitude above the ground plane."
+                "the origin, Z stays a height above the ground plane."
             ),
             "latency": (
-                "The Control Center emulates network latency from distance: a drone delays "
-                "its PONG by base + distance * per_unit + jitter. Election ranks drones by "
-                "their median measured RTT, so central drones become leaders, and every "
+                "The Control Center emulates network latency from distance: a node delays "
+                "its PONG by base + distance * per_unit + jitter. Election ranks nodes by "
+                "their median measured RTT, so central nodes become leaders, and every "
                 "worker joins the leader it measures as closest. links[].rtt_ms is what was "
                 "really measured; links[].predicted_one_way_ms is what the model asks for. "
                 "A measured round trip is about one one-way delay plus real network time."
             ),
             "editing": (
-                "This file is a snapshot, not the source of truth. To MOVE a drone, POST its "
+                "This file is a snapshot, not the source of truth. To MOVE a node, POST its "
                 "position_units to the Control Center (see write_back) and the swarm re-groups "
                 "for real; the next snapshot then shows it. Editing location_m here only moves "
                 "the render."
@@ -280,11 +280,11 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
             "generator": "blender/make_swarm_scene.py",
             "source_url": state.get("_source_url", ""),
             "sim_version": sim.get("version", 0),
-            "node_count": len(drones),
+            "node_count": len(scene_nodes),
             "leader_count": len(leaders),
         },
         "world": {
-            "_doc": "Airspace and unit conversion. size is in swarm units; the cube is size^3.",
+            "_doc": "Space and unit conversion. size is in swarm units; the cube is size^3.",
             "size_units": sim.get("size", 100),
             "metres_per_unit": scale,
             "size_m": round(float(sim.get("size", 100)) * scale, 3),
@@ -307,11 +307,11 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
             {
                 "leader": lid,
                 "colour": colour_of_cluster[lid],
-                "members": sorted(d["id"] for d in drones if d["leader"] == lid and d["id"] != lid),
+                "members": sorted(d["id"] for d in scene_nodes if d["leader"] == lid and d["id"] != lid),
             }
             for lid in leaders
         ],
-        "drones": drones,
+        "nodes": scene_nodes,
         "links": links,
         "messages": messages,
         "tasks": [
@@ -334,27 +334,27 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
         "write_back": {
             "_doc": (
                 "How to push a change back into the running swarm. The Blender add-on uses "
-                "this when you drag a drone and press Push; the dashboard's Advanced panel "
+                "this when you drag a node and press Push; the dashboard's Advanced panel "
                 "sends the same request."
             ),
             "endpoint": "POST {base}/api/sim",
             "content_type": "application/json",
-            "move_example": {"positions": {"<drone id>": {"x": 10.0, "y": 80.0, "z": 35.0}}},
+            "move_example": {"positions": {"<node id>": {"x": 10.0, "y": 80.0, "z": 35.0}}},
             "model_example": {"base_ms": 1, "per_unit_ms": 3.5, "jitter_ms": 0.5},
             "election_example": {"threshold": 0.5, "hysteresis": 0.5},
             "clear_overrides_example": {"threshold": 0, "hysteresis": -1},
-            "kill_example": {"endpoint": "POST {base}/api/chaos", "body": {"node": "<drone id>", "action": "kill"}},
+            "kill_example": {"endpoint": "POST {base}/api/chaos", "body": {"node": "<node id>", "action": "kill"}},
             "notes": [
                 "Positions are in swarm units (0..100), not metres: divide metres by world.metres_per_unit.",
-                "A killed drone stays dead; bring it back with `docker compose up -d`.",
+                "A killed node stays dead; bring it back with `docker compose up -d`.",
             ],
         },
         "blender": {
             "_doc": "Hints for the add-on. Safe to edit: they change the render, not the swarm.",
             "collection": "Swarm",
-            "drone_mesh": "cone",
-            "drone_size_m": 12.0,
-            "label_drones": True,
+            "node_mesh": "cone",
+            "node_size_m": 12.0,
+            "label_nodes": True,
             "draw_links": "cluster",
             "draw_ground_grid": True,
             "animate_messages": True,
@@ -382,12 +382,12 @@ def build_scene(state: dict, scale: float, timeline: list | None = None) -> dict
 
 
 def sample_frame(state: dict, scale: float, t: float, interval: float) -> dict:
-    out = {"t": round(t, 3), "interval_s": interval, "drones": []}
+    out = {"t": round(t, 3), "interval_s": interval, "nodes": []}
     for n in sorted((state.get("nodes") or []), key=lambda x: x.get("id", "")):
         if not n.get("id"):
             continue
         pos = n.get("pos") or {}
-        out["drones"].append({
+        out["nodes"].append({
             "id": n["id"],
             "location_m": to_metres(pos, scale),
             "role": n.get("role") or "worker",
@@ -451,7 +451,7 @@ def main() -> int:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(text)
         print(
-            f"wrote {args.out}: {scene['meta']['node_count']} drones, "
+            f"wrote {args.out}: {scene['meta']['node_count']} nodes, "
             f"{scene['meta']['leader_count']} leaders, {len(scene['links'])} links"
             + (f", {len(timeline)} frames" if timeline else "")
         )

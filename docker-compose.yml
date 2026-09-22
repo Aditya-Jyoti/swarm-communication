@@ -72,10 +72,10 @@ x-node: &node
   networks: [swarmnet]
   read_only: true
   # on-failure, on purpose: a CHAOS "kill" makes the node exit with code 0,
-  # so the killed drone stays dead and the failover stays visible on the
+  # so the killed node stays dead and the failover stays visible on the
   # dashboard (shown as "killed"), while a real crash (non-zero exit) is
   # still restarted. Docker never restarts a container the operator stopped
-  # (`docker stop` / `docker kill`), under any policy. To bring killed drones
+  # (`docker stop` / `docker kill`), under any policy. To bring killed nodes
   # back, run `docker compose up -d` again.
   restart: on-failure
   # SIGTERM triggers a graceful LEAVE; 3s is plenty and keeps `down` fast.
@@ -98,8 +98,8 @@ services:
       SWARM_LOG_LEVEL: "${SWARM_LOG_LEVEL:-info}"
       # Empty = no auth. See the Security note at the top of this file.
       SWARM_CC_API_TOKEN: "${SWARM_CC_API_TOKEN:-}"
-      # Drone simulation: emulated latency from 3D distance
-      # (docs/architecture/drone-simulation.md). Start-up values only; the
+      # Latency simulation: emulated latency from 3D distance
+      # (docs/architecture/latency-simulation.md). Start-up values only; the
       # dashboard's advanced panel changes them at run time.
       #   delay = base + distance * per_unit + jitter * U[0,1)
       SWARM_SIM_ENABLED: "${SWARM_SIM_ENABLED:-true}"

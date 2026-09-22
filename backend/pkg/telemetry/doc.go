@@ -9,7 +9,7 @@
 //     and TASK_RESULT on demand, and hands inbound TASK and CHAOS frames to
 //     callbacks. The contract is docs/architecture/control-plane.md.
 //
-// Two helpers serve the drone simulation (docs/architecture/drone-simulation.md):
+// Two helpers serve the latency simulation (docs/architecture/latency-simulation.md):
 // Emulation holds the last SIM_CONFIG and turns it into a per-peer PONG delay,
 // and FlowRecorder wraps the mesh transport to count the frames the dashboard
 // animates.

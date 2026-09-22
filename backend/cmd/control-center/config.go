@@ -37,7 +37,7 @@ type Config struct {
 	// APIToken, if set, is required on mutating API calls.
 	// SWARM_CC_API_TOKEN, environment only: a flag would expose it in `ps`.
 	APIToken string
-	// SimEnabled starts the drone simulation's emulated latency switched on.
+	// SimEnabled starts the latency simulation switched on.
 	// SWARM_SIM_ENABLED, default true.
 	SimEnabled bool
 	// SimParams is the starting latency model. SWARM_SIM_BASE_MS,
@@ -57,7 +57,7 @@ var settings = []setting{
 	{"listen", "CC_LISTEN", defaultNodeListen, "TCP bind address for node connections"},
 	{"http", "CC_HTTP", defaultHTTPListen, "HTTP bind address for the API and WebSocket"},
 	{"log-level", "LOG_LEVEL", defaultLogLevel, "debug|info|warn|error"},
-	{"sim-enabled", "SIM_ENABLED", "true", "start with emulated drone latency on"},
+	{"sim-enabled", "SIM_ENABLED", "true", "start with emulated latency on"},
 	{"sim-base-ms", "SIM_BASE_MS", fmtFloat(geo.DefaultBaseMS), "emulated latency: fixed part, ms"},
 	{"sim-per-unit-ms", "SIM_PER_UNIT_MS", fmtFloat(geo.DefaultPerUnitMS), "emulated latency: ms per unit of distance"},
 	{"sim-jitter-ms", "SIM_JITTER_MS", fmtFloat(geo.DefaultJitterMS), "emulated latency: maximum random extra, ms"},

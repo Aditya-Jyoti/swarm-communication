@@ -28,7 +28,7 @@
 #      (restart: on-failure), is shown as "killed", and that the swarm is
 #      healthy again with the right leader count
 #   9. POST /api/sim with a new per_unit_ms and check that GET /api/sim
-#      reflects it with a newer version, that the connected drones apply it
+#      reflects it with a newer version, that the connected nodes apply it
 #      (sim_version), and that the swarm is still healthy afterwards
 #
 # Exits non-zero with a FAIL line (plus recent logs) on the first failed step.
@@ -162,7 +162,7 @@ q() {
 			;;
 		# One field of a sim object (GET /api/sim or a POST /api/sim reply).
 		sim_field) jq -r --arg f "$arg" '.[$f] // "missing" | tostring' ;;
-		# "<applied> <live>": connected, non-killed drones whose sim_version is
+		# "<applied> <live>": connected, non-killed nodes whose sim_version is
 		# at least ARG, out of all of them.
 		sim_applied)
 			jq -r --argjson v "$arg" '
@@ -362,7 +362,7 @@ container_state() {
 # chaos_kill_worker SKIP_IDS -> sets KILLED_WORKER
 #
 # A CHAOS kill must look like a clean exit: code 0, which restart: on-failure
-# leaves alone, so the drone stays dead and the failover stays visible. A
+# leaves alone, so the node stays dead and the failover stays visible. A
 # non-zero exit would be restarted (status "restarting", or a higher
 # RestartCount), and this step fails.
 KILLED_WORKER=""
@@ -407,7 +407,7 @@ chaos_kill_worker() {
 # sim_update SKIP_IDS
 #
 # POST /api/sim changes per_unit_ms; GET /api/sim must then show it with a
-# newer version, and every connected drone must report that version.
+# newer version, and every connected node must report that version.
 sim_update() {
 	local skip="$1" before resp v ver got gotver deadline applied live last=""
 	before="$(curl -fsS --max-time 3 "$BASE/api/sim")" || fail "sim: GET /api/sim failed"
@@ -432,13 +432,13 @@ sim_update() {
 		if read -r applied live < <(state | q sim_applied "$gotver"); then
 			last="$applied/$live"
 			if [ "$live" -gt 0 ] && [ "$applied" -eq "$live" ]; then
-				log "sim: every connected drone reports sim_version >= $gotver ($last)"
+				log "sim: every connected node reports sim_version >= $gotver ($last)"
 				return 0
 			fi
 		fi
 		sleep 1
 	done
-	fail "sim: drones did not apply version $gotver within 15s (applied: $last)"
+	fail "sim: nodes did not apply version $gotver within 15s (applied: $last)"
 }
 
 # ------------------------------------------------------------------ main

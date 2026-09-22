@@ -12,9 +12,9 @@ import (
 	"swarm-net/pkg/protocol"
 )
 
-// The drone simulation, CC side (docs/architecture/drone-simulation.md).
+// The latency simulation, CC side (docs/architecture/latency-simulation.md).
 //
-// The CC is the single source of truth for the emulated airspace: every
+// The CC is the single source of truth for the emulated space: every
 // node's position, the latency model and the election overrides. It pushes
 // all of it to every node as one SIM_CONFIG snapshot. A snapshot rather than
 // deltas because the CC->node sends are asynchronous (sendAsync, one
@@ -198,7 +198,7 @@ func (h *hub) updateSim(m ClientMessage) (SimView, error) {
 		case id == "":
 			return SimView{}, fmt.Errorf("%w: position for an empty node id", ErrBadRequest)
 		case id == NodeID:
-			return SimView{}, fmt.Errorf("%w: %q is not a drone", ErrBadRequest, NodeID)
+			return SimView{}, fmt.Errorf("%w: %q is not a node", ErrBadRequest, NodeID)
 		case len(id) > maxSimNodeIDLen:
 			return SimView{}, fmt.Errorf("%w: node id longer than %d bytes", ErrBadRequest, maxSimNodeIDLen)
 		}
@@ -290,7 +290,7 @@ func (h *hub) updateSim(m ClientMessage) (SimView, error) {
 		subject = moved[0]
 		changes = append(changes, "moved "+string(moved[0]))
 	default:
-		changes = append(changes, "moved "+plural(len(moved), "drone"))
+		changes = append(changes, "moved "+plural(len(moved), "node"))
 	}
 
 	if len(changes) == 0 {

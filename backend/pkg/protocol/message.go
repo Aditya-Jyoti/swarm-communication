@@ -643,8 +643,8 @@ type ChaosPayload struct {
 	DelayMS int    `json:"delay_ms,omitempty"`
 }
 
-// Position is a node's location in the emulated 3D airspace: X and Y on the
-// ground plane, Z the altitude. Units are abstract; the latency model turns
+// Position is a node's location in the emulated 3D space: X and Y on the
+// ground plane, Z the height. Units are abstract; the latency model turns
 // distance into milliseconds.
 type Position struct {
 	X float64 `json:"x"`

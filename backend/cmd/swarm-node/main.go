@@ -38,7 +38,7 @@ const (
 	exitConfig  = 2
 	// exitKilled is the status for CHAOS kill. It is 0 on purpose: node
 	// containers run with `restart: on-failure`, which restarts a real crash
-	// (non-zero) but leaves a success alone, so a drone the operator killed
+	// (non-zero) but leaves a success alone, so a node the operator killed
 	// stays dead instead of coming straight back as a new incarnation.
 	exitKilled = 0
 )

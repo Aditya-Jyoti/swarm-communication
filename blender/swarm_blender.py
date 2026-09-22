@@ -19,11 +19,11 @@ What it does:
     apply_plan()                 the only part that touches bpy
         |
         v
-    Collection "Swarm": one cone per drone, a link curve per cluster link,
+    Collection "Swarm": one cone per node, a link curve per cluster link,
     a ground grid, an emissive dot per animated message.
 
 Live sync: a timer re-fetches the same URL the dashboard uses, so moving a
-drone with the dashboard's Advanced sliders moves the cone in Blender within a
+node with the dashboard's Advanced sliders moves the cone in Blender within a
 second. Push works the other way too: move a cone in Blender, press "Push
 positions", and the add-on POSTs to /api/sim, the swarm re-measures its
 latencies and re-groups for real.
@@ -48,7 +48,7 @@ bl_info = {
     "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar (N) > Swarm",
-    "description": "Build and live-sync a swarm-net drone scene from a scene file or a running Control Center.",
+    "description": "Build and live-sync a swarm-net node scene from a scene file or a running Control Center.",
     "category": "Import-Export",
 }
 
@@ -56,10 +56,10 @@ SCHEMA_PREFIX = "swarm-scene/"
 DEFAULT_SCENE = "blender/swarm-scene.json"
 DEFAULT_URL = "http://127.0.0.1:8080"
 
-# Custom properties written onto each object, so a re-sync can find the drone
+# Custom properties written onto each object, so a re-sync can find the node
 # an object belongs to without relying on the name (the user may rename it).
 PROP_ID = "swarm_id"
-PROP_KIND = "swarm_kind"  # "drone" | "link" | "ground" | "message"
+PROP_KIND = "swarm_kind"  # "node" | "link" | "ground" | "message"
 
 
 # --------------------------------------------------------------------------
@@ -115,14 +115,14 @@ def _minimal_scene(state: dict, source_url: str) -> dict:
     sim = state.get("sim") or {}
     scale = 20.0
     size = float(sim.get("size", 100) or 100)
-    drones = []
+    scene_nodes = []
     for n in state.get("nodes") or []:
         if not n.get("id"):
             continue
         p = n.get("pos") or {}
-        drones.append({
+        scene_nodes.append({
             "id": n["id"],
-            "object_name": "Drone_" + str(n["id"]).replace(".", "_"),
+            "object_name": "Node_" + str(n["id"]).replace(".", "_"),
             "role": n.get("role", "worker"),
             "state": n.get("state", "alive"),
             "connected": bool(n.get("connected")),
@@ -139,14 +139,14 @@ def _minimal_scene(state: dict, source_url: str) -> dict:
         })
     return {
         "schema": SCHEMA_PREFIX + "1",
-        "meta": {"source_url": source_url, "node_count": len(drones)},
+        "meta": {"source_url": source_url, "node_count": len(scene_nodes)},
         "world": {"size_units": size, "metres_per_unit": scale, "size_m": size * scale, "fps": 24},
         "sim": sim,
         "clusters": [],
-        "drones": drones,
+        "nodes": scene_nodes,
         "links": [],
         "messages": [],
-        "blender": {"collection": "Swarm", "drone_size_m": 12.0, "draw_links": "cluster", "sync": {"url": source_url, "interval_s": 1.0}},
+        "blender": {"collection": "Swarm", "node_size_m": 12.0, "draw_links": "cluster", "sync": {"url": source_url, "interval_s": 1.0}},
     }
 
 
@@ -160,34 +160,34 @@ def build_plan(scene: dict) -> dict:
     hints = scene.get("blender") or {}
     world = scene.get("world") or {}
     size_m = float(world.get("size_m") or 2000.0)
-    drone_size = float(hints.get("drone_size_m") or 12.0)
+    node_size = float(hints.get("node_size_m") or 12.0)
     draw_links = hints.get("draw_links", "cluster")
 
-    drones = []
+    scene_nodes = []
     by_id = {}
-    for d in scene.get("drones") or []:
+    for d in scene.get("nodes") or []:
         if not d.get("id"):
             continue
         loc = d.get("location_m") or [0.0, 0.0, 0.0]
         is_leader = d.get("role") == "leader"
         item = {
             "id": d["id"],
-            "name": d.get("object_name") or ("Drone_" + str(d["id"])),
+            "name": d.get("object_name") or ("Node_" + str(d["id"])),
             "location": [float(v) for v in loc[:3]],
             # A leader is drawn larger: size is a signal, not only colour, which
             # keeps a greyscale render readable.
-            "scale": drone_size * (1.6 if is_leader else 1.0),
+            "scale": node_size * (1.6 if is_leader else 1.0),
             "role": d.get("role", "worker"),
             "state": d.get("state", "alive"),
             "leader": d.get("leader", ""),
             "material": material_name(d),
-            "colour": drone_colour(d),
+            "colour": node_colour(d),
             "label": "{} ({})".format(d["id"], d.get("role", "worker")),
-            # A dead or killed drone falls to the ground and lies flat: the
+            # A dead or killed node falls to the ground and lies flat: the
             # render should show a crash, not a hovering corpse.
             "grounded": d.get("state") in ("dead", "killed"),
         }
-        drones.append(item)
+        scene_nodes.append(item)
         by_id[d["id"]] = item
 
     links = []
@@ -237,8 +237,8 @@ def build_plan(scene: dict) -> dict:
             "fps": int(world.get("fps") or 24),
             "metres_per_unit": float(world.get("metres_per_unit") or 20.0),
         },
-        "labels": bool(hints.get("label_drones", True)),
-        "drones": drones,
+        "labels": bool(hints.get("label_nodes", True)),
+        "nodes": scene_nodes,
         "links": links,
         "messages": messages,
         "sync": (hints.get("sync") or {}),
@@ -246,10 +246,10 @@ def build_plan(scene: dict) -> dict:
     }
 
 
-def drone_colour(d: dict) -> list:
+def node_colour(d: dict) -> list:
     """Cluster colour when alive, state colour otherwise.
 
-    A live drone should read as "whose cluster am I in", and a sick one as
+    A live node should read as "whose cluster am I in", and a sick one as
     "what is wrong with me": the second question wins when both apply.
     """
     if d.get("state") in ("alive",) and d.get("connected", True):
@@ -261,7 +261,7 @@ def drone_colour(d: dict) -> list:
 
 def material_name(d: dict) -> str:
     """One material per (state, cluster) pair, so Blender reuses materials
-    instead of creating one per drone per sync."""
+    instead of creating one per node per sync."""
     if d.get("state") == "alive" and d.get("connected", True):
         return "Swarm_Cluster_" + (d.get("leader") or "none")
     return "Swarm_State_" + str(d.get("state", "alive"))
@@ -288,7 +288,7 @@ def positions_payload(moved: dict, metres_per_unit: float, size_units: float = 1
     """Blender metres -> the body for POST /api/sim.
 
     The inverse of the generator's to_metres: X and Y are centred on the origin,
-    Z is an altitude. Values are clamped to the cube, because the backend clamps
+    Z is a height. Values are clamped to the cube, because the backend clamps
     anyway and a clamped value here keeps the viewport honest.
     """
     out = {}
@@ -376,21 +376,21 @@ def find_object(col, node_id: str, kind: str):
     return None
 
 
-def ensure_drone(col, item: dict):
-    """Create or update one drone object. A cone points along +Z, which reads
+def ensure_node(col, item: dict):
+    """Create or update one node object. A cone points along +Z, which reads
     as a nose-up quadcopter without importing a mesh."""
     bpy = _bpy()
-    ob = find_object(col, item["id"], "drone")
+    ob = find_object(col, item["id"], "node")
     if ob is None:
         mesh = bpy.data.meshes.new(item["name"] + "_mesh")
         ob = bpy.data.objects.new(item["name"], mesh)
         col.objects.link(ob)
         ob[PROP_ID] = item["id"]
-        ob[PROP_KIND] = "drone"
+        ob[PROP_KIND] = "node"
         _cone_mesh(mesh)
     ob.location = item["location"]
     ob.scale = (item["scale"], item["scale"], item["scale"])
-    # A crashed drone lies on its side on the ground.
+    # A crashed node lies on its side on the ground.
     ob.rotation_euler = (math.radians(90) if item["grounded"] else 0.0, 0.0, 0.0)
     mat = get_material(item["material"], item["colour"])
     if ob.data.materials:
@@ -479,8 +479,8 @@ def apply_plan(plan: dict, rebuild: bool = False) -> dict:
         ensure_ground(col, plan)
 
     seen = set()
-    for item in plan["drones"]:
-        ob = ensure_drone(col, item)
+    for item in plan["nodes"]:
+        ob = ensure_node(col, item)
         seen.add(ob.name)
     live_links = set()
     for item in plan["links"]:
@@ -493,19 +493,19 @@ def apply_plan(plan: dict, rebuild: bool = False) -> dict:
             bpy.data.objects.remove(ob, do_unlink=True)
 
     bpy.context.scene.render.fps = plan["world"]["fps"]
-    return {"drones": len(plan["drones"]), "links": len(plan["links"])}
+    return {"nodes": len(plan["nodes"]), "links": len(plan["links"])}
 
 
 def collect_moved(plan: dict) -> dict:
-    """Drones whose Blender object has been moved away from the scene file.
+    """Nodes whose Blender object has been moved away from the scene file.
 
     The tolerance is one centimetre: floating point round trips through the
     file must not look like an edit.
     """
     col = get_collection(plan["collection"])
     moved = {}
-    for item in plan["drones"]:
-        ob = find_object(col, item["id"], "drone")
+    for item in plan["nodes"]:
+        ob = find_object(col, item["id"], "node")
         if ob is None:
             continue
         want = item["location"]
@@ -527,7 +527,7 @@ def _load_and_apply(source: str, rebuild: bool = False) -> str:
     plan = build_plan(scene)
     summary = apply_plan(plan, rebuild=rebuild)
     _STATE["plan"] = plan
-    return "{} drones, {} links from {}".format(summary["drones"], summary["links"], source)
+    return "{} nodes, {} links from {}".format(summary["nodes"], summary["links"], source)
 
 
 def _sync_tick():
@@ -590,7 +590,7 @@ def register():  # noqa: C901 - Blender registration is inherently flat
     class SWARM_OT_push(bpy.types.Operator):
         bl_idname = "swarm.push"
         bl_label = "Push positions"
-        bl_description = "Send drones you moved in Blender to the running swarm"
+        bl_description = "Send nodes you moved in Blender to the running swarm"
 
         def execute(self, context):
             plan = _STATE["plan"]
@@ -607,19 +607,19 @@ def register():  # noqa: C901 - Blender registration is inherently flat
             except Exception as e:  # noqa: BLE001
                 self.report({"ERROR"}, str(e))
                 return {"CANCELLED"}
-            self.report({"INFO"}, "moved {} drone(s) in the swarm".format(len(moved)))
+            self.report({"INFO"}, "moved {} node(s) in the swarm".format(len(moved)))
             return {"FINISHED"}
 
     class SWARM_OT_kill(bpy.types.Operator):
         bl_idname = "swarm.kill"
-        bl_label = "Kill selected drone"
-        bl_description = "CHAOS kill the selected drone. It stays dead"
+        bl_label = "Kill selected node"
+        bl_description = "CHAOS kill the selected node. It stays dead"
 
         def execute(self, context):
             ob = context.active_object
             node_id = ob.get(PROP_ID) if ob else None
-            if not node_id or ob.get(PROP_KIND) != "drone":
-                self.report({"ERROR"}, "select a drone")
+            if not node_id or ob.get(PROP_KIND) != "node":
+                self.report({"ERROR"}, "select a node")
                 return {"CANCELLED"}
             plan = _STATE["plan"] or {}
             try:

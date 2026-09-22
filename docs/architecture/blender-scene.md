@@ -14,7 +14,7 @@ Two files do the work:
 |---|---|
 | `blender/make_swarm_scene.py` | Generator. `GET /api/state` -> `swarm-scene.json`. Plain Python 3, no dependencies. |
 | `blender/swarm_blender.py` | Blender 4.x add-on plus a headless CLI. Builds the scene, polls for changes, pushes edits back. |
-| `blender/swarm-scene.json` | A committed example, generated from a real 6-drone swarm. |
+| `blender/swarm-scene.json` | A committed example, generated from a real 6-node swarm. |
 | `blender/test_swarm_blender.py` | 26 tests of the half that does not need Blender. |
 
 ## 1. The pipeline
@@ -50,7 +50,7 @@ links, no clusters -- so a degraded scene is obvious rather than subtly wrong.
 ## 2. Coordinates: units are the truth, metres are a rendering
 
 The swarm speaks an abstract cube, `0..100` on each axis (`backend/pkg/geo/geo.go`).
-Blender speaks metres, Z up. Every drone carries both.
+Blender speaks metres, Z up. Every node carries both.
 
 ```json
 "position_units": { "x": 21.8508, "y": 81.1883, "z": 38.9394 },
@@ -61,8 +61,8 @@ With $S = 100$ units per side and $k =$ `world.metres_per_unit`:
 
 $$x_m = (x_u - S/2) \times k, \quad y_m = (y_u - S/2) \times k, \quad z_m = z_u \times k$$
 
-X and Y are centred, so the airspace straddles the world origin and a camera orbits it
-naturally. Z is **not** centred: it stays an altitude, so a drone at `z = 0` sits on the
+X and Y are centred, so the space straddles the world origin and a camera orbits it
+naturally. Z is **not** centred: it stays a height, so a node at `z = 0` sits on the
 ground plane instead of half a kilometre under it.
 
 The inverse, used when you push an edit back:
@@ -74,7 +74,7 @@ z_u = \mathrm{clamp}\!\left(\frac{z_m}{k},\ 0,\ S\right)$$
 `positions_payload` in `blender/swarm_blender.py` is the exact inverse, and
 `test_metres_convert_back_to_the_units_they_came_from` pins the round trip. The clamp is
 there because the backend clamps anyway (`geo.Params.Clamp`); clamping in the add-on keeps
-the viewport honest about where the drone actually went.
+the viewport honest about where the node actually went.
 
 Check the example above: $(-562.9848 / 20) + 50 = 21.8508$.
 
@@ -82,9 +82,9 @@ Check the example above: $(-562.9848 / 20) + 50 = 21.8508$.
 
 | You do this | What happens |
 |---|---|
-| Move a dashboard slider | The swarm moves the drone, re-measures latency, re-groups. Blender follows on the next poll. |
+| Move a dashboard slider | The swarm moves the node, re-measures latency, re-groups. Blender follows on the next poll. |
 | Move a cone and press **Push positions** | `POST /api/sim`. Same effect -- the swarm re-groups for real. |
-| Press **Kill selected drone** | `POST /api/chaos`. The drone stays dead; `docker compose up -d` brings it back. |
+| Press **Kill selected node** | `POST /api/chaos`. The node stays dead; `docker compose up -d` brings it back. |
 | Edit `location_m` in the JSON by hand | Only the render moves. The swarm never sees it. |
 
 Editing is bidirectional, but there is one source of truth: `position_units`. `location_m`
@@ -102,7 +102,7 @@ without this page.
 | `world` | `size_units`, `metres_per_unit`, `size_m`, `up_axis`, `fps`. |
 | `sim` | The live latency model: `base_ms`, `per_unit_ms`, `jitter_ms`, `max_delay_ms`, overrides. |
 | `clusters` | One entry per leader: its members and the colour they share. |
-| `drones` | Both coordinate systems, role, state, colours, telemetry. |
+| `nodes` | Both coordinate systems, role, state, colours, telemetry. |
 | `links` | Distance in units and metres, measured RTT, predicted one-way delay, `kind`. |
 | `messages` | Per-link traffic by type, with a colour and a flight time. |
 | `tasks` | The last 25 tasks. |
@@ -111,12 +111,12 @@ without this page.
 | `blender` | Render hints: mesh, sizes, what to draw, the sync URL. Safe to edit. |
 | `timeline` | Only with `--frames`. One stripped snapshot per sample. |
 
-### drones
+### nodes
 
 ```json
 {
   "id": "seed",
-  "object_name": "Drone_seed",
+  "object_name": "Node_seed",
   "role": "worker",
   "state": "alive",
   "connected": true,
@@ -132,10 +132,10 @@ without this page.
 
 - A node that is `alive` but not `connected` to the Control Center is rewritten to
   `disconnected`, so "I cannot see it" and "it is fine" never look the same.
-- `drone_colour` (pure core) picks the **cluster** colour for a healthy drone and the
+- `node_colour` (pure core) picks the **cluster** colour for a healthy node and the
   **state** colour otherwise: "what is wrong with me" beats "whose cluster am I in".
 - Leaders are drawn 1.6x larger. Size, not only colour, so a greyscale render still reads.
-- A `dead` or `killed` drone is marked `grounded` and is rotated 90 degrees: a crash, not a
+- A `dead` or `killed` node is marked `grounded` and is rotated 90 degrees: a crash, not a
   hovering corpse.
 
 ### links: measured versus predicted
@@ -172,8 +172,8 @@ mesh of $N(N-1)/2$ tubes hides the structure it is meant to show.
 ### blender hints
 
 ```json
-"blender": { "collection": "Swarm", "drone_mesh": "cone", "drone_size_m": 12.0,
-             "label_drones": true, "draw_links": "cluster", "draw_ground_grid": true,
+"blender": { "collection": "Swarm", "node_mesh": "cone", "node_size_m": 12.0,
+             "label_nodes": true, "draw_links": "cluster", "draw_ground_grid": true,
              "animate_messages": true,
              "sync": { "mode": "poll", "url": "http://127.0.0.1:8080/api/state",
                        "interval_s": 1.0 } }
@@ -191,7 +191,7 @@ python3 blender/make_swarm_scene.py           # -> blender/swarm-scene.json
 ```
 
 ```
-wrote blender/swarm-scene.json: 6 drones, 2 leaders, 15 links
+wrote blender/swarm-scene.json: 6 nodes, 2 leaders, 15 links
 ```
 
 Options:
@@ -227,7 +227,7 @@ viewport would flicker.
 
 ```mermaid
 flowchart TD
-    P[plan item for drone X] --> L{"object with swarm_id = X in the Swarm collection?"}
+    P[plan item for node X] --> L{"object with swarm_id = X in the Swarm collection?"}
     L -->|yes| U[move it, rescale it, swap the material]
     L -->|no| C[create a cone, tag swarm_id and swarm_kind]
     U --> K[keep selection, parenting, extra materials]
@@ -237,10 +237,10 @@ flowchart TD
 
 Objects are matched by the custom property `swarm_id`, not by name, so renaming a cone in
 the outliner does not orphan it. `apply_plan` removes link objects that are no longer in
-the plan -- a worker that re-homes must not leave its old tube behind. Drones are never
-auto-removed: a drone that dies is recoloured and grounded instead.
+the plan -- a worker that re-homes must not leave its old tube behind. Nodes are never
+auto-removed: a node that dies is recoloured and grounded instead.
 
-Materials are shared per `(state, cluster)` pair (`material_name`), so a 500-drone swarm
+Materials are shared per `(state, cluster)` pair (`material_name`), so a 500-node swarm
 creates a handful of materials, not 500.
 
 ## 6. Animation
@@ -276,13 +276,13 @@ is a keyframe every 12 frames.
 
 ## 7. Scale
 
-`--scale` sets $k$. The airspace is `world.size_m` = $100k$ across.
+`--scale` sets $k$. The space is `world.size_m` = $100k$ across.
 
-| `--scale` | Airspace | Good for |
+| `--scale` | Space size | Good for |
 |---|---|---|
 | 1 | 100 m | A tabletop swarm, tiny distances |
-| 20 (default) | 2 km | Realistic drone spacing, inside Blender's default 1000 m camera clip when you frame a cluster |
-| 100 | 10 km | Wide-area. Raise the camera's clip end or distant drones disappear. |
+| 20 (default) | 2 km | Realistic node spacing, inside Blender's default 1000 m camera clip when you frame a cluster |
+| 100 | 10 km | Wide-area. Raise the camera's clip end or distant nodes disappear. |
 
 The scale only affects the render. Latency is computed from `distance_units`, which does
 not change.
@@ -291,14 +291,14 @@ not change.
 
 Everything above the `--- Blender layer ---` comment in `blender/swarm_blender.py` is
 plain Python with **no `bpy` import**: `load_scene`, `scene_from_state`, `build_plan`,
-`drone_colour`, `material_name`, `link_label`, `positions_payload`, `base_url_of`. That is
-where every decision is made. Below the line, `apply_plan`, `ensure_drone`, `ensure_link`
+`node_colour`, `material_name`, `link_label`, `positions_payload`, `base_url_of`. That is
+where every decision is made. Below the line, `apply_plan`, `ensure_node`, `ensure_link`
 and `ensure_ground` only translate the plan into `bpy.data` calls.
 
 ```mermaid
 flowchart LR
     J[scene JSON] --> BP[build_plan -- pure]
-    BP --> PL["plan: drones, links, messages, colours, labels"]
+    BP --> PL["plan: nodes, links, messages, colours, labels"]
     PL --> AP[apply_plan -- bpy only]
     PL --> T[test_swarm_blender.py runs here, no Blender needed]
 ```
@@ -321,7 +321,7 @@ the message in the panel's Status line instead.
 
 | Part | Status |
 |---|---|
-| Generator against a live swarm | Verified. `blender/swarm-scene.json` was generated from a running 6-drone stack. |
+| Generator against a live swarm | Verified. `blender/swarm-scene.json` was generated from a running 6-node stack. |
 | Pure core of the add-on | Verified. 26 tests pass under plain Python 3. |
 | The committed scene file parses and plans | Verified (`test_the_committed_scene_file_is_valid`). |
 | Push-back payload shape | Verified against the documented `/api/sim` body, by test. |
@@ -336,17 +336,17 @@ and check it is what you expected before touching Blender.
 | Symptom | Cause |
 |---|---|
 | `could not read .../api/state` | the stack is down. `docker compose up -d`. |
-| Scene has drones but no links or clusters | `_minimal_scene` fallback: `make_swarm_scene.py` is not next to the installed add-on. |
+| Scene has nodes but no links or clusters | `_minimal_scene` fallback: `make_swarm_scene.py` is not next to the installed add-on. |
 | Cones are there, everything is grey | same fallback -- it emits one flat colour. |
-| Every drone sits at the same height | `z` is an altitude, not centred. Positions really are that close. |
+| Every node sits at the same height | `z` is a height, not centred. Positions really are that close. |
 | Push positions says "nothing moved" | the 1 cm tolerance in `collect_moved`. Move a cone further than 0.01 m. |
 | Live sync silently stale | check the panel's Status line. It holds the last error, truncated to 60 characters. |
-| Distant drones vanish in the viewport | camera clip end. Lower `--scale` or raise the clip. |
-| A killed drone never comes back | expected. `docker compose up -d`. |
+| Distant nodes vanish in the viewport | camera clip end. Lower `--scale` or raise the clip. |
+| A killed node never comes back | expected. `docker compose up -d`. |
 
 ## Related
 
-- [Drone Simulation](./drone-simulation) -- the positions and the latency model
+- [Latency Simulation](./latency-simulation) -- the positions and the latency model
 - [One Implementation of a Schema](/concepts/one-implementation-of-a-schema)
 - [Network Emulation](/concepts/network-emulation)
 - [The Control Center](./control-center) -- `/api/state`, `/api/sim`, `/api/chaos`

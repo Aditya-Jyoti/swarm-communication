@@ -1,6 +1,6 @@
 // Package geo is the latency model behind the emulated swarm map.
 //
-// Every node (a drone) has a 3D Position: X and Y on the ground, Z the altitude.
+// Every node has a 3D Position: X and Y on the ground, Z the height.
 // The one-way delay a node adds before answering a
 // peer's PING is
 //
@@ -20,7 +20,7 @@ import (
 	"swarm-net/pkg/protocol"
 )
 
-// Size is the side of the cubic airspace. Every coordinate is clamped to
+// Size is the side of the cubic space. Every coordinate is clamped to
 // [0, Size].
 const Size = 100.0
 
@@ -65,7 +65,7 @@ func (p Params) Clamp() Params {
 	}
 }
 
-// ClampPosition forces pos into the airspace. NaN becomes 0.
+// ClampPosition forces pos into the space. NaN becomes 0.
 func ClampPosition(pos protocol.Position) protocol.Position {
 	return protocol.Position{X: clamp(pos.X, 0, Size), Y: clamp(pos.Y, 0, Size), Z: clamp(pos.Z, 0, Size)}
 }
@@ -96,14 +96,14 @@ func DefaultPosition(id protocol.NodeID) protocol.Position {
 	v := mix64(h.Sum64())
 	const mask = 1<<21 - 1
 	unit := func(shift uint) float64 { return float64((v>>shift)&mask) / mask }
-	// Keep a margin so no drone sits exactly on the edge of the airspace.
+	// Keep a margin so no node sits exactly on the edge of the space.
 	place := func(u float64) float64 { return 5 + u*(Size-10) }
 	return protocol.Position{X: place(unit(0)), Y: place(unit(21)), Z: place(unit(42))}
 }
 
 // mix64 is the splitmix64 finalizer. FNV-1a alone barely spreads names that
 // differ only in their last byte ("node-1" vs "node-5"): the change reaches a
-// few low bits and a band near bit 40, so such drones would share an axis or
+// few low bits and a band near bit 40, so such nodes would share an axis or
 // even a whole position. The finalizer spreads every input bit over all 64.
 func mix64(z uint64) uint64 {
 	z ^= z >> 30

@@ -1,7 +1,7 @@
 # Blender: simulate the swarm in 3D
 
 One JSON document -- `swarm-scene.json` -- describes the whole swarm: where every
-drone is, who leads whom, how far apart they are, what each link costs in
+node is, who leads whom, how far apart they are, what each link costs in
 milliseconds, and what traffic is on it. Blender builds a scene from that file,
 and pushes your edits back into the running swarm.
 
@@ -25,7 +25,7 @@ the add-on imports it. Nothing has to be kept in step by hand.
 | File | What it is |
 |---|---|
 | `make_swarm_scene.py` | Generator: live swarm -> scene file. Plain Python 3, no dependencies. |
-| `swarm-scene.json` | A real scene, generated from a running 6-drone swarm. Self-describing: every section carries a `_doc`. |
+| `swarm-scene.json` | A real scene, generated from a running 6-node swarm. Self-describing: every section carries a `_doc`. |
 | `swarm_blender.py` | The Blender add-on: builds the scene, live-syncs, pushes edits back. |
 | `test_swarm_blender.py` | Tests for everything that does not need Blender (26 of them). |
 
@@ -56,9 +56,9 @@ blender -b --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
 
 | You do this | What happens |
 |---|---|
-| Move a slider in the dashboard's Advanced panel | The swarm really moves the drone, re-measures latency and re-groups. Blender follows on the next sync. |
+| Move a slider in the dashboard's Advanced panel | The swarm really moves the node, re-measures latency and re-groups. Blender follows on the next sync. |
 | Move a cone in Blender, press **Push positions** | The add-on POSTs to `/api/sim`. Same effect: the swarm re-groups for real. |
-| Press **Kill selected drone** | CHAOS kill. It stays dead; `docker compose up -d` brings it back. |
+| Press **Kill selected node** | CHAOS kill. It stays dead; `docker compose up -d` brings it back. |
 | Edit `location_m` in the JSON by hand | Only the render moves. The swarm never sees it. |
 
 The rule: **positions in swarm units are the truth**, metres are a rendering of
@@ -71,7 +71,7 @@ speaks, and `world.metres_per_unit` is the only conversion.
 python3 blender/make_swarm_scene.py --frames 120 --interval 0.5   # 60s of swarm
 ```
 
-This records a `timeline`: one entry per sample, each with every drone's
+This records a `timeline`: one entry per sample, each with every node's
 location, role, state and leader. Kill a leader while it samples and the
 failover is captured in the file.
 
@@ -86,8 +86,8 @@ scene = json.load(open("blender/swarm-scene.json"))
 fps = bpy.context.scene.render.fps
 for i, frame in enumerate(scene["timeline"]["frames"]):
     at = int(i * fps * scene["timeline"]["interval_s"])
-    for d in frame["drones"]:
-        ob = bpy.data.objects.get("Drone_" + d["id"].replace(".", "_"))
+    for d in frame["nodes"]:
+        ob = bpy.data.objects.get("Node_" + d["id"].replace(".", "_"))
         if ob:
             ob.location = d["location_m"]
             ob.keyframe_insert("location", frame=at)
@@ -99,7 +99,7 @@ for i, frame in enumerate(scene["timeline"]["frames"]):
 |---|---|
 | `world` | Cube size and `metres_per_unit`. A 100-unit cube at 20 m/unit is 2 km across. |
 | `sim` | The live latency model: `base + distance * per_unit + jitter`. |
-| `drones` | Position in both unit systems, role, state, cluster colour, and telemetry. |
+| `nodes` | Position in both unit systems, role, state, cluster colour, and telemetry. |
 | `clusters` | Leader plus members, with the colour they share. |
 | `links` | Distance in units and metres, the **measured** RTT, and the model's predicted one-way delay. |
 | `messages` | Per-link traffic by type, with a colour and a flight time. |
@@ -113,13 +113,13 @@ scene, a link with a predicted 151.06 ms one-way delay measured 152.0 ms.
 
 ## Scale
 
-`--scale` sets metres per unit (default 20). The whole airspace is
+`--scale` sets metres per unit (default 20). The whole space is
 `world.size_m` across:
 
-| `--scale` | Airspace | Good for |
+| `--scale` | Space size | Good for |
 |---|---|---|
 | 1 | 100 m | A tabletop-sized swarm |
-| 20 (default) | 2 km | Realistic drone spacing, default Blender clipping |
+| 20 (default) | 2 km | Realistic node spacing, default Blender clipping |
 | 100 | 10 km | Wide-area, needs the camera clip end raised |
 
 ## Tests
@@ -141,5 +141,5 @@ payload. The `bpy` half needs Blender, so it is verified by opening it.
   be read without running anything. Regenerate it whenever you want current data.
 - Live sync updates objects rather than rebuilding them, so your selection,
   parenting and extra materials survive.
-- A drone without a position falls back to a hash of its ID, matching the
+- A node without a position falls back to a hash of its ID, matching the
   backend's placement.

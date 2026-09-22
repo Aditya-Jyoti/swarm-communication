@@ -2,9 +2,9 @@
   "schema": "swarm-scene/1",
   "_doc": {
     "what": "One self-describing snapshot of the swarm, enough to build or update a Blender scene.",
-    "coordinates": "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks metres, Z up. Every drone therefore carries BOTH: position_units (what you POST to /api/sim to move it) and location_m (what goes in object.location). world.metres_per_unit is the only conversion factor; X and Y are centred on the origin, Z stays an altitude above the ground plane.",
-    "latency": "The Control Center emulates network latency from distance: a drone delays its PONG by base + distance * per_unit + jitter. Election ranks drones by their median measured RTT, so central drones become leaders, and every worker joins the leader it measures as closest. links[].rtt_ms is what was really measured; links[].predicted_one_way_ms is what the model asks for. A measured round trip is about one one-way delay plus real network time.",
-    "editing": "This file is a snapshot, not the source of truth. To MOVE a drone, POST its position_units to the Control Center (see write_back) and the swarm re-groups for real; the next snapshot then shows it. Editing location_m here only moves the render.",
+    "coordinates": "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks metres, Z up. Every node therefore carries BOTH: position_units (what you POST to /api/sim to move it) and location_m (what goes in object.location). world.metres_per_unit is the only conversion factor; X and Y are centred on the origin, Z stays a height above the ground plane.",
+    "latency": "The Control Center emulates network latency from distance: a node delays its PONG by base + distance * per_unit + jitter. Election ranks nodes by their median measured RTT, so central nodes become leaders, and every worker joins the leader it measures as closest. links[].rtt_ms is what was really measured; links[].predicted_one_way_ms is what the model asks for. A measured round trip is about one one-way delay plus real network time.",
+    "editing": "This file is a snapshot, not the source of truth. To MOVE a node, POST its position_units to the Control Center (see write_back) and the swarm re-groups for real; the next snapshot then shows it. Editing location_m here only moves the render.",
     "animation": "timeline is optional. With --frames the generator samples repeatedly and records one entry per sample, so the Blender add-on can key positions, roles and cluster colours over time and you can watch a failover as an animation."
   },
   "meta": {
@@ -16,7 +16,7 @@
     "leader_count": 2
   },
   "world": {
-    "_doc": "Airspace and unit conversion. size is in swarm units; the cube is size^3.",
+    "_doc": "Space and unit conversion. size is in swarm units; the cube is size^3.",
     "size_units": 100,
     "metres_per_unit": 20.0,
     "size_m": 2000.0,
@@ -63,10 +63,10 @@
       ]
     }
   ],
-  "drones": [
+  "nodes": [
     {
       "id": "seed",
-      "object_name": "Drone_seed",
+      "object_name": "Node_seed",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -106,7 +106,7 @@
     },
     {
       "id": "swarm-net-node-1",
-      "object_name": "Drone_swarm-net-node-1",
+      "object_name": "Node_swarm-net-node-1",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -146,7 +146,7 @@
     },
     {
       "id": "swarm-net-node-2",
-      "object_name": "Drone_swarm-net-node-2",
+      "object_name": "Node_swarm-net-node-2",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -186,7 +186,7 @@
     },
     {
       "id": "swarm-net-node-3",
-      "object_name": "Drone_swarm-net-node-3",
+      "object_name": "Node_swarm-net-node-3",
       "role": "leader",
       "state": "alive",
       "connected": true,
@@ -226,7 +226,7 @@
     },
     {
       "id": "swarm-net-node-4",
-      "object_name": "Drone_swarm-net-node-4",
+      "object_name": "Node_swarm-net-node-4",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -266,7 +266,7 @@
     },
     {
       "id": "swarm-net-node-5",
-      "object_name": "Drone_swarm-net-node-5",
+      "object_name": "Node_swarm-net-node-5",
       "role": "leader",
       "state": "alive",
       "connected": true,
@@ -1470,12 +1470,12 @@
     ]
   },
   "write_back": {
-    "_doc": "How to push a change back into the running swarm. The Blender add-on uses this when you drag a drone and press Push; the dashboard's Advanced panel sends the same request.",
+    "_doc": "How to push a change back into the running swarm. The Blender add-on uses this when you drag a node and press Push; the dashboard's Advanced panel sends the same request.",
     "endpoint": "POST {base}/api/sim",
     "content_type": "application/json",
     "move_example": {
       "positions": {
-        "<drone id>": {
+        "<node id>": {
           "x": 10.0,
           "y": 80.0,
           "z": 35.0
@@ -1498,21 +1498,21 @@
     "kill_example": {
       "endpoint": "POST {base}/api/chaos",
       "body": {
-        "node": "<drone id>",
+        "node": "<node id>",
         "action": "kill"
       }
     },
     "notes": [
       "Positions are in swarm units (0..100), not metres: divide metres by world.metres_per_unit.",
-      "A killed drone stays dead; bring it back with `docker compose up -d`."
+      "A killed node stays dead; bring it back with `docker compose up -d`."
     ]
   },
   "blender": {
     "_doc": "Hints for the add-on. Safe to edit: they change the render, not the swarm.",
     "collection": "Swarm",
-    "drone_mesh": "cone",
-    "drone_size_m": 12.0,
-    "label_drones": true,
+    "node_mesh": "cone",
+    "node_size_m": 12.0,
+    "label_nodes": true,
     "draw_links": "cluster",
     "draw_ground_grid": true,
     "animate_messages": true,

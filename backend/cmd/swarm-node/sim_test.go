@@ -113,7 +113,7 @@ func TestSimConfigDelaysPongsAndTelemetryCarriesFlows(t *testing.T) {
 		t.Fatal("flow recorder built without a control center")
 	}
 	cc := newCCStub(t)
-	cfg := loopbackConfig("drone", protocol.NodeAddress(peer.ln.Addr().String()))
+	cfg := loopbackConfig("node", protocol.NodeAddress(peer.ln.Addr().String()))
 	cfg.ControlCenter = cc.addr()
 	cfg.TelemetryInterval = 20 * time.Millisecond
 	a, err := newApp(cfg, io.Discard)
@@ -155,16 +155,16 @@ func TestSimConfigDelaysPongsAndTelemetryCarriesFlows(t *testing.T) {
 	})
 
 	const base = 150.0
-	cc.send(protocol.TypeSimConfig, "drone", protocol.SimConfigPayload{
+	cc.send(protocol.TypeSimConfig, "node", protocol.SimConfigPayload{
 		Version: 1, Enabled: true, BaseMS: base,
-		Positions: map[protocol.NodeID]protocol.Position{"drone": {}, "peer": {}},
+		Positions: map[protocol.NodeID]protocol.Position{"node": {}, "peer": {}},
 		Threshold: 0, Hysteresis: -1,
 	})
 
-	// The peer's score for the drone climbs towards the emulated delay, and
-	// the drone's telemetry now also counts the PONGs it sends.
+	// The peer's score for the node climbs towards the emulated delay, and
+	// the node's telemetry now also counts the PONGs it sends.
 	waitFor(t, "peer to measure the emulated delay", func() bool {
-		return peer.node.Status().Scores["drone"] >= base*0.8
+		return peer.node.Status().Scores["node"] >= base*0.8
 	})
 	cc.next(protocol.TypeTelemetry, func(env *protocol.Envelope) bool {
 		tp, err := protocol.PayloadOf[protocol.TelemetryPayload](env)
@@ -180,7 +180,7 @@ func TestSimConfigDelaysPongsAndTelemetryCarriesFlows(t *testing.T) {
 	})
 
 	// Disabling the emulation removes the delay again.
-	cc.send(protocol.TypeSimConfig, "drone", protocol.SimConfigPayload{Version: 2, Threshold: 0, Hysteresis: -1})
+	cc.send(protocol.TypeSimConfig, "node", protocol.SimConfigPayload{Version: 2, Threshold: 0, Hysteresis: -1})
 	waitFor(t, "delay to clear", func() bool {
 		return a.emu.Version() == 2 && a.emu.PeerDelay("peer") == 0
 	})

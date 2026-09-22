@@ -25,7 +25,7 @@ import swarm_blender as sb  # noqa: E402
 
 
 def sample_state():
-    """A two-cluster swarm: one leader with a worker, plus a killed drone."""
+    """A two-cluster swarm: one leader with a worker, plus a killed node."""
     return {
         "sim": {"version": 42, "enabled": True, "base_ms": 1, "per_unit_ms": 2,
                 "jitter_ms": 0.5, "max_delay_ms": 1500, "threshold": 0, "hysteresis": -1, "size": 100},
@@ -54,9 +54,9 @@ class TestGenerator(unittest.TestCase):
         self.scene = gen.build_scene(sample_state(), gen.METRES_PER_UNIT, None)
 
     def test_units_and_metres_are_both_present_and_consistent(self):
-        d = {x["id"]: x for x in self.scene["drones"]}["lead-1"]
+        d = {x["id"]: x for x in self.scene["nodes"]}["lead-1"]
         self.assertEqual(d["position_units"], {"x": 50.0, "y": 50.0, "z": 50.0})
-        # Centre of the cube in X and Y -> origin; Z stays an altitude.
+        # Centre of the cube in X and Y -> origin; Z stays a height.
         self.assertEqual(d["location_m"], [0.0, 0.0, 50.0 * gen.METRES_PER_UNIT])
 
     def test_distance_uses_three_dimensions(self):
@@ -71,8 +71,8 @@ class TestGenerator(unittest.TestCase):
         link = [l for l in self.scene["links"] if {l["from"], l["to"]} == {"lead-1", "work-1"}][0]
         self.assertEqual(link["kind"], "cluster")
 
-    def test_killed_drone_keeps_its_state(self):
-        d = {x["id"]: x for x in self.scene["drones"]}["gone-1"]
+    def test_killed_node_keeps_its_state(self):
+        d = {x["id"]: x for x in self.scene["nodes"]}["gone-1"]
         self.assertEqual(d["state"], "killed")
         self.assertFalse(d["connected"])
 
@@ -80,7 +80,7 @@ class TestGenerator(unittest.TestCase):
         st = sample_state()
         st["nodes"][1]["connected"] = False
         s = gen.build_scene(st, gen.METRES_PER_UNIT, None)
-        self.assertEqual({x["id"]: x for x in s["drones"]}["work-1"]["state"], "disconnected")
+        self.assertEqual({x["id"]: x for x in s["nodes"]}["work-1"]["state"], "disconnected")
 
     def test_messages_carry_a_colour_and_a_flight_time(self):
         m = [x for x in self.scene["messages"] if x["type"] == "HEARTBEAT"][0]
@@ -95,7 +95,7 @@ class TestGenerator(unittest.TestCase):
 
     def test_document_is_self_describing(self):
         self.assertTrue(self.scene["schema"].startswith("swarm-scene/"))
-        for key in ("_doc", "meta", "world", "sim", "drones", "links", "messages", "write_back", "blender", "legend"):
+        for key in ("_doc", "meta", "world", "sim", "nodes", "links", "messages", "write_back", "blender", "legend"):
             self.assertIn(key, self.scene)
         self.assertIn("positions", self.scene["write_back"]["move_example"])
 
@@ -110,16 +110,16 @@ class TestPlan(unittest.TestCase):
         self.plan = sb.build_plan(self.scene)
 
     def test_leader_is_bigger_than_a_worker(self):
-        by = {d["id"]: d for d in self.plan["drones"]}
+        by = {d["id"]: d for d in self.plan["nodes"]}
         self.assertGreater(by["lead-1"]["scale"], by["work-1"]["scale"])
 
-    def test_alive_drone_takes_its_cluster_colour_and_a_sick_one_its_state_colour(self):
-        by = {d["id"]: d for d in self.plan["drones"]}
+    def test_alive_node_takes_its_cluster_colour_and_a_sick_one_its_state_colour(self):
+        by = {d["id"]: d for d in self.plan["nodes"]}
         self.assertEqual(by["work-1"]["colour"], self.scene["clusters"][0]["colour"])
         self.assertEqual(by["gone-1"]["colour"], gen.STATE_COLOURS["killed"])
 
-    def test_killed_drone_is_grounded(self):
-        by = {d["id"]: d for d in self.plan["drones"]}
+    def test_killed_node_is_grounded(self):
+        by = {d["id"]: d for d in self.plan["nodes"]}
         self.assertTrue(by["gone-1"]["grounded"])
         self.assertFalse(by["lead-1"]["grounded"])
 
@@ -138,7 +138,7 @@ class TestPlan(unittest.TestCase):
         self.assertIn("ms", label)
 
     def test_materials_are_shared_per_state_and_cluster(self):
-        names = {d["id"]: d["material"] for d in self.plan["drones"]}
+        names = {d["id"]: d["material"] for d in self.plan["nodes"]}
         self.assertEqual(names["lead-1"], names["work-1"])  # same cluster
         self.assertTrue(names["gone-1"].endswith("killed"))
 
@@ -154,7 +154,7 @@ class TestWriteBack(unittest.TestCase):
     def test_metres_convert_back_to_the_units_they_came_from(self):
         scene = gen.build_scene(sample_state(), gen.METRES_PER_UNIT, None)
         plan = sb.build_plan(scene)
-        by = {d["id"]: d for d in plan["drones"]}
+        by = {d["id"]: d for d in plan["nodes"]}
         body = sb.positions_payload({"lead-1": by["lead-1"]["location"]}, plan["world"]["metres_per_unit"])
         self.assertEqual(body["positions"]["lead-1"], {"x": 50.0, "y": 50.0, "z": 50.0})
 
@@ -186,7 +186,7 @@ class TestLoading(unittest.TestCase):
         try:
             scene = sb.load_scene(path)
             self.assertTrue(scene["schema"].startswith("swarm-scene/"))
-            self.assertEqual(len(scene["drones"]), 3)
+            self.assertEqual(len(scene["nodes"]), 3)
         finally:
             os.unlink(path)
 
@@ -205,7 +205,7 @@ class TestLoading(unittest.TestCase):
         if not os.path.exists(path):
             self.skipTest("no committed scene file")
         plan = sb.build_plan(sb.load_scene(path))
-        self.assertTrue(plan["drones"])
+        self.assertTrue(plan["nodes"])
 
     def test_the_addon_runs_without_blender(self):
         """Running the add-on with plain Python must explain itself, not crash."""

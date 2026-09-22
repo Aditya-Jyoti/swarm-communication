@@ -57,7 +57,7 @@ func TestClampRejectsNaNAndNegatives(t *testing.T) {
 }
 
 // Names that differ only in a trailing digit, as Compose replicas do, must
-// still spread across the airspace on every axis.
+// still spread across the space on every axis.
 func TestDefaultPositionSpreadsSimilarNames(t *testing.T) {
 	var pos []protocol.Position
 	for i := 1; i <= 12; i++ {
@@ -81,7 +81,7 @@ func TestDefaultPositionSpreadsSimilarNames(t *testing.T) {
 			lo, hi = min(lo, get(p)), max(hi, get(p))
 		}
 		if hi-lo < 40 {
-			t.Errorf("axis %d spans only %.1f units across 12 drones", a, hi-lo)
+			t.Errorf("axis %d spans only %.1f units across 12 nodes", a, hi-lo)
 		}
 	}
 }

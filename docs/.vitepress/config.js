@@ -49,7 +49,7 @@ export default withMermaid(defineConfig({
           { text: 'Failure Detection & Failover', link: '/architecture/failure-detection-and-failover' },
           { text: 'Replication & Tasks', link: '/architecture/replication-and-tasks' },
           { text: 'The Control Center', link: '/architecture/control-center' },
-          { text: 'Drone Simulation', link: '/architecture/drone-simulation' },
+          { text: 'Latency Simulation', link: '/architecture/latency-simulation' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' },
           { text: 'Blender Scene Tooling', link: '/architecture/blender-scene' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },

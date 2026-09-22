@@ -113,7 +113,7 @@ func (m *MeshProber) SetDelay(d time.Duration) { m.delay.Store(int64(d)) }
 // safe for concurrent use. A result <= 0 means no delay.
 type PeerDelayFunc func(peer protocol.NodeID) time.Duration
 
-// SetPeerDelay installs the per-peer delay hook used by the drone simulation;
+// SetPeerDelay installs the per-peer delay hook used by the latency simulation;
 // nil removes it. The hook is evaluated once per PONG, at reply time, so a
 // jittered model gets a fresh draw for every answer rather than one value
 // frozen at install time. Its result is added to the SetDelay (CHAOS) delay.

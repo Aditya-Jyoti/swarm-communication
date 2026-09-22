@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive a running swarm through a scripted scenario and report what it did.
 
-    docker compose up -d                 # any N; NODE_REPLICAS=9 gives 10 drones
+    docker compose up -d                 # any N; NODE_REPLICAS=9 gives 10 nodes
     python3 scripts/simulate.py          # against http://127.0.0.1:8080
     python3 scripts/simulate.py --record blender/scenario.json   # also record a Blender timeline
 
@@ -11,10 +11,10 @@ predicts. Nothing here reaches into a container: it only talks HTTP to the
 Control Center, so it tests the system the way an operator drives it.
 
 Phases:
-  1. baseline     leaders are the most central drones; every worker is on its nearest leader
+  1. baseline     leaders are the most central nodes; every worker is on its nearest leader
   2. workload     a batch of tasks completes, spread over the clusters
   3. fly          move a worker next to a different leader; it re-homes there, or is
-                  elected leader itself if that spot made it the most central drone
+                  elected leader itself if that spot made it the most central node
   4. stretch      scale latency per unit x2.5; grouping is proportional, so it holds
   5. kill leader  CHAOS kill a leader; a new one is elected, its workers re-home, it stays down
   6. threshold    raise the leader fraction; more leaders appear
@@ -173,7 +173,7 @@ def run(swarm: Swarm, threshold: float, settle: float):
     a, s = settled(swarm, healthy, settle, "baseline")
     most_central = sorted(a["central"], key=a["central"].get)[: len(a["leaders"])]
     phase("1 baseline",
-          f"{a['alive']} drones, {len(a['leaders'])} leaders (formula wants {want_leaders(a['alive'], threshold)})",
+          f"{a['alive']} nodes, {len(a['leaders'])} leaders (formula wants {want_leaders(a['alive'], threshold)})",
           set(most_central) == set(a["leaders"]) and not a["wrong_home"], s,
           clusters=show_clusters(a),
           leaders_are_most_central=f"{set(most_central) == set(a['leaders'])} "
@@ -210,7 +210,7 @@ def run(swarm: Swarm, threshold: float, settle: float):
     swarm.sim(positions={mover: dest})
     # Two outcomes are both correct, and which one happens depends on the
     # geometry: the mover joins the target's cluster, or -- if parking it there
-    # made it one of the most central drones -- it is elected leader itself.
+    # made it one of the most central nodes -- it is elected leader itself.
     # What the design guarantees is a stable, correct state either way.
     a, s = settled(swarm, healthy, settle, "fly")
     if mover in a["leaders"]:
@@ -239,7 +239,7 @@ def run(swarm: Swarm, threshold: float, settle: float):
     a, s = settled(swarm, lambda a: victim not in a["leaders"] and healthy(a), settle, "kill leader")
     st = {n["id"]: n for n in swarm.state()["nodes"]}.get(victim, {})
     phase("5 kill leader",
-          f"killed {short(victim)} (led {len(orphans)}); {a['alive']} drones left, leaders now "
+          f"killed {short(victim)} (led {len(orphans)}); {a['alive']} nodes left, leaders now "
           f"{', '.join(short(l) for l in a['leaders'])}",
           st.get("state") == "killed" or not st.get("connected"), s,
           clusters=show_clusters(a),
@@ -256,20 +256,20 @@ def run(swarm: Swarm, threshold: float, settle: float):
     swarm.sim(threshold=0, hysteresis=-1, per_unit_ms=2)
     a, s = settled(swarm, healthy, settle, "restore")
     phase("7 restore", f"overrides cleared: {len(a['leaders'])} leaders of {a['alive']} "
-          f"(each drone back on its own threshold {a['threshold']})", True, s,
+          f"(each node back on its own threshold {a['threshold']})", True, s,
           clusters=show_clusters(a))
 
     failed = [n for n, ok in results if not ok]
     print()
     print("RESULT:", "all phases passed" if not failed else f"FAILED: {', '.join(failed)}")
-    print("Killed drones stay down. Bring them back with: docker compose up -d")
+    print("Killed nodes stay down. Bring them back with: docker compose up -d")
     return 0 if not failed else 1
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="http://127.0.0.1:8080")
-    ap.add_argument("--threshold", type=float, default=0.3, help="the drones' configured SWARM_THRESHOLD")
+    ap.add_argument("--threshold", type=float, default=0.3, help="the nodes' configured SWARM_THRESHOLD")
     ap.add_argument("--settle", type=float, default=90, help="seconds to wait for each phase")
     ap.add_argument("--record", default="", help="also record a Blender timeline to this file")
     args = ap.parse_args()

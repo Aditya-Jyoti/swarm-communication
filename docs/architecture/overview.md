@@ -6,8 +6,8 @@ title: System Overview
 
 `swarm-net` is a group of identical Go processes ("nodes") that find each other over TCP, pick
 their own leaders, and repair themselves when a node dies. A small Control Center watches the
-swarm and sends it work. A browser dashboard shows everything live, as drones in a 3D
-airspace.
+swarm and sends it work. A browser dashboard shows everything live, as nodes in a 3D
+space.
 
 The one rule behind the design: **there are no special nodes**. Every node runs the same binary.
 A node becomes a leader because it measured healthy, not because it was configured that way.
@@ -29,7 +29,7 @@ flowchart LR
 |---|---|
 | Browser | Runs the dashboard. Talks HTTP and WebSocket to the frontend only. |
 | `frontend` | nginx. Serves the dashboard files and forwards `/api/`, `/healthz` and `/ws` to the Control Center. |
-| `control-center` | API and WebSocket server. Collects telemetry from every node, sends tasks to leaders, and runs the drone simulation. |
+| `control-center` | API and WebSocket server. Collects telemetry from every node, sends tasks to leaders, and runs the latency simulation. |
 | leaders | Accept tasks, hand them to their workers, copy their task list to those workers. |
 | workers | Run tasks. Each one joins the leader it can reach fastest. |
 
@@ -89,7 +89,7 @@ The browser request goes through nginx first. It is left out of the diagram.
 Details: [Replication and Tasks](./replication-and-tasks) and
 [The Control Center](./control-center).
 
-## Drones and emulated distance
+## Nodes and emulated distance
 
 On one Docker bridge every node is about 0.1 ms from every other, so latency alone cannot tell
 them apart. The Control Center gives each node a 3D position and tells every node the latency
@@ -97,9 +97,9 @@ model. A node then delays each `PONG` by:
 
 $$delay = base + distance \times perUnit + jitter \times u$$
 
-The election code is unchanged. It just measures bigger RTTs for far drones, so central drones
+The election code is unchanged. It just measures bigger RTTs for far nodes, so central nodes
 lead and workers join the nearest leader. Details:
-[Drone Simulation](./drone-simulation) and [Network Emulation](/concepts/network-emulation).
+[Latency Simulation](./latency-simulation) and [Network Emulation](/concepts/network-emulation).
 
 ## Two kinds of traffic
 
@@ -121,14 +121,14 @@ See [Backpressure and Bounded Queues](/concepts/backpressure-and-bounded-queues)
 | `backend/cmd/control-center/` | The Control Center binary (API and WebSocket only) |
 | `backend/pkg/protocol/` | Message types and framing. Imports nothing local. |
 | `backend/pkg/network/` | TCP listener, dialer, connection pool, prober (with the per-peer PONG delay hook) |
-| `backend/pkg/geo/` | Drone latency model and default positions. Pure, imports only `protocol`. |
+| `backend/pkg/geo/` | Node latency model and default positions. Pure, imports only `protocol`. |
 | `backend/pkg/health/` | `HealthStrategy` and `LatencyHealthStrategy` |
 | `backend/pkg/cluster/` | Membership, election, heartbeats, failover, replication, tasks, runtime election tuning |
 | `backend/pkg/telemetry/` | A node's link to the Control Center, `SIM_CONFIG` handling, frame counting (`FlowRecorder`) |
 | `backend/pkg/controlcenter/` | The Control Center's hub, node server, HTTP API and sim state |
 | `backend/Dockerfile` | Two targets: `node` and `control-center` |
 | `backend/deploy/node-entrypoint.sh` | Gives each scaled replica a readable ID |
-| `frontend/` | Dashboard (`index.html`, `app.js`, `style.css`): 3D airspace, grouped view, message animation, simulation panel. Plus `nginx.conf.template` and `Dockerfile`. |
+| `frontend/` | Dashboard (`index.html`, `app.js`, `style.css`): 3D space, grouped view, message animation, simulation panel. Plus `nginx.conf.template` and `Dockerfile`. |
 | `blender/` | `make_swarm_scene.py` (live state -> `swarm-scene.json`), `swarm_blender.py` (Blender add-on and headless CLI), tests, and a committed example scene |
 | `docs/` | This site. `package.json` sits at the repo root. |
 | `docker-compose.yml` | Services `frontend`, `control-center`, `seed`, `node` |
@@ -168,6 +168,6 @@ connection handling, `health` with a new metric, `cluster` with the algorithm.
 2. [Failure Detection and Failover](./failure-detection-and-failover)
 3. [Replication and Tasks](./replication-and-tasks)
 4. [The Control Center](./control-center)
-5. [Drone Simulation](./drone-simulation)
+5. [Latency Simulation](./latency-simulation)
 6. [Running the Swarm](./running-the-swarm)
 7. [Why Not Consensus](./why-not-consensus)

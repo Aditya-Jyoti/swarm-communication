@@ -3,7 +3,7 @@ package cluster
 // Partition detection.
 //
 // This is an AP design. When the network splits, every partition keeps electing
-// leaders and keeps serving tasks; a drone group that halts because it lost sight
+// leaders and keeps serving tasks; a node group that halts because it lost sight
 // of the rest of the swarm is a group that has stopped coordinating, which is worse
 // than a group coordinating on partial information. Degraded therefore does not
 // gate anything. It exists so that split-brain is observable -- a node that knows

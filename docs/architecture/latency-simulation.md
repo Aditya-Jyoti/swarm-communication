@@ -1,12 +1,12 @@
 ---
-title: Drone Simulation
+title: Latency Simulation
 ---
 
-# Drone Simulation
+# Latency Simulation
 
-Each node is a drone at a 3D position. The Control Center (CC) turns distance into
+Each node sits at a 3D position. The Control Center (CC) turns distance into
 emulated network latency, so leader election and grouping follow the geometry. The
-dashboard shows the airspace, the latencies, and the messages moving between drones.
+dashboard shows the space, the latencies, and the messages moving between nodes.
 
 No cluster code knows the map exists. The only change on the data path is that a PONG is
 sent a little later. Everything else is the normal latency-driven election.
@@ -14,8 +14,8 @@ sent a little later. Everything else is the normal latency-driven election.
 ```mermaid
 flowchart LR
     UI[Dashboard sliders] -- "POST /api/sim or ws sim" --> CC[control-center]
-    CC -- "SIM_CONFIG to every node" --> N1[drone A]
-    CC -- "SIM_CONFIG to every node" --> N2[drone B]
+    CC -- "SIM_CONFIG to every node" --> N1[node A]
+    CC -- "SIM_CONFIG to every node" --> N2[node B]
     N1 -- "PING" --> N2
     N2 -- "PONG after delay(A, B)" --> N1
     N1 -- "TELEMETRY with scores and flows" --> CC
@@ -38,7 +38,7 @@ flowchart LR
 
 $$delay(a, b) = base + \lVert a - b \rVert \times perUnit + jitter \times u, \quad u \sim U[0, 1)$$
 
-- The airspace is a cube, `0..100` on each axis (`geo.Size`). `z` is the altitude.
+- The space is a cube, `0..100` on each axis (`geo.Size`). `z` is the height.
   Positions are clamped into it, and NaN becomes 0.
 - The delay is clamped to `[0, 1500ms]` (`geo.MaxDelay`), below the 2s probe timeout, so the
   far corner reads as "slow", never as "unreachable".
@@ -48,7 +48,7 @@ $$delay(a, b) = base + \lVert a - b \rVert \times perUnit + jitter \times u, \qu
 
 ### Default placement
 
-A drone with no operator placement sits at `geo.DefaultPosition(id)`:
+A node with no operator placement sits at `geo.DefaultPosition(id)`:
 
 1. FNV-1a 64 of the node ID.
 2. The splitmix64 finalizer (`mix64`) over the result.
@@ -74,8 +74,8 @@ two cannot drift apart silently.
 - No delay when emulation is disabled, when no `SIM_CONFIG` has arrived yet, or when either
   position is unknown.
 - From there the existing code does the rest:
-  - **Election:** a drone's self-reported score is the median of its RTTs to its peers
-    (`selfScore` in `backend/pkg/cluster/node.go`), so central drones become leaders.
+  - **Election:** a node's self-reported score is the median of its RTTs to its peers
+    (`selfScore` in `backend/pkg/cluster/node.go`), so central nodes become leaders.
   - **Grouping:** a worker joins the leader with the lowest RTT, which is the nearest one.
 
 Why this design works: [Network Emulation](/concepts/network-emulation).
@@ -86,8 +86,8 @@ Why this design works: [Network Emulation](/concepts/network-emulation).
 sequenceDiagram
     participant UI as dashboard
     participant CC as CC hub
-    participant A as drone A
-    participant B as drone B
+    participant A as node A
+    participant B as node B
     UI->>CC: ws sim with per_unit_ms 3 (throttled 150 ms)
     CC->>CC: updateSim, bumpSim, version v
     CC->>A: SIM_CONFIG v
@@ -192,7 +192,7 @@ heartbeats, gossip, PINGs and PONGs are counted.
 - `Drain` sorts busiest first and keeps at most 256 entries (`protocol.MaxFlowRecords`).
   The CC truncates again before it rebroadcasts.
 
-## 6. Killed drones stay down
+## 6. Killed nodes stay down
 
 - CHAOS `kill` makes the node exit with code **0** (`exitKilled`).
 - Node containers use `restart: on-failure`. A real crash (non-zero exit) is still restarted.
@@ -201,7 +201,7 @@ heartbeats, gossip, PINGs and PONGs are counted.
   `state: "killed"` and `connected: false` until it expires (30s).
 - If the same ID connects again, the mark is cleared and its old telemetry is dropped. The node
   is treated as new.
-- To bring killed drones back: `docker compose up -d`.
+- To bring killed nodes back: `docker compose up -d`.
 
 ## 7. HTTP and WebSocket
 
@@ -275,16 +275,16 @@ clamped.
 
 ## 9. Worked example
 
-Defaults: `base_ms=1`, `per_unit_ms=2`, jitter ignored. Three drones on a line
+Defaults: `base_ms=1`, `per_unit_ms=2`, jitter ignored. Three nodes on a line
 (`y=50`, `z=50`), `threshold=0.3`:
 
-| Drone | x | Delays to the others | Median (self score) |
+| Node | x | Delays to the others | Median (self score) |
 |---|---|---|---|
 | A | 10 | B: $1 + 30 \times 2 = 61$, C: $1 + 80 \times 2 = 161$ | 111 |
 | B | 40 | A: 61, C: $1 + 50 \times 2 = 101$ | **81** |
 | C | 90 | A: 161, B: 101 | 131 |
 
-- $\lceil 3 \times 0.3 \rceil = 1$ leader. B, the central drone, has the best score and leads.
+- $\lceil 3 \times 0.3 \rceil = 1$ leader. B, the central node, has the best score and leads.
 - Set `threshold` to 0.5: $\lceil 3 \times 0.5 \rceil = 2$ leaders, B and A.
   C measures B at 101 and A at 161, so C joins B, the nearer leader.
 
@@ -303,7 +303,7 @@ back to 2.
 
 ## 10. Dashboard
 
-The airspace panel has two views: **3D airspace** and the older **Grouped** view.
+The space panel has two views: **3D space** and the older **Grouped** view.
 
 | Control | Action |
 |---|---|
@@ -311,22 +311,22 @@ The airspace panel has two views: **3D airspace** and the older **Grouped** view
 | shift-drag, right-drag, two fingers | pan |
 | wheel, pinch, `+` / `-` buttons or keys | zoom |
 | arrow keys | orbit |
-| Fit button, `f` | frame every drone |
+| Fit button, `f` | frame every node |
 | Reset view button, `0` | reset the camera |
-| click a drone | select and focus it |
+| click a node | select and focus it |
 | `Esc` | clear the selection, or leave the CSS fullscreen |
 | Fullscreen button | Fullscreen API, with a CSS "maximized" fallback when the API is missing, refused or never answers |
 | all peer links, link labels | toggles |
 | message animation | toggle, plus a per-type legend whose entries toggle each type |
 
-- **Drawing:** drones at `pos`, with a drop line and a shadow on the ground grid. Leaders are
-  larger. Far drones are painted first. See
+- **Drawing:** nodes at `pos`, with a drop line and a shadow on the ground grid. Leaders are
+  larger. Far nodes are painted first. See
   [3D Projection](/concepts/3d-perspective-projection-and-depth-sorting).
 - **Link labels:** distance (units), measured RTT (ms), and the predicted delay
   $base + d \times perUnit + jitter / 2$, the model's mean.
 - **Message animation:** each `flows` entry becomes up to 4 dots per link and type, spread
   over the 1s interval (600 dots at most). The dots show **counts**, not individual frames.
-- **Killed drones** are grey crosses until they expire.
+- **Killed nodes** are grey crosses until they expire.
 
 ### Advanced panel
 
@@ -338,18 +338,18 @@ The airspace panel has two views: **3D airspace** and the older **Grouped** view
 | hysteresis slider | `hysteresis` (0..10). The API allows up to 1500. |
 | Randomize positions | `randomize: true` |
 | Reset positions | `reset_positions: true` |
-| Use drones' own threshold/hysteresis | `threshold: 0, hysteresis: -1` |
-| Drone selector plus x / y / z sliders | `positions` for one drone |
+| Use nodes' own threshold/hysteresis | `threshold: 0, hysteresis: -1` |
+| Node selector plus x / y / z sliders | `positions` for one node |
 
 - Slider moves are throttled to one message per 150 ms.
-- "Reported by the drones" shows the threshold and hysteresis the live drones report.
-- **applied on X/N** counts live, non-killed drones whose `sim_version` has reached the CC's
+- "Reported by the nodes" shows the threshold and hysteresis the live nodes report.
+- **applied on X/N** counts live, non-killed nodes whose `sim_version` has reached the CC's
   version.
 
 ## 11. The same positions, in Blender
 
 The dashboard is not the only consumer of `nodes[].pos`. `blender/make_swarm_scene.py`
-reads the same `GET /api/state` and writes `swarm-scene.json`, which carries every drone
+reads the same `GET /api/state` and writes `swarm-scene.json`, which carries every node
 in **both** coordinate systems: `position_units` (the `pos` above, unchanged) and
 `location_m` (Blender metres, $k = 20$ m per unit by default).
 
@@ -370,11 +370,11 @@ Reference: [Blender Scene Tooling](./blender-scene).
 
 | Symptom | Cause |
 |---|---|
-| applied on 3/5 for a long time | two drones are not connected to the CC, or their `SIM_CONFIG` send failed. The next change resends the whole state. |
-| a drone moved but its group did not change | the EWMA is still catching up, or the gain is below the hysteresis margin |
+| applied on 3/5 for a long time | two nodes are not connected to the CC, or their `SIM_CONFIG` send failed. The next change resends the whole state. |
+| a node moved but its group did not change | the EWMA is still catching up, or the gain is below the hysteresis margin |
 | every RTT is below 1 ms | emulation is off, or no `SIM_CONFIG` has arrived yet |
-| all drones sit in one plane | a frontend copy that does not match `geo.DefaultPosition`. The golden test guards this. |
-| a killed drone never comes back | expected. Run `docker compose up -d`. |
+| all nodes sit in one plane | a frontend copy that does not match `geo.DefaultPosition`. The golden test guards this. |
+| a killed node never comes back | expected. Run `docker compose up -d`. |
 
 ## Related
 

@@ -77,8 +77,8 @@ worlds.
 
 ### Two implementations plus a golden test: default positions
 
-`geo.DefaultPosition` in `backend/pkg/geo/geo.go` places an unplaced drone by hashing its
-ID. The dashboard has to draw a drone before any telemetry arrives, so `defaultPos` in
+`geo.DefaultPosition` in `backend/pkg/geo/geo.go` places an unplaced node by hashing its
+ID. The dashboard has to draw a node before any telemetry arrives, so `defaultPos` in
 `frontend/app.js` reimplements it in JavaScript with `BigInt` -- a browser cannot import a
 Go function.
 
@@ -118,4 +118,4 @@ That means the boundaries are being computed by different code.
 - [Blender Scene Tooling](/architecture/blender-scene)
 - [Wire Protocol Design](/concepts/wire-protocol-design)
 - [Hash Mixing: Why FNV Needs a Finalizer](/concepts/hash-mixing-and-finalizers)
-- [Drone Simulation](/architecture/drone-simulation)
+- [Latency Simulation](/architecture/latency-simulation)

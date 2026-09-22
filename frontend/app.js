@@ -5,7 +5,7 @@
 // origin to the control center, so every URL here is relative.
 //
 // Data flow (contracts: docs/architecture/control-center.md and
-// docs/architecture/drone-simulation.md):
+// docs/architecture/latency-simulation.md):
 //   server -> browser  {"type":"snapshot", sim:{...}, nodes:[...], tasks:[...]}  every 1s
 //   server -> browser  {"type":"event", kind, node, detail}                      as they happen
 //   browser -> server  {"type":"task", kind, body, count}
@@ -39,19 +39,19 @@
   var DEFAULT_DELAY_MS = 300;
   var MAX_DELAY_MS = 5000;
 
-  // 3D view. World coordinates are divided by the airspace size, so the
+  // 3D view. World coordinates are divided by the space size, so the
   // camera works in a unit cube whatever `sim.size` is.
   var DEFAULT_SIZE = 100;     // geo.Size
   var CAM_DIST = 2.6;         // camera distance from its target, in cube sides
   var FOCAL = 850;            // pixels per unit at depth 1 and zoom 1
-  var R0 = 10;                // drone glyphs are drawn at this radius, then scaled
+  var R0 = 10;                // node glyphs are drawn at this radius, then scaled
   var ZOOM_MIN = 0.25;
   var ZOOM_MAX = 10;
   var PITCH_MIN = 0.03;
   var PITCH_MAX = 1.55;
   var HOME_3D = { yaw: -2.25, pitch: 0.55, zoom: 1, panX: 0, panY: 0, tx: 0.5, ty: 0.5, tz: 0.25 };
   var HOME_FLAT = { zoom: 1, panX: 0, panY: 0 };  // 2D map and grouped layout
-  // 2D map: an orthographic top-down camera. One airspace side is MAP_SCALE
+  // 2D map: an orthographic top-down camera. One space side is MAP_SCALE
   // view-box pixels at zoom 1, so the whole square fits with room for ticks.
   var MAP_SCALE = 470;
   // Persisted view choice. A first visit (or blocked storage) gets the map.
@@ -373,7 +373,7 @@
 
   // Position in world units: the reported one, else the hash placement.
   // A position the user just dragged wins for a moment, so the next snapshot
-  // (which may predate the change) does not snap the drone back.
+  // (which may predate the change) does not snap the node back.
   var localPos = new Map(); // id -> {x,y,z,at}
   function posOf(n) {
     var lp = localPos.get(n.id);
@@ -677,9 +677,9 @@
 
   // ---------------------------------------------------------------- view + camera
 
-  // Two primary views, picked by the toggle at the top of the Airspace panel:
+  // Two primary views, picked by the toggle at the top of the Topology panel:
   //   "2d" -- the default. A top-down map, or the older grouped diagram.
-  //   "3d" -- the perspective airspace.
+  //   "3d" -- the perspective space.
   // `mode` is what is actually drawn: "map" | "grouped" | "3d". The map and
   // 3D share one renderer (render3d); only the projection differs. Each mode
   // keeps its own camera, so switching back returns to where the user was.
@@ -751,8 +751,8 @@
     camSet({ yaw: g.yaw + dyaw, pitch: g.pitch + dpitch }, animate);
   }
 
-  // 3D: back to the home angle, then frame the drones around the home
-  // target. 2D: back to the home framing (the whole airspace on the map).
+  // 3D: back to the home angle, then frame the nodes around the home
+  // target. 2D: back to the home framing (the whole space on the map).
   function resetView() {
     if (mode === "3d") {
       camSet(Object.assign({}, HOME_3D), true);
@@ -762,7 +762,7 @@
     }
   }
 
-  // First visit to a mode with drones on screen: frame them once.
+  // First visit to a mode with nodes on screen: frame them once.
   function autoFit() {
     var c = cams[mode];
     if (c.fitted || !model.nodes.length) return;
@@ -770,7 +770,7 @@
     fitView(true);
   }
 
-  // Frame every drone. keepTarget: keep the orbit centre (used by reset).
+  // Frame every node. keepTarget: keep the orbit centre (used by reset).
   function fitView(animate, keepTarget) {
     var pts = [];
     var S = worldSize();
@@ -834,7 +834,7 @@
     if (mode === "3d") {
       camSet({ tx: p.x / S, ty: p.y / S, tz: p.z / S, panX: 0, panY: 0 }, true);
     } else if (mode === "map") {
-      // A map should hold still: pan only when the drone is near an edge.
+      // A map should hold still: pan only when the node is near an edge.
       var now_ = project(basisFor("map", cams.map.goal), p.x / S, p.y / S, p.z / S);
       if (now_.x > VIEW_W * 0.12 && now_.x < VIEW_W * 0.88 && now_.y > VIEW_H * 0.12 && now_.y < VIEW_H * 0.88) return;
       var q = project(basisFor("map", { zoom: cams.map.goal.zoom, panX: 0, panY: 0 }), p.x / S, p.y / S, p.z / S);
@@ -875,7 +875,7 @@
   //
   // Orthographic (the 2D map): screen x from x, screen y from y (north up),
   // and z is ignored, so on-screen distance is ground distance times a
-  // constant. `depth` still orders by altitude (higher drones paint on top),
+  // constant. `depth` still orders by height (higher nodes paint on top),
   // and `k` keeps glyphs a steady size that grows gently with zoom.
   function project(B, x, y, z) {
     if (B.ortho) {
@@ -911,26 +911,26 @@
 
   var MODE_TEXT = {
     map: {
-      cap: "2D MAP -- top-down, altitude as z on each label",
-      aria: "Swarm airspace, 2D top-down map. Screen position is ground position; altitude is written on each label. " +
+      cap: "2D MAP -- top-down, height as z on each label",
+      aria: "Swarm space, 2D top-down map. Screen position is ground position; height is written on each label. " +
         "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
-      hint: "Top-down map: on-screen distance is ground distance, altitude is the z on each label, and link labels give the " +
-        "true 3D distance. Drag or arrows to pan. Wheel, pinch or + / - to zoom. Click a drone to select it. " +
+      hint: "Top-down map: on-screen distance is ground distance, height is the z on each label, and link labels give the " +
+        "true 3D distance. Drag or arrows to pan. Wheel, pinch or + / - to zoom. Click a node to select it. " +
         "Keys: f fit, 0 reset, v 3D, m messages, Esc."
     },
     grouped: {
       cap: "2D GROUPED -- arranged by cluster, not by position",
-      aria: "Swarm clusters, grouped layout: drones arranged by cluster, not by position. " +
+      aria: "Swarm clusters, grouped layout: nodes arranged by cluster, not by position. " +
         "Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.",
       hint: "Grouped layout: each leader with its workers; positions are ignored. Drag or arrows to pan. " +
         "Wheel, pinch or + / - to zoom. Keys: f fit, 0 reset, v 3D, m messages, Esc."
     },
     "3d": {
-      cap: "3D -- drop lines show altitude",
-      aria: "Swarm airspace in 3D. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, " +
+      cap: "3D -- drop lines show height",
+      aria: "Swarm space in 3D. Drag to orbit, shift-drag or right-drag to pan, wheel or pinch to zoom, arrows rotate, " +
         "plus and minus zoom, 0 resets, f fits, v switches to the 2D map, Escape clears the selection.",
       hint: "Drag to orbit. Shift-drag, right-drag or two fingers to pan. Wheel or pinch to zoom. " +
-        "Click a drone to select and focus it. Keys: arrows, + / -, 0 reset, f fit, v 2D map, m messages, Esc."
+        "Click a node to select and focus it. Keys: arrows, + / -, 0 reset, f fit, v 2D map, m messages, Esc."
     }
   };
 
@@ -946,7 +946,7 @@
       lastOrder = "";
       // Snap the grouped positions: they were not animated while hidden.
       if (m === "grouped") drawn.forEach(function (d) { d.x = d.tx; d.y = d.ty; });
-      sync3d(); // drone and link labels differ between the map and 3D
+      sync3d(); // node and link labels differ between the map and 3D
     }
     show($("v3d"), m !== "grouped");
     show($("v2d"), m === "grouped");
@@ -1103,11 +1103,11 @@
     return total > 30 ? 8 : total > 15 ? 11 : 13;
   }
 
-  // Drone glyph shared by both views: drawn at radius R0 inside `body`, which
+  // Node glyph shared by both views: drawn at radius R0 inside `body`, which
   // the caller scales. Strokes do not scale (vector-effect in style.css).
   function makeGlyph(id, cls) {
     var g = s("g", { "class": cls, "data-id": id });
-    var body = s("g", { "class": "drone-body" });
+    var body = s("g", { "class": "node-body" });
     var parts = {
       flashRing: s("circle", { "class": "flash-ring", r: R0 + 6 }),
       promo: s("circle", { "class": "promo-ring", r: R0 + 10, display: "none" }),
@@ -1128,7 +1128,7 @@
     ["flashRing", "promo", "sel", "cring", "halo", "shape", "edge", "glyph", "cross"].forEach(function (p) {
       body.appendChild(parts[p]);
     });
-    // The label is the short id plus, on the 2D map, the altitude ("z 42"):
+    // The label is the short id plus, on the 2D map, the height ("z 42"):
     // a top-down view cannot show height any other way.
     var label = s("text", { "class": "n-label" });
     var name = s("tspan");
@@ -1151,7 +1151,7 @@
   }
 
   function altText(d, n) {
-    if (mode !== "map" || !d.drop) return ""; // only the map's drones (not the grouped glyphs)
+    if (mode !== "map" || !d.drop) return ""; // only the map's nodes (not the grouped glyphs)
     return "z " + Math.round(posOf(n).z);
   }
 
@@ -1319,7 +1319,7 @@
   function flashNode(id) {
     var d = drawn.get(id);
     if (d) flash(d.g);
-    var d3 = drones3.get(id);
+    var d3 = nodes3.get(id);
     if (d3) flash(d3.g);
     var row = nodeRows.get(id);
     if (row) flash(row.tr);
@@ -1340,7 +1340,7 @@
     if (!n) return;
     var d = drawn.get(id);
     if (d) styleGlyph(d, n);
-    var d3 = drones3.get(id);
+    var d3 = nodes3.get(id);
     if (d3) styleGlyph(d3, n);
     sceneDirty = true;
     kick();
@@ -1348,7 +1348,7 @@
 
   // ---------------------------------------------------------------- 3D view
 
-  var drones3 = new Map(); // id -> glyph parts + drop line + positions
+  var nodes3 = new Map(); // id -> glyph parts + drop line + positions
   var links3 = new Map();  // worker id -> {line, hit, label, t1, t2, leader}
   var peers3 = new Map();  // "a|b" -> {line, hit, label, t1, a, b}
   var hulls3 = new Map();  // leader id -> polygon
@@ -1387,7 +1387,7 @@
       root.appendChild(tx);
       grid.axes.push([tx, t[1], t[2]]);
     });
-    // Map only: the airspace boundary and 0..size ticks along x and y.
+    // Map only: the space boundary and 0..size ticks along x and y.
     grid.bound = s("polygon", { "class": "map-bound" });
     root.appendChild(grid.bound);
     grid.ticks = [];
@@ -1460,17 +1460,17 @@
     var seen = new Set();
     model.nodes.forEach(function (n) {
       seen.add(n.id);
-      var d = drones3.get(n.id);
+      var d = nodes3.get(n.id);
       var p = posOf(n);
       if (!d) {
-        d = makeGlyph(n.id, "drone");
+        d = makeGlyph(n.id, "node");
         d.drop = s("line", { "class": "drop" });
         d.shadow = s("circle", { "class": "shadow", r: 2.5 });
         $("g3-drops").appendChild(d.drop);
         $("g3-drops").appendChild(d.shadow);
         $("g3-nodes").appendChild(d.g);
         d.wx = p.x / S; d.wy = p.y / S; d.wz = p.z / S;
-        drones3.set(n.id, d);
+        nodes3.set(n.id, d);
         lastOrder = "";
       }
       d.tx = p.x / S; d.ty = p.y / S; d.tz = p.z / S;
@@ -1479,15 +1479,15 @@
       d.node = n;
       styleGlyph(d, n);
       // The label slot and "stacked" classes are added per frame (layoutLabels).
-      d.baseCls = "drone" + (n.id === selectedId ? " selected" : "") + (n.isLeader ? " is-leader" : "");
+      d.baseCls = "node" + (n.id === selectedId ? " selected" : "") + (n.isLeader ? " is-leader" : "");
       attr(d.g, "class", d.baseCls + (d.slot ? " lbl-" + d.slot : "") + (d.stackedNow ? " stacked" : ""));
       show(d.sel, n.id === selectedId);
       attr(d.drop, "class", "drop" + (n.eff === "alive" ? "" : " faint"));
     });
-    drones3.forEach(function (d, id) {
+    nodes3.forEach(function (d, id) {
       if (seen.has(id)) return;
       d.g.remove(); d.drop.remove(); d.shadow.remove();
-      drones3.delete(id);
+      nodes3.delete(id);
       releaseDotsFor(id);
       if (selectedId === id) select(null, false);
     });
@@ -1495,7 +1495,7 @@
     // Worker -> leader links, in the leader's colour.
     var want = new Set();
     model.nodes.forEach(function (n) {
-      if (n.isLeader || !n.leader || n.leader === n.id || !drones3.has(n.leader)) return;
+      if (n.isLeader || !n.leader || n.leader === n.id || !nodes3.has(n.leader)) return;
       if (n.eff === "killed") return;
       want.add(n.id);
       var L = links3.get(n.id);
@@ -1527,13 +1527,13 @@
     });
 
     // Peer links: every pair some node lists as a peer. Built only when they
-    // can be seen: the toggle is on, or a drone is selected.
+    // can be seen: the toggle is on, or a node is selected.
     var wantP = new Set();
     if (showPeers || selectedId) {
       model.nodes.forEach(function (n) {
         if (n.eff === "killed") return;
         n.peerList.forEach(function (p) {
-          if (!drones3.has(p.id) || p.id === n.id) return;
+          if (!nodes3.has(p.id) || p.id === n.id) return;
           if (!showPeers && n.id !== selectedId && p.id !== selectedId) return;
           var a = n.id < p.id ? n.id : p.id, b = n.id < p.id ? p.id : n.id;
           var key = a + "|" + b;
@@ -1617,24 +1617,24 @@
 
   // ---------------------------------------------------------------- label layout
   //
-  // Greedy, per frame, in view-box pixels. Drone labels go first, then link
+  // Greedy, per frame, in view-box pixels. Node labels go first, then link
   // labels, each into the first free slot:
-  //   drones: the previous frame's slot if still free, else right, left,
+  //   nodes: the previous frame's slot if still free, else right, left,
   //           above, below; if nothing is free, the slot overlapping least
-  //           (a drone is never left unnamed)
+  //           (a node is never left unnamed)
   //   links:  the previous position if still free, else points along the
   //           link, midpoint first; if nothing is free the label is hidden
   //           (the link's hover tooltip still has it)
-  // "Free" = no overlap with a label placed earlier or another drone's disc.
+  // "Free" = no overlap with a label placed earlier or another node's disc.
   // The selected and hovered items are placed first, so they win conflicts,
-  // and the selected drone's links are always labelled. Everything else is
+  // and the selected node's links are always labelled. Everything else is
   // placed in id order, so the result is deterministic and does not jitter.
   // Text boxes are estimated from character counts (the fonts are
   // monospace), which costs nothing and needs no layout pass.
 
   var LABEL_MIN_PX = 70;       // shorter links on screen get no label
   var CH_NAME = 7.3, CH_ALT = 6.7, CH_SUB = 6.1, CH_LINK = 6.1; // px per char (mono 12/11/10/10)
-  var DRONE_SLOTS = ["r", "l", "a", "b"];
+  var NODE_SLOTS = ["r", "l", "a", "b"];
   var LINK_TS = [0.5, 0.36, 0.64, 0.24, 0.76];
   var hoverLink = null;        // "w:<worker id>" or "p:<a|b>" while a link is hovered
   var labelBoxes = [];         // last layout, for the test hook
@@ -1653,13 +1653,13 @@
     return c + (box.w * box.h - inside);
   }
 
-  function droneLabelSize(d) {
+  function nodeLabelSize(d) {
     var name = d.name.textContent.length, alt = d.alt.textContent.length, sub = d.sub.textContent.length;
     var w = name * CH_NAME + (alt ? 5 + alt * CH_ALT : 0);
     return { w: Math.max(w, sub * CH_SUB) + 6, h: sub ? 28 : 16 };
   }
 
-  function droneSlotBox(d, slot, sz) {
+  function nodeSlotBox(d, slot, sz) {
     var R = d.clear + 5, x = d.p.x, y = d.p.y;
     if (slot === "r") return { x: x + R, y: y - sz.h / 2, w: sz.w, h: sz.h };
     if (slot === "l") return { x: x - R - sz.w, y: y - sz.h / 2, w: sz.w, h: sz.h };
@@ -1668,8 +1668,8 @@
   }
 
   // Move the two text lines into the chosen box (coordinates are relative
-  // to the drone; the anchor class on the drone's <g> sets text-anchor).
-  function applyDroneSlot(d, slot, box) {
+  // to the node; the anchor class on the node's <g> sets text-anchor).
+  function applyNodeSlot(d, slot, box) {
     var lx = slot === "r" ? box.x + 3 : slot === "l" ? box.x + box.w - 3 : box.x + box.w / 2;
     lx -= d.p.x;
     var top = box.y - d.p.y;
@@ -1678,7 +1678,7 @@
     d.slot = slot;
   }
 
-  function droneRank(d) {
+  function nodeRank(d) {
     var id = d.node ? d.node.id : "";
     if (id === selectedId) return 0;
     if (id === hoverId) return 1;
@@ -1687,7 +1687,7 @@
 
   function byRankThenKey(a, b) { return a.rank - b.rank || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0); }
 
-  // list: the drones on screen, already projected and sized.
+  // list: the nodes on screen, already projected and sized.
   // links: [{L, p, q, visible, force, key}]
   function layoutLabels(list, links) {
     var taken = [];
@@ -1711,21 +1711,21 @@
       }
     }
 
-    var order = list.map(function (d) { return { d: d, rank: droneRank(d), key: d.node ? d.node.id : "" }; });
+    var order = list.map(function (d) { return { d: d, rank: nodeRank(d), key: d.node ? d.node.id : "" }; });
     order.sort(byRankThenKey);
     order.forEach(function (o) {
       var d = o.d;
-      var sz = droneLabelSize(d);
-      var tries = d.slot ? [d.slot].concat(DRONE_SLOTS.filter(function (s2) { return s2 !== d.slot; })) : DRONE_SLOTS;
+      var sz = nodeLabelSize(d);
+      var tries = d.slot ? [d.slot].concat(NODE_SLOTS.filter(function (s2) { return s2 !== d.slot; })) : NODE_SLOTS;
       var best = null, bestCost = Infinity, bestSlot = null;
       for (var k = 0; k < tries.length; k++) {
-        var box = droneSlotBox(d, tries[k], sz);
+        var box = nodeSlotBox(d, tries[k], sz);
         var cost = boxCost(box, taken, d);
         if (cost < bestCost) { best = box; bestCost = cost; bestSlot = tries[k]; }
         if (cost === 0) break;
       }
-      applyDroneSlot(d, bestSlot, best);
-      best.owner = d; best.kind = "drone"; best.id = o.key;
+      applyNodeSlot(d, bestSlot, best);
+      best.owner = d; best.kind = "node"; best.id = o.key;
       taken.push(best);
       attr(d.g, "class", d.baseCls + " lbl-" + bestSlot + (d.stackedNow ? " stacked" : ""));
     });
@@ -1734,7 +1734,7 @@
     links.slice().sort(byRankThenKey).forEach(function (it) {
       var L = it.L, p = it.p, q = it.q;
       var len = p && q ? Math.hypot(q.x - p.x, q.y - p.y) : 0;
-      // A forced label (the selected drone's link, a hovered link) shows even
+      // A forced label (the selected node's link, a hovered link) shows even
       // on a short link; it may then sit beside the link instead of on it.
       if (!it.visible || !p || !q || (len < LABEL_MIN_PX && !it.force)) { show(L.label, false); return; }
       var w = Math.max(L.t1.textContent.length, L.t2.textContent.length) * CH_LINK + 6;
@@ -1768,11 +1768,11 @@
     labelBoxes = taken;
   }
 
-  // Per-frame geometry. Returns true while drones are still easing.
+  // Per-frame geometry. Returns true while nodes are still easing.
   function render3d() {
     var moving = false;
     var reduce = reducedMotion();
-    drones3.forEach(function (d) {
+    nodes3.forEach(function (d) {
       var dx = d.tx - d.wx, dy = d.ty - d.wy, dz = d.tz - d.wz;
       if (reduce || Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 0.0008) {
         if (dx || dy || dz) sceneDirty = true;
@@ -1793,9 +1793,9 @@
     if (sig !== lastCamSig) { drawGrid(B); lastCamSig = sig; }
     currentBasis = B;
 
-    var total = drones3.size;
+    var total = nodes3.size;
     var list = [];
-    drones3.forEach(function (d) {
+    nodes3.forEach(function (d) {
       d.p = project(B, d.wx, d.wy, d.wz);
       d.gp = project(B, d.wx, d.wy, 0);
       if (!d.p) {
@@ -1809,7 +1809,7 @@
       var r = base * clamp(d.p.k / (FOCAL / CAM_DIST), 0.45, 2.6);
       sizeGlyph(d, r);
       attr(d.g, "transform", "translate(" + d.p.x.toFixed(1) + " " + d.p.y.toFixed(1) + ")");
-      // Drop lines show altitude in 3D; from straight above they have no length.
+      // Drop lines show height in 3D; from straight above they have no length.
       if (!B.ortho && setLine(d.drop, d.p, d.gp)) {
         show(d.shadow, true);
         attr(d.shadow, "cx", d.gp.x.toFixed(1));
@@ -1820,7 +1820,7 @@
       }
     });
 
-    // Painter's algorithm: far drones first.
+    // Painter's algorithm: far nodes first.
     list.sort(function (a, b) { return b.p.depth - a.p.depth; });
     var order = list.map(function (d) { return d.g.getAttribute("data-id"); }).join("\n");
     if (order !== lastOrder) {
@@ -1831,22 +1831,22 @@
 
     var labelled = [];
     links3.forEach(function (L, wid) {
-      var w = drones3.get(wid), l = drones3.get(L.leader);
+      var w = nodes3.get(wid), l = nodes3.get(L.leader);
       var p = w && w.p, q = l && l.p;
       setLine(L.line, p, q);
       setLine(L.hit, p, q);
-      // With a selection, only the selected drone's links keep their labels,
+      // With a selection, only the selected node's links keep their labels,
       // and those always show.
       var sel = !!selectedId && (selectedId === wid || selectedId === L.leader);
       labelled.push({ L: L, p: p, q: q, key: "w:" + wid,
         visible: showLabels && (!selectedId || sel), force: sel || hoverLink === "w:" + wid });
     });
     peers3.forEach(function (P, key) {
-      var a = drones3.get(P.a), b = drones3.get(P.b);
+      var a = nodes3.get(P.a), b = nodes3.get(P.b);
       var p = a && a.p, q = b && b.p;
       setLine(P.line, p, q);
       setLine(P.hit, p, q);
-      // Peer labels exist only for the selected drone's links: placed early,
+      // Peer labels exist only for the selected node's links: placed early,
       // but hidden when there is no room (there can be dozens).
       labelled.push({ L: P, p: p, q: q, key: "p:" + key, visible: showLabels && P.showLabel,
         first: true, force: hoverLink === "p:" + key });
@@ -1856,7 +1856,7 @@
       var members = [lid].concat((groupsNow.get(lid) || []).map(function (m) { return m.id; }));
       var pts = [];
       members.forEach(function (id) {
-        var d = drones3.get(id);
+        var d = nodes3.get(id);
         if (d && d.gp && d.node && d.node.eff !== "killed") pts.push(d.gp);
       });
       if (pts.length < 2) { show(poly, false); return; }
@@ -1869,8 +1869,8 @@
 
   // ---------------------------------------------------------------- message animation
 
-  // Off by default: a full mesh of N drones probes N*(N-1) links a second, so
-  // at 10 drones about 86% of all dots are PING/PONG and they bury the leader
+  // Off by default: a full mesh of N nodes probes N*(N-1) links a second, so
+  // at 10 nodes about 86% of all dots are PING/PONG and they bury the leader
   // and worker structure. The user opts in, and the choice is remembered.
   var flowsOn = false;
   var dots = [];     // active: {el, from, to, start, dur, group}
@@ -1912,7 +1912,7 @@
     if (!flowsOn || document.hidden) return;
     var t0 = now();
     var reduce = reducedMotion();
-    var positions = mode === "grouped" ? drawn : drones3;
+    var positions = mode === "grouped" ? drawn : nodes3;
     nodes.forEach(function (n) {
       if (!n.flows.length || n.eff === "killed") return;
       var key = model.atMs !== null && n.lastSeen !== null ? model.atMs - n.lastSeen : null;
@@ -1957,7 +1957,7 @@
       if (u < 0) { attr(d.el, "display", "none"); continue; }
       var x, y;
       if (B) {
-        var a = drones3.get(d.from), b = drones3.get(d.to);
+        var a = nodes3.get(d.from), b = nodes3.get(d.to);
         if (!a || !b) { attr(d.el, "display", "none"); continue; }
         var p = project(B, a.wx + (b.wx - a.wx) * u, a.wy + (b.wy - a.wy) * u, a.wz + (b.wz - a.wz) * u);
         if (!p) { attr(d.el, "display", "none"); continue; }
@@ -2025,7 +2025,7 @@
   function select(id, focus) {
     selectedId = id && model.byId.has(id) ? id : null;
     if (selectedId && focus) focusOn(selectedId);
-    var sel = $("drone-sel");
+    var sel = $("node-sel");
     if (selectedId && sel.value !== selectedId) {
       sel.value = selectedId;
       renderPosSliders(true);
@@ -2036,7 +2036,7 @@
     kick();
   }
 
-  function droneLines(n) {
+  function nodeLines(n) {
     var p = posOf(n);
     var lines = [
       n.id + "  (" + n.role + ", " + n.eff + ")",
@@ -2056,12 +2056,12 @@
     }).sort(function (a, b) { return (a.rtt === null) - (b.rtt === null) || (a.rtt || 0) - (b.rtt || 0); });
   }
 
-  function tipForDrone(id) {
+  function tipForNode(id) {
     var n = model.byId.get(id);
     if (!n) return null;
-    var lines = droneLines(n);
+    var lines = nodeLines(n);
     if (mode === "map") {
-      lines.splice(3, 0, "altitude: z " + posOf(n).z.toFixed(1) + " (the map shows ground position)");
+      lines.splice(3, 0, "height: z " + posOf(n).z.toFixed(1) + " (the map shows ground position)");
     }
     var rows = peerRows(n);
     if (rows.length) lines.push("RTT to peers (measured / 3D distance):");
@@ -2161,7 +2161,7 @@
     while (el && el !== topo) {
       if (el.getAttribute) {
         var id = el.getAttribute("data-id");
-        if (id) return { kind: "drone", id: id };
+        if (id) return { kind: "node", id: id };
         var lk = el.getAttribute("data-link");
         if (lk) return { kind: "link", id: lk };
         var pk = el.getAttribute("data-peer");
@@ -2174,11 +2174,11 @@
 
   function hover(target, vx, vy) {
     if (!target) { hideTip(); return; }
-    var lines = target.kind === "drone" ? tipForDrone(target.id)
+    var lines = target.kind === "node" ? tipForNode(target.id)
       : target.kind === "link" ? tipForLink(target.id) : tipForPeer(target.id);
     showTip(lines, vx, vy);
     setHoverLink(target.kind === "link" ? "w:" + target.id : target.kind === "peer" ? "p:" + target.id : null);
-    if (target.kind === "drone" && hoverId !== target.id) {
+    if (target.kind === "node" && hoverId !== target.id) {
       hoverId = target.id;
       if (!selectedId) renderInspector();
       relabel();
@@ -2194,11 +2194,11 @@
       if (inspectorSig === "") return;
       inspectorSig = "";
       box.textContent = "";
-      box.appendChild(h("p", "empty", "Hover or click a drone to inspect it."));
+      box.appendChild(h("p", "empty", "Hover or click a node to inspect it."));
       return;
     }
     var rows = peerRows(n);
-    var head = droneLines(n);
+    var head = nodeLines(n);
     var sig = JSON.stringify([!!selectedId, head, rows]);
     if (sig === inspectorSig) return;
     inspectorSig = sig;
@@ -2331,7 +2331,7 @@
       }
       if (e.type === "pointerup" && !gesture.moved) {
         var t = gesture.target;
-        if (t && t.kind === "drone") select(t.id, true);
+        if (t && t.kind === "node") select(t.id, true);
         else if (t && t.kind === "link") select(t.id, false);
         else select(null, false);
       }
@@ -2588,7 +2588,7 @@
     var ap = $("sim-applied");
     if (sm && sm.version !== null) {
       var done = live.filter(function (n) { return n.simVersion !== null && n.simVersion >= sm.version; }).length;
-      setText(ap, "applied on " + done + "/" + live.length + " drones");
+      setText(ap, "applied on " + done + "/" + live.length + " nodes");
       ap.className = "badge " + (done === live.length ? "b-alive" : "b-pending");
       setText($("sim-version"), "config version " + sm.version);
     } else {
@@ -2615,8 +2615,8 @@
   }
   var enTouched = 0;
 
-  function renderDroneOptions() {
-    var sel = $("drone-sel");
+  function renderNodeOptions() {
+    var sel = $("node-sel");
     var want = [""].concat(model.nodes.map(function (n) { return n.id; }));
     var have = Array.prototype.map.call(sel.options, function (o) { return o.value; });
     if (want.join("\n") === have.join("\n")) return;
@@ -2631,8 +2631,8 @@
   }
 
   function renderPosSliders(force) {
-    renderDroneOptions();
-    var id = $("drone-sel").value;
+    renderNodeOptions();
+    var id = $("node-sel").value;
     var n = id ? model.byId.get(id) : null;
     var size = worldSize();
     ["x", "y", "z"].forEach(function (ax) {
@@ -2659,8 +2659,8 @@
     });
     var pbox = $("pos-sliders");
     ["x", "y", "z"].forEach(function (ax) {
-      makeSlider(pbox, "pos-" + ax, ax + (ax === "z" ? " (altitude)" : ""), 0, DEFAULT_SIZE, 0.5, function (v) {
-        var id = $("drone-sel").value;
+      makeSlider(pbox, "pos-" + ax, ax + (ax === "z" ? " (height)" : ""), 0, DEFAULT_SIZE, 0.5, function (v) {
+        var id = $("node-sel").value;
         if (!id) return;
         setText(sliders["pos-" + ax].out, v.toFixed(1));
         var pos = {
@@ -2668,7 +2668,7 @@
           y: roundStep(Number(sliders["pos-y"].input.value), 0.5),
           z: roundStep(Number(sliders["pos-z"].input.value), 0.5)
         };
-        // Move the drone at once; the snapshot confirms it shortly.
+        // Move the node at once; the snapshot confirms it shortly.
         localPos.set(id, { x: pos.x, y: pos.y, z: pos.z, at: Date.now() });
         sync3d();
         kick();
@@ -2690,12 +2690,12 @@
       simAction({ reset_positions: true }, "reset positions");
     });
     // threshold 0 and a negative hysteresis clear the operator override; each
-    // drone then returns to its own configured values.
+    // node then returns to its own configured values.
     $("sim-clear-election").addEventListener("click", function () {
-      simAction({ threshold: 0, hysteresis: -1 }, "drones' own threshold/hysteresis");
+      simAction({ threshold: 0, hysteresis: -1 }, "nodes' own threshold/hysteresis");
     });
-    $("drone-sel").addEventListener("change", function () {
-      var id = $("drone-sel").value;
+    $("node-sel").addEventListener("change", function () {
+      var id = $("node-sel").value;
       renderPosSliders(true);
       if (id) select(id, true);
     });
@@ -2721,7 +2721,7 @@
       tr.appendChild(td);
     });
     c.id.classList.add("pick");
-    c.id.title = "select in the airspace view";
+    c.id.title = "select in the space view";
     c.id.addEventListener("click", function () { select(id, true); });
 
     var box = h("div", "chaos");

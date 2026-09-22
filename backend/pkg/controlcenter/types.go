@@ -58,7 +58,7 @@ type Snapshot struct {
 	Tasks    []TaskView `json:"tasks"`
 }
 
-// SimView is the CC's drone-simulation settings as the browser sees them: in
+// SimView is the CC's latency-simulation settings as the browser sees them: in
 // the snapshot and from GET/POST /api/sim. Positions are not here; each node's
 // position is in its NodeView.
 type SimView struct {
@@ -71,7 +71,7 @@ type SimView struct {
 	Threshold float64 `json:"threshold"`
 	// Hysteresis is the operator override, -1 when there is none.
 	Hysteresis float64 `json:"hysteresis"`
-	// Size is the side of the airspace cube (geo.Size), so the dashboard does
+	// Size is the side of the space cube (geo.Size), so the dashboard does
 	// not hard-code it.
 	Size float64 `json:"size"`
 	// MaxDelayMS is the cap on one emulated delay (geo.MaxDelay).
@@ -95,7 +95,7 @@ type NodeView struct {
 	LedgerSize int                              `json:"ledger_size"`
 	Peers      []protocol.MemberRecord          `json:"peers"`
 	Scores     map[protocol.NodeAddress]float64 `json:"scores"`
-	// Pos is where the CC has placed the node in the airspace.
+	// Pos is where the CC has placed the node in the space.
 	Pos protocol.Position `json:"pos"`
 	// Threshold, Hysteresis and SimVersion are the node's own report: the
 	// election settings in force there and the SIM_CONFIG version it applied.

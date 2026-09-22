@@ -42,22 +42,22 @@ docker compose up -d --scale node=11     # N = 12, 4 leaders
 
 Or set `NODE_REPLICAS` in `.env`. No code or YAML edits.
 
-## Drone simulation
+## Latency simulation
 
-Each node is a drone at a 3D position in a 100-unit cube. The Control Center turns distance
+Each node sits at a 3D position in a 100-unit cube. The Control Center turns distance
 into emulated latency on PONG replies:
 
 $$delay = base + distance \times perUnit + jitter \times U[0, 1)$$
 
-Central drones get the lowest median RTT and become leaders. Each worker joins its nearest
-leader. The dashboard draws the airspace in 3D (drag to orbit, wheel to zoom), labels links
-with distance and RTT, and animates messages between drones.
+Central nodes get the lowest median RTT and become leaders. Each worker joins its nearest
+leader. The dashboard draws the space in 3D (drag to orbit, wheel to zoom), labels links
+with distance and RTT, and animates messages between nodes.
 
 - **Advanced panel** (collapsed by default): sliders for the latency model, `threshold` and
-  `hysteresis`, an enable switch, randomize/reset positions, and x/y/z sliders per drone.
+  `hysteresis`, an enable switch, randomize/reset positions, and x/y/z sliders per node.
   A button clears the threshold and hysteresis overrides. The same settings are available at
   `GET` and `POST /api/sim`.
-- **Killed drones stay down.** A chaos kill exits 0, and nodes use `restart: on-failure`. To
+- **Killed nodes stay down.** A chaos kill exits 0, and nodes use `restart: on-failure`. To
   bring them back, run `docker compose up -d`.
 
 | Variable | Default | Meaning |
@@ -68,7 +68,7 @@ with distance and RTT, and animates messages between drones.
 | `SWARM_SIM_JITTER_MS` | `0.5` | Maximum random extra delay (0..200) |
 
 These are start-up values for the CC. The panel changes them at run time. Details:
-[Drone Simulation](docs/architecture/drone-simulation.md).
+[Latency Simulation](docs/architecture/latency-simulation.md).
 
 ## Blender
 
@@ -78,16 +78,16 @@ blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
 ```
 
 `blender/swarm-scene.json` is one self-describing JSON document that holds the whole swarm:
-every drone in both unit systems, the clusters, each link with its measured RTT and the
+every node in both unit systems, the clusters, each link with its measured RTT and the
 model's predicted one-way delay, the traffic on it, the dashboard's colour legend, and the
 exact requests that change the running swarm. That single file is enough to build the scene.
 
 Editing works from both sides. A slider in the dashboard's Advanced panel really moves the
-drone, and Blender follows on the next sync. Moving a cone in Blender and pressing **Push
+node, and Blender follows on the next sync. Moving a cone in Blender and pressing **Push
 positions** POSTs to the same `/api/sim`, so the swarm re-measures and re-groups for real.
 Positions in swarm units are the truth; metres are a rendering of them.
 
-The add-on also live-syncs straight from `/api/state` and can chaos-kill the selected drone.
+The add-on also live-syncs straight from `/api/state` and can chaos-kill the selected node.
 Details, options and limits: [`blender/README.md`](blender/README.md).
 
 ## Running without Docker

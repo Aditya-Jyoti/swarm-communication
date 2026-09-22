@@ -6,7 +6,7 @@ outline: deep
 
 # Hash Mixing: Why FNV Needs a Finalizer
 
-swarm-net places each drone from a hash of its ID, so the spot is stable with no stored state.
+swarm-net places each node from a hash of its ID, so the spot is stable with no stored state.
 The first version used FNV-1a alone, and Compose replicas ended up on one line.
 
 ## Core Mental Model
@@ -87,7 +87,7 @@ only if FNV already collided.
   `TestDefaultPositionGolden` pins `swarm-net-node-1` at `(43.078932, 19.334290, 75.466986)`.
 - `frontend/app.js`: `defaultPos` repeats the same maths with `BigInt`, masking to 64 bits
   after each multiply. The golden test is the contract between the two.
-- The spread matters beyond looks: drones that share a position have equal delays, so their
+- The spread matters beyond looks: nodes that share a position have equal delays, so their
   scores tie and the election falls back to ID order.
 
 ## Common Failure Modes & Edge Cases
@@ -95,7 +95,7 @@ only if FNV already collided.
 | Symptom | Cause |
 |---|---|
 | replicas line up along one axis | no finalizer. Fields from a weak hash. |
-| two drones drawn on top of each other | IDs differ only in the last byte, and the raw hash barely changed |
+| two nodes drawn on top of each other | IDs differ only in the last byte, and the raw hash barely changed |
 | dashboard positions differ from the backend | the JS copy uses `Number`, which loses bits above $2^{53}$. Use `BigInt` and mask with $2^{64} - 1$. |
 | JS copy differs only for non-ASCII IDs | hashing UTF-16 code units instead of UTF-8 bytes, as Go's `[]byte(id)` does |
 | a very old browser shows a different layout | no `BigInt`, so `defaultPos` falls back to a 32-bit FNV-1a with no finalizer. It is only a guess until the CC reports `pos`. |
@@ -104,5 +104,5 @@ only if FNV already collided.
 
 ## Further Reading
 
-- [Drone Simulation](/architecture/drone-simulation)
+- [Latency Simulation](/architecture/latency-simulation)
 - [3D Perspective Projection and Depth Sorting](/concepts/3d-perspective-projection-and-depth-sorting)

@@ -530,7 +530,7 @@ backpressure page.
 **Split-brain policy: AP.** Any partition elects leaders. A node that can see fewer than a
 majority of its last-known swarm size marks itself *degraded* and says so in telemetry, but it
 keeps serving and keeps electing. There is no consensus algorithm. **Rejected:** minority
-partition halts (CP behaviour -- correct for a database, wrong for a drone swarm where a
+partition halts (CP behaviour -- correct for a database, wrong for a node swarm where a
 partitioned group of nodes with no leader is a group of nodes that has stopped coordinating);
 Raft-style term-and-log agreement (heavyweight, and this system does not replicate a log that
 needs linearisable agreement; it replicates a roster and a task ledger where the losing side of a
@@ -1233,9 +1233,9 @@ from its output alone.
 
 ---
 
-## 2026-09-17 -- Drone simulation: 3D positions, emulated latency, interactive airspace
+## 2026-09-17 -- Latency simulation: 3D positions, emulated latency, interactive space
 
-This entry covers `3e65d73..c6252a0`. The contract is `docs/architecture/drone-simulation.md`.
+This entry covers `3e65d73..c6252a0`. The contract is `docs/architecture/latency-simulation.md`.
 The user had waived phase-gate reviews (see STATE.md), so the lead picked the defaults below
 and records them here. Each can be revisited.
 
@@ -1247,7 +1247,7 @@ and records them here. Each can be revisited.
 - Give each node a relative location. The control plane emulates latency from it, and that
   latency drives leader assignment.
 - Put sliders in an advanced dropdown.
-- Use 3D coordinates, like a real drone simulation.
+- Use 3D coordinates, like a real latency simulation.
 - Show distances, latency and message propagation visually.
 - Make the topology interactive (orbit, zoom).
 
@@ -1264,8 +1264,8 @@ and records them here. Each can be revisited.
 ```mermaid
 flowchart LR
     UI[Advanced panel] -->|"POST /api/sim or ws sim"| CC[control-center]
-    CC -->|"SIM_CONFIG v, positions, model"| A[drone A]
-    CC -->|"SIM_CONFIG v, positions, model"| B[drone B]
+    CC -->|"SIM_CONFIG v, positions, model"| A[node A]
+    CC -->|"SIM_CONFIG v, positions, model"| B[node B]
     A -->|PING| B
     B -->|"PONG after delay A to B"| A
     A -->|"TELEMETRY scores and flows"| CC
@@ -1277,7 +1277,7 @@ flowchart LR
 | Option | Failure mode it invites | Cost | Outcome |
 |---|---|---|---|
 | `tc netem` per container | Needs `NET_ADMIN` (we drop all caps), one qdisc per destination, Docker-only | High | Rejected |
-| Delay every mesh frame | Heartbeats slow down with distance, so far drones get false failovers | Medium | Rejected |
+| Delay every mesh frame | Heartbeats slow down with distance, so far nodes get false failovers | Medium | Rejected |
 | Delay only the PONG, in process | Distance does not affect heartbeat timing (by design) | Low | **Chosen** |
 
 The prober already turns PONG delay into RTT, so nothing else in the scoring path changed.
@@ -1293,11 +1293,11 @@ A snapshot, not a delta, so a node that missed an update is fixed by the next on
 starts at the CC start time in ms, so a restarted CC still wins.
 
 **D3. Latency is the election input, with no new election logic.** Leaders come from the
-existing median-RTT score, groups from nearest-leader affinity. Central drones lead, workers
+existing median-RTT score, groups from nearest-leader affinity. Central nodes lead, workers
 join the nearest leader. The only cluster change is runtime `threshold` and `hysteresis`
 (`49b3f1e`).
 
-**D4. Killed drones stay down: kill exits 0, nodes use `restart: on-failure`.**
+**D4. Killed nodes stay down: kill exits 0, nodes use `restart: on-failure`.**
 
 | Option | Failure mode it invites | Outcome |
 |---|---|---|
@@ -1319,7 +1319,7 @@ clear it, and the node returns to its own values (`6e938be` CC, `5043797` node).
 
 ### 8.5 Bugs found in live verification
 
-1. **Drones stacked on each other.** `geo.DefaultPosition` used plain FNV-1a. Compose names
+1. **Nodes stacked on each other.** `geo.DefaultPosition` used plain FNV-1a. Compose names
    differ only in a trailing digit, so every replica got the same x and z, and `node-1` and
    `node-5` got the same spot. Fixed with the splitmix64 finalizer, mirrored in the frontend
    and pinned by a golden test (`471c61a`).
@@ -1330,8 +1330,8 @@ clear it, and the node returns to its own values (`6e938be` CC, `5043797` node).
 | Check | Result |
 |---|---|
 | `go test -race ./...` | all packages pass |
-| Docker e2e | PASS. A chaos-killed worker exited 0, was not restarted, showed as `killed`. `per_unit_ms` 3.5 applied on 4/4 drones. |
-| Live geometry | Every worker on its nearest leader. Leaders were the two lowest median-distance drones. RTT about 2 ms per unit. |
+| Docker e2e | PASS. A chaos-killed worker exited 0, was not restarted, showed as `killed`. `per_unit_ms` 3.5 applied on 4/4 nodes. |
+| Live geometry | Every worker on its nearest leader. Leaders were the two lowest median-distance nodes. RTT about 2 ms per unit. |
 | Live move | `node-4` moved next to `node-5`: RTT 11.5 ms, and it re-homed |
 | Live override | threshold 0.5 gave 3 leaders; clearing it gave 2 |
 | Frontend | 80 jsdom checks, plus a headless-browser run |
@@ -1350,7 +1350,7 @@ Nominated for `doc-educator` (pages being written in parallel):
 
 | Page | Why |
 |---|---|
-| `architecture/drone-simulation` (final) | The contract becomes the reference page |
+| `architecture/latency-simulation` (final) | The contract becomes the reference page |
 | Concept: network emulation | Why in-process PONG delay instead of `tc netem`, and what it cannot model |
 | Concept: 3D projection | Orbit camera, perspective divide, depth sort in plain JS |
 | Concept: hash mixing | Why FNV-1a alone clusters similar names, and what a finalizer fixes |
@@ -1439,7 +1439,7 @@ property, so a rename, a selection, parenting and any extra materials survive a 
 link objects are removed. Rejected: delete-and-rebuild, which is simpler but throws away the
 user's work once a second.
 
-**D6. Default scale 20 m/unit.** The 100-unit cube becomes 2km across: realistic drone
+**D6. Default scale 20 m/unit.** The 100-unit cube becomes 2km across: realistic node
 spacing, and still inside Blender's default camera clipping. `--scale 1` gives a tabletop,
 `--scale 100` needs the clip end raised.
 
@@ -1448,7 +1448,7 @@ spacing, and still inside Blender's default camera clipping. `--scale 1` gives a
 | Check | Result |
 |---|---|
 | `python3 blender/test_swarm_blender.py` | 26 pure-core tests pass |
-| Generator against the live swarm | 6 drones, 2 leaders, 15 links |
+| Generator against the live swarm | 6 nodes, 2 leaders, 15 links |
 | Generator with `--frames` | timeline recorded |
 | Model confirmed end to end | a link predicted 151.06 ms one-way and measured 152.0 ms RTT, which is the responder-side delay model (WORKLOG 8, D1) seen from the outside |
 | The `bpy` half | **UNVERIFIED.** Blender is not installed here. |

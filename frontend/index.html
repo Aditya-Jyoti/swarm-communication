@@ -21,7 +21,7 @@
   </header>
 
   <section class="summary" aria-label="Cluster summary">
-    <div class="stat"><span class="stat-num" id="sum-nodes">-</span><span class="stat-label">drones</span></div>
+    <div class="stat"><span class="stat-num" id="sum-nodes">-</span><span class="stat-label">nodes</span></div>
     <div class="stat"><span class="stat-num" id="sum-leaders">-</span><span class="stat-label">leaders</span></div>
     <div class="stat"><span class="stat-num" id="sum-healthy">-</span><span class="stat-label">alive + connected</span></div>
     <div class="stat"><span class="stat-num" id="sum-pending">-</span><span class="stat-label">tasks pending</span></div>
@@ -30,38 +30,38 @@
   </section>
 
   <main class="grid">
-    <section class="panel topo-panel" id="topo-panel" aria-label="Airspace">
+    <section class="panel topo-panel" id="topo-panel" aria-label="Topology">
       <div class="panel-head">
         <div class="view-switch">
-          <h2>Airspace</h2>
+          <h2>Topology</h2>
           <!-- The primary view toggle: 2D map (default) or 3D. Key: v. -->
           <span class="seg seg-big" role="group" aria-label="View">
             <button type="button" class="btn" id="view-2d" aria-pressed="true" title="Top-down map (v toggles)">2D map</button>
-            <button type="button" class="btn" id="view-3d" aria-pressed="false" title="Perspective airspace (v toggles)">3D</button>
+            <button type="button" class="btn" id="view-3d" aria-pressed="false" title="Perspective space (v toggles)">3D</button>
           </span>
           <!-- Moving message dots: off by default, since a full mesh sends
                hundreds of probes a second and hides the structure. Key: m. -->
           <button type="button" class="btn" id="flows-on" aria-pressed="false"
-            title="Show messages moving between drones (m toggles)">Show messages</button>
+            title="Show messages moving between nodes (m toggles)">Show messages</button>
           <!-- 2D only: the true-position map, or the older grouped-by-cluster diagram. -->
           <span class="layout-ctl" id="layout-ctl">
             <span class="muted" id="layout-lbl">Layout:</span>
             <span class="seg" role="group" aria-labelledby="layout-lbl">
-              <button type="button" class="btn small" id="layout-map" aria-pressed="true" title="Drones at their ground position">map</button>
-              <button type="button" class="btn small" id="layout-grouped" aria-pressed="false" title="Drones grouped by cluster; positions ignored">grouped</button>
+              <button type="button" class="btn small" id="layout-map" aria-pressed="true" title="Nodes at their ground position">map</button>
+              <button type="button" class="btn small" id="layout-grouped" aria-pressed="false" title="Nodes grouped by cluster; positions ignored">grouped</button>
             </span>
           </span>
         </div>
         <div class="toolbar" role="toolbar" aria-label="View controls">
           <button type="button" class="btn icon" id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
           <button type="button" class="btn icon" id="zoom-out" title="Zoom out (-)" aria-label="Zoom out">-</button>
-          <button type="button" class="btn" id="view-fit" title="Frame every drone (f)">Fit</button>
+          <button type="button" class="btn" id="view-fit" title="Frame every node (f)">Fit</button>
           <button type="button" class="btn" id="view-reset" title="Reset the camera (0)">Reset view</button>
           <button type="button" class="btn" id="view-full" aria-pressed="false">Fullscreen</button>
         </div>
       </div>
       <div class="panel-head sub-head">
-        <ul class="legend" aria-label="Drone legend">
+        <ul class="legend" aria-label="Node legend">
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="n-shape st-alive leader-shape"/></svg>leader (large, L)</li>
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-alive"/></svg>alive</li>
           <li><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5" class="n-shape st-suspect"/></svg>suspect (dashed)</li>
@@ -79,7 +79,7 @@
       <div class="topo-wrap">
         <svg id="topo" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid meet"
              tabindex="0" role="img"
-             aria-label="Swarm airspace, 2D top-down map. Screen position is ground position; altitude is written on each label. Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.">
+             aria-label="Swarm space, 2D top-down map. Screen position is ground position; height is written on each label. Drag or arrows to pan, wheel, pinch, plus and minus zoom, 0 resets, f fits, v switches to 3D, Escape clears the selection.">
           <g id="v3d">
             <g id="g3-grid"></g>
             <g id="g3-hulls"></g>
@@ -105,10 +105,10 @@
           </g>
         </svg>
       </div>
-      <p id="topo-empty" class="empty">No drones reported yet.</p>
-      <p class="hint" id="topo-hint">Top-down map: on-screen distance is ground distance, altitude is the
+      <p id="topo-empty" class="empty">No nodes reported yet.</p>
+      <p class="hint" id="topo-hint">Top-down map: on-screen distance is ground distance, height is the
         z on each label, and link labels give the true 3D distance. Drag or arrows to pan. Wheel, pinch
-        or + / - to zoom. Click a drone to select it. Keys: f fit, 0 reset, v 3D, m messages, Esc.</p>
+        or + / - to zoom. Click a node to select it. Keys: f fit, 0 reset, v 3D, m messages, Esc.</p>
 
       <!-- Per-type filters; only shown while message animation is on. -->
       <div class="flow-bar" id="flow-bar" hidden>
@@ -117,7 +117,7 @@
       </div>
 
       <div id="inspector" class="inspector" aria-live="polite">
-        <p class="empty">Hover or click a drone to inspect it.</p>
+        <p class="empty">Hover or click a node to inspect it.</p>
       </div>
     </section>
 
@@ -143,15 +143,15 @@
         </div>
       </form>
 
-      <h2>Chaos (all drones)</h2>
+      <h2>Chaos (all nodes)</h2>
       <div class="row">
         <button type="button" id="chaos-clear-all" class="btn">Clear all delays</button>
       </div>
-      <p class="hint">Per-drone delay and kill are in the drone table. A killed drone exits
+      <p class="hint">Per-node delay and kill are in the node table. A killed node exits
         cleanly and stays down (only crashes are restarted), so the failover stays visible.</p>
 
       <details id="adv" class="adv">
-        <summary>Advanced: drone simulation</summary>
+        <summary>Advanced: latency simulation</summary>
         <p id="sim-unsupported" class="hint warn" hidden>The control center does not report a
           simulation config yet, so these controls are disabled.</p>
         <div class="adv-status">
@@ -160,31 +160,31 @@
         </div>
         <label class="chk strong"><input type="checkbox" id="sim-enabled"> latency emulation enabled</label>
         <div id="sim-sliders" class="sliders"></div>
-        <p class="eff">Reported by the drones: threshold <span id="eff-threshold" class="mono">-</span>,
+        <p class="eff">Reported by the nodes: threshold <span id="eff-threshold" class="mono">-</span>,
           hysteresis <span id="eff-hysteresis" class="mono">-</span></p>
         <div class="row">
           <button type="button" class="btn" id="sim-randomize">Randomize positions</button>
           <button type="button" class="btn" id="sim-reset-pos">Reset positions</button>
-          <button type="button" class="btn" id="sim-clear-election" title="Clear the threshold and hysteresis overrides so every drone uses its own configured values">Use drones' own threshold/hysteresis</button>
+          <button type="button" class="btn" id="sim-clear-election" title="Clear the threshold and hysteresis overrides so every node uses its own configured values">Use nodes' own threshold/hysteresis</button>
         </div>
-        <h3>Drone position</h3>
-        <label>Drone
-          <select id="drone-sel"><option value="">(select a drone)</option></select>
+        <h3>Node position</h3>
+        <label>Node
+          <select id="node-sel"><option value="">(select a node)</option></select>
         </label>
         <div id="pos-sliders" class="sliders"></div>
         <p id="sim-msg" class="form-msg" role="status" aria-live="polite"></p>
         <h3>Blender</h3>
         <p class="eff">Build a 3D project from this swarm, and edit it from either side.
           The add-on polls the same feed this page uses, so a slider change here moves
-          the drone in Blender, and "Push positions" there moves it here.</p>
+          the node in Blender, and "Push positions" there moves it here.</p>
         <pre class="cmd"><code>python3 blender/make_swarm_scene.py
 blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json</code></pre>
         <p class="eff">See <code>blender/README.md</code>.</p>
       </details>
     </section>
 
-    <section class="panel nodes-panel" aria-label="Drones">
-      <h2>Drones</h2>
+    <section class="panel nodes-panel" aria-label="Nodes">
+      <h2>Nodes</h2>
       <div class="table-wrap">
         <table id="node-table">
           <thead>

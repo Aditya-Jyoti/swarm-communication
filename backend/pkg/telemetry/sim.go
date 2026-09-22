@@ -11,9 +11,9 @@ import (
 )
 
 // SanitizeSimConfig returns p with every value forced into its legal range, the
-// node-side rule for SIM_CONFIG (docs/architecture/drone-simulation.md):
+// node-side rule for SIM_CONFIG (docs/architecture/latency-simulation.md):
 //
-//   - positions are clamped into the airspace (geo.ClampPosition);
+//   - positions are clamped into the space (geo.ClampPosition);
 //   - base, per-unit and jitter are clamped (geo.Params.Clamp);
 //   - a threshold outside (0, 1], or NaN, becomes 0, "keep the node's own";
 //   - a NaN or infinite hysteresis becomes -1, "keep the node's own". A
@@ -54,7 +54,7 @@ type simSnapshot struct {
 	params    geo.Params
 }
 
-// Emulation is a node's view of the drone simulation: the last SIM_CONFIG it
+// Emulation is a node's view of the latency simulation: the last SIM_CONFIG it
 // applied, and the per-peer PONG delay derived from it.
 //
 // # Synchronisation

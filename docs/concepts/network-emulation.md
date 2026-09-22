@@ -8,7 +8,7 @@ outline: deep
 
 On one Docker bridge, every node is about 0.1 ms from every other one. A latency-driven election
 has nothing to work with. Emulation adds a fake, controlled delay so the measured latency
-follows a picture: drones in a 3D airspace.
+follows a picture: nodes in a 3D space.
 
 ## Core Mental Model
 
@@ -83,12 +83,12 @@ flowchart LR
 
 - The EWMA decides **how fast** the score follows a move.
 - Hysteresis decides **how big** a difference must be to act on.
-- Rule of thumb: $m$ must exceed the smoothed jitter, or near-equal drones swap roles on noise.
+- Rule of thumb: $m$ must exceed the smoothed jitter, or near-equal nodes swap roles on noise.
 
 ## Why It Matters in This Swarm
 
 - `backend/pkg/geo/geo.go`: `Delay` computes the one-way delay and caps it at 1500 ms, below
-  the 2 s probe timeout in `backend/pkg/health/latency.go`. A far drone is slow, not dead.
+  the 2 s probe timeout in `backend/pkg/health/latency.go`. A far node is slow, not dead.
 - `backend/pkg/network/prober.go`: `SetPeerDelay` installs the hook, `replyDelay` adds it to
   the CHAOS delay for each PONG. Only PONGs are delayed, so heartbeats keep their timing and
   failure detection is untouched.
@@ -96,7 +96,7 @@ flowchart LR
   `atomic.Pointer`, so the hot path of every PONG takes no lock.
 - `backend/pkg/health/latency.go`: the EWMA (`DefaultAlpha = 0.3`).
 - `backend/pkg/cluster/node.go`: `selfScore` takes the median of the smoothed RTTs, so a
-  central drone scores best.
+  central node scores best.
 - `backend/pkg/cluster/election.go` and `backend/pkg/cluster/affinity.go`: the hysteresis
   margin, which the dashboard slider can change at run time (`backend/pkg/cluster/tuning.go`).
 - `frontend/app.js`: the "predicted" link label uses the mean, $jitter / 2$, because that is
@@ -106,18 +106,18 @@ flowchart LR
 
 | Symptom | Cause |
 |---|---|
-| nodes flap to `suspect` when drones move apart | the delay was put on heartbeats, not only PONGs |
+| nodes flap to `suspect` when nodes move apart | the delay was put on heartbeats, not only PONGs |
 | measured RTT is twice the predicted delay | both sides delay, or the delay was added to PING and PONG |
-| a far drone is marked unreachable | the delay was not capped below the probe timeout |
+| a far node is marked unreachable | the delay was not capped below the probe timeout |
 | leaders swap every few seconds with high jitter | the margin is below the smoothed jitter. Raise hysteresis. |
-| a moved drone keeps its group for several seconds | the EWMA is catching up (about 7 probes for 90%). Expected. |
+| a moved node keeps its group for several seconds | the EWMA is catching up (about 7 probes for 90%). Expected. |
 | hysteresis 0 and leaders swap on every probe | 0 really means no damping at run time |
 | `tc netem` fails inside the container | `CAP_NET_ADMIN` is dropped. Use the application-level delay. |
 | delayed replies leak goroutines on shutdown | the timer wait does not also watch a context. The prober selects on its own context. |
 
 ## Further Reading
 
-- [Drone Simulation](/architecture/drone-simulation)
+- [Latency Simulation](/architecture/latency-simulation)
 - [Latency as a Statistic](/concepts/latency-as-a-statistic)
 - [Idempotence and Hysteresis](/concepts/idempotence-and-hysteresis)
 - [Cooperative vs Uncooperative Failure Injection](/concepts/cooperative-vs-uncooperative-failure-injection)

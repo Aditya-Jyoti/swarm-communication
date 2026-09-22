@@ -132,7 +132,7 @@ func (c Config) withDefaults() Config {
 // # Goroutine ownership
 //
 //   - The hub (Run's goroutine) is the single owner of all CC state: nodes,
-//     tasks, browsers, the drone simulation. Everyone else talks to it by posting closures on ops
+//     tasks, browsers, the latency simulation. Everyone else talks to it by posting closures on ops
 //     (do waits for the result, post does not). One writer means no locks on
 //     that state and one answer to "who changed this node's role".
 //   - The accept loop and one goroutine per node socket (serveNode), plus

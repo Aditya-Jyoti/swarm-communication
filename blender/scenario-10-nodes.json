@@ -2,9 +2,9 @@
   "schema": "swarm-scene/1",
   "_doc": {
     "what": "One self-describing snapshot of the swarm, enough to build or update a Blender scene.",
-    "coordinates": "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks metres, Z up. Every drone therefore carries BOTH: position_units (what you POST to /api/sim to move it) and location_m (what goes in object.location). world.metres_per_unit is the only conversion factor; X and Y are centred on the origin, Z stays an altitude above the ground plane.",
-    "latency": "The Control Center emulates network latency from distance: a drone delays its PONG by base + distance * per_unit + jitter. Election ranks drones by their median measured RTT, so central drones become leaders, and every worker joins the leader it measures as closest. links[].rtt_ms is what was really measured; links[].predicted_one_way_ms is what the model asks for. A measured round trip is about one one-way delay plus real network time.",
-    "editing": "This file is a snapshot, not the source of truth. To MOVE a drone, POST its position_units to the Control Center (see write_back) and the swarm re-groups for real; the next snapshot then shows it. Editing location_m here only moves the render.",
+    "coordinates": "The swarm speaks an abstract 0..100 cube (backend/pkg/geo). Blender speaks metres, Z up. Every node therefore carries BOTH: position_units (what you POST to /api/sim to move it) and location_m (what goes in object.location). world.metres_per_unit is the only conversion factor; X and Y are centred on the origin, Z stays a height above the ground plane.",
+    "latency": "The Control Center emulates network latency from distance: a node delays its PONG by base + distance * per_unit + jitter. Election ranks nodes by their median measured RTT, so central nodes become leaders, and every worker joins the leader it measures as closest. links[].rtt_ms is what was really measured; links[].predicted_one_way_ms is what the model asks for. A measured round trip is about one one-way delay plus real network time.",
+    "editing": "This file is a snapshot, not the source of truth. To MOVE a node, POST its position_units to the Control Center (see write_back) and the swarm re-groups for real; the next snapshot then shows it. Editing location_m here only moves the render.",
     "animation": "timeline is optional. With --frames the generator samples repeatedly and records one entry per sample, so the Blender add-on can key positions, roles and cluster colours over time and you can watch a failover as an animation."
   },
   "meta": {
@@ -16,7 +16,7 @@
     "leader_count": 3
   },
   "world": {
-    "_doc": "Airspace and unit conversion. size is in swarm units; the cube is size^3.",
+    "_doc": "Space and unit conversion. size is in swarm units; the cube is size^3.",
     "size_units": 100,
     "metres_per_unit": 20.0,
     "size_m": 2000.0,
@@ -76,10 +76,10 @@
       ]
     }
   ],
-  "drones": [
+  "nodes": [
     {
       "id": "seed",
-      "object_name": "Drone_seed",
+      "object_name": "Node_seed",
       "role": "leader",
       "state": "alive",
       "connected": true,
@@ -119,7 +119,7 @@
     },
     {
       "id": "swarm-net-node-1",
-      "object_name": "Drone_swarm-net-node-1",
+      "object_name": "Node_swarm-net-node-1",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -159,7 +159,7 @@
     },
     {
       "id": "swarm-net-node-2",
-      "object_name": "Drone_swarm-net-node-2",
+      "object_name": "Node_swarm-net-node-2",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -199,7 +199,7 @@
     },
     {
       "id": "swarm-net-node-3",
-      "object_name": "Drone_swarm-net-node-3",
+      "object_name": "Node_swarm-net-node-3",
       "role": "leader",
       "state": "alive",
       "connected": true,
@@ -239,7 +239,7 @@
     },
     {
       "id": "swarm-net-node-4",
-      "object_name": "Drone_swarm-net-node-4",
+      "object_name": "Node_swarm-net-node-4",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -279,7 +279,7 @@
     },
     {
       "id": "swarm-net-node-6",
-      "object_name": "Drone_swarm-net-node-6",
+      "object_name": "Node_swarm-net-node-6",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -319,7 +319,7 @@
     },
     {
       "id": "swarm-net-node-7",
-      "object_name": "Drone_swarm-net-node-7",
+      "object_name": "Node_swarm-net-node-7",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -359,7 +359,7 @@
     },
     {
       "id": "swarm-net-node-8",
-      "object_name": "Drone_swarm-net-node-8",
+      "object_name": "Node_swarm-net-node-8",
       "role": "worker",
       "state": "alive",
       "connected": true,
@@ -399,7 +399,7 @@
     },
     {
       "id": "swarm-net-node-9",
-      "object_name": "Drone_swarm-net-node-9",
+      "object_name": "Node_swarm-net-node-9",
       "role": "leader",
       "state": "alive",
       "connected": true,
@@ -3163,12 +3163,12 @@
     ]
   },
   "write_back": {
-    "_doc": "How to push a change back into the running swarm. The Blender add-on uses this when you drag a drone and press Push; the dashboard's Advanced panel sends the same request.",
+    "_doc": "How to push a change back into the running swarm. The Blender add-on uses this when you drag a node and press Push; the dashboard's Advanced panel sends the same request.",
     "endpoint": "POST {base}/api/sim",
     "content_type": "application/json",
     "move_example": {
       "positions": {
-        "<drone id>": {
+        "<node id>": {
           "x": 10.0,
           "y": 80.0,
           "z": 35.0
@@ -3191,21 +3191,21 @@
     "kill_example": {
       "endpoint": "POST {base}/api/chaos",
       "body": {
-        "node": "<drone id>",
+        "node": "<node id>",
         "action": "kill"
       }
     },
     "notes": [
       "Positions are in swarm units (0..100), not metres: divide metres by world.metres_per_unit.",
-      "A killed drone stays dead; bring it back with `docker compose up -d`."
+      "A killed node stays dead; bring it back with `docker compose up -d`."
     ]
   },
   "blender": {
     "_doc": "Hints for the add-on. Safe to edit: they change the render, not the swarm.",
     "collection": "Swarm",
-    "drone_mesh": "cone",
-    "drone_size_m": 12.0,
-    "label_drones": true,
+    "node_mesh": "cone",
+    "node_size_m": 12.0,
+    "label_nodes": true,
     "draw_links": "cluster",
     "draw_ground_grid": true,
     "animate_messages": true,
@@ -3223,7 +3223,7 @@
       {
         "t": 0.0,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3349,7 +3349,7 @@
       {
         "t": 1.002,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3475,7 +3475,7 @@
       {
         "t": 2.003,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3601,7 +3601,7 @@
       {
         "t": 3.004,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3727,7 +3727,7 @@
       {
         "t": 4.006,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3853,7 +3853,7 @@
       {
         "t": 5.008,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -3979,7 +3979,7 @@
       {
         "t": 6.01,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4105,7 +4105,7 @@
       {
         "t": 7.011,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4231,7 +4231,7 @@
       {
         "t": 8.013,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4357,7 +4357,7 @@
       {
         "t": 9.014,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4483,7 +4483,7 @@
       {
         "t": 10.015,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4609,7 +4609,7 @@
       {
         "t": 11.017,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4735,7 +4735,7 @@
       {
         "t": 12.018,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4861,7 +4861,7 @@
       {
         "t": 13.02,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -4987,7 +4987,7 @@
       {
         "t": 14.022,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5113,7 +5113,7 @@
       {
         "t": 15.023,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5239,7 +5239,7 @@
       {
         "t": 16.025,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5365,7 +5365,7 @@
       {
         "t": 17.026,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5491,7 +5491,7 @@
       {
         "t": 18.028,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5617,7 +5617,7 @@
       {
         "t": 19.03,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5743,7 +5743,7 @@
       {
         "t": 20.031,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5869,7 +5869,7 @@
       {
         "t": 21.033,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -5995,7 +5995,7 @@
       {
         "t": 22.034,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6121,7 +6121,7 @@
       {
         "t": 23.036,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6247,7 +6247,7 @@
       {
         "t": 24.037,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6373,7 +6373,7 @@
       {
         "t": 25.039,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6499,7 +6499,7 @@
       {
         "t": 26.041,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6625,7 +6625,7 @@
       {
         "t": 27.043,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6751,7 +6751,7 @@
       {
         "t": 28.046,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -6877,7 +6877,7 @@
       {
         "t": 29.048,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7003,7 +7003,7 @@
       {
         "t": 30.05,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7129,7 +7129,7 @@
       {
         "t": 31.052,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7255,7 +7255,7 @@
       {
         "t": 32.054,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7381,7 +7381,7 @@
       {
         "t": 33.055,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7507,7 +7507,7 @@
       {
         "t": 34.057,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7633,7 +7633,7 @@
       {
         "t": 35.059,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7759,7 +7759,7 @@
       {
         "t": 36.06,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -7885,7 +7885,7 @@
       {
         "t": 37.062,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8011,7 +8011,7 @@
       {
         "t": 38.064,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8137,7 +8137,7 @@
       {
         "t": 39.065,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8263,7 +8263,7 @@
       {
         "t": 40.067,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8389,7 +8389,7 @@
       {
         "t": 41.068,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8515,7 +8515,7 @@
       {
         "t": 42.07,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8641,7 +8641,7 @@
       {
         "t": 43.073,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8767,7 +8767,7 @@
       {
         "t": 44.074,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -8893,7 +8893,7 @@
       {
         "t": 45.076,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9019,7 +9019,7 @@
       {
         "t": 46.078,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9145,7 +9145,7 @@
       {
         "t": 47.079,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9271,7 +9271,7 @@
       {
         "t": 48.081,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9397,7 +9397,7 @@
       {
         "t": 49.082,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9523,7 +9523,7 @@
       {
         "t": 50.084,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9649,7 +9649,7 @@
       {
         "t": 51.086,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9775,7 +9775,7 @@
       {
         "t": 52.087,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -9901,7 +9901,7 @@
       {
         "t": 53.089,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10027,7 +10027,7 @@
       {
         "t": 54.091,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10153,7 +10153,7 @@
       {
         "t": 55.092,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10279,7 +10279,7 @@
       {
         "t": 56.094,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10405,7 +10405,7 @@
       {
         "t": 57.095,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10531,7 +10531,7 @@
       {
         "t": 58.097,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10657,7 +10657,7 @@
       {
         "t": 59.1,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10783,7 +10783,7 @@
       {
         "t": 60.102,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -10909,7 +10909,7 @@
       {
         "t": 61.105,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11035,7 +11035,7 @@
       {
         "t": 62.107,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11161,7 +11161,7 @@
       {
         "t": 63.109,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11287,7 +11287,7 @@
       {
         "t": 64.11,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11413,7 +11413,7 @@
       {
         "t": 65.112,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11539,7 +11539,7 @@
       {
         "t": 66.114,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11665,7 +11665,7 @@
       {
         "t": 67.116,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11791,7 +11791,7 @@
       {
         "t": 68.118,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -11917,7 +11917,7 @@
       {
         "t": 69.121,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12043,7 +12043,7 @@
       {
         "t": 70.122,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12169,7 +12169,7 @@
       {
         "t": 71.124,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12295,7 +12295,7 @@
       {
         "t": 72.126,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12409,7 +12409,7 @@
       {
         "t": 73.128,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12523,7 +12523,7 @@
       {
         "t": 74.13,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12637,7 +12637,7 @@
       {
         "t": 75.132,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12751,7 +12751,7 @@
       {
         "t": 76.134,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12865,7 +12865,7 @@
       {
         "t": 77.136,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -12979,7 +12979,7 @@
       {
         "t": 78.138,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13093,7 +13093,7 @@
       {
         "t": 79.14,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13207,7 +13207,7 @@
       {
         "t": 80.142,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13321,7 +13321,7 @@
       {
         "t": 81.144,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13435,7 +13435,7 @@
       {
         "t": 82.146,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13549,7 +13549,7 @@
       {
         "t": 83.148,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13663,7 +13663,7 @@
       {
         "t": 84.15,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13777,7 +13777,7 @@
       {
         "t": 85.152,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -13891,7 +13891,7 @@
       {
         "t": 86.155,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [
@@ -14005,7 +14005,7 @@
       {
         "t": 87.157,
         "interval_s": 1.0,
-        "drones": [
+        "nodes": [
           {
             "id": "seed",
             "location_m": [

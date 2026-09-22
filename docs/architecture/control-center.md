@@ -10,7 +10,7 @@ The Control Center (CC) is one Go process with three jobs:
 2. Serve a JSON API and a WebSocket feed.
 3. Send `TASK` to leaders, `CHAOS` to any node, and `SIM_CONFIG` to every node.
 
-It also owns the [drone simulation](./drone-simulation): every drone's position, the latency
+It also owns the [latency simulation](./latency-simulation): every node's position, the latency
 model and the election overrides.
 
 It does **not** serve the dashboard. The `frontend` nginx container does that and forwards API
@@ -195,7 +195,7 @@ Browser to server (also the POST bodies, where `type` is optional):
 - `count` defaults to 1, at most 100.
 - `action` is `kill`, `delay` (0 to 5000 ms) or `clear`.
 - A `sim` message has no reply. The browser sees the result in the `sim` event and the next
-  snapshot. The full field list is in [Drone Simulation](./drone-simulation#_7-http-and-websocket).
+  snapshot. The full field list is in [Latency Simulation](./latency-simulation#_7-http-and-websocket).
 
 Server to browser, every second (shortened):
 
@@ -270,4 +270,4 @@ WebSockets go first because the HTTP server's shutdown does not close them. See
 - [WebSocket Framing and the HTTP Upgrade](/concepts/websocket-framing-and-upgrade)
 - [CSP, Channels and the Memory Model](/concepts/csp-channels-and-memory-model)
 - [Running the Swarm](./running-the-swarm)
-- [Drone Simulation](./drone-simulation)
+- [Latency Simulation](./latency-simulation)

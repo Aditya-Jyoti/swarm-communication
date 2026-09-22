@@ -60,7 +60,7 @@ local values stay local. Common ones:
 | `SWARM_ELECTION_FLOOR` | periodic re-election, on top of event-driven ones |
 | `SWARM_LOG_LEVEL` | `debug`, `info`, `warn` or `error` |
 | `SWARM_CC_API_TOKEN` | optional API token. Empty = no auth. See below. |
-| `SWARM_SIM_ENABLED` | start with emulated drone latency on (default `true`) |
+| `SWARM_SIM_ENABLED` | start with emulated node latency on (default `true`) |
 | `SWARM_SIM_BASE_MS` | emulated latency, fixed part in ms, 0..500 (default `1`) |
 | `SWARM_SIM_PER_UNIT_MS` | emulated latency per unit of distance in ms, 0..10 (default `2`) |
 | `SWARM_SIM_JITTER_MS` | largest random extra delay in ms, 0..200 (default `0.5`) |
@@ -72,7 +72,7 @@ See `.env.example` for the full list and defaults.
 
 The `SWARM_SIM_*` values are read by the CC at start-up only (flags `-sim-enabled`,
 `-sim-base-ms`, `-sim-per-unit-ms`, `-sim-jitter-ms`). A value out of range is a config error.
-The dashboard changes them at run time. See [Drone Simulation](./drone-simulation).
+The dashboard changes them at run time. See [Latency Simulation](./latency-simulation).
 
 ### Protecting the API
 
@@ -123,18 +123,18 @@ hostname instead.
 |---|---|
 | top bar | connection state |
 | summary | node, leader and pending task counts |
-| airspace | **3D airspace** (default) or **Grouped** (one circle per cluster, workers inside) |
+| space | **3D space** (default) or **Grouped** (one circle per cluster, workers inside) |
 | message animation | dots per message type, with a legend that toggles each type |
-| inspector | hover or click a drone: position, role, RTTs, predicted delays |
+| inspector | hover or click a node: position, role, RTTs, predicted delays |
 | broadcast task | pick a kind, a JSON body and a count |
-| Advanced: drone simulation | latency sliders, election overrides, positions |
-| drone table | role, term, leader, x / y / z, peers, chaos buttons |
+| Advanced: latency simulation | latency sliders, election overrides, positions |
+| node table | role, term, leader, x / y / z, peers, chaos buttons |
 | tasks and events | newest first |
 
-State is never shown by colour alone: leaders are larger with an "L", suspect drones are dashed,
-dead drones have an X, drones cut off from the CC are hollow, killed drones are grey crosses.
+State is never shown by colour alone: leaders are larger with an "L", suspect nodes are dashed,
+dead nodes have an X, nodes cut off from the CC are hollow, killed nodes are grey crosses.
 
-### Airspace controls
+### Topology controls
 
 | Input | Action |
 |---|---|
@@ -142,23 +142,23 @@ dead drones have an X, drones cut off from the CC are hollow, killed drones are 
 | shift-drag, right-drag, two fingers | pan |
 | wheel, pinch, `+` / `-` | zoom |
 | arrow keys | orbit |
-| `f` or Fit | frame every drone |
+| `f` or Fit | frame every node |
 | `0` or Reset view | reset the camera |
-| click a drone | select and focus it |
+| click a node | select and focus it |
 | `Esc` | clear the selection |
 | Fullscreen | full screen, or a maximised panel where the browser refuses |
 
 Link labels show the distance, the measured RTT and the predicted delay. "all peer links" and
-"link labels" are toggles above the view. Click the airspace first so the keys reach it.
+"link labels" are toggles above the view. Click the space first so the keys reach it.
 
 ### Advanced panel
 
 - Sliders: base, per unit, jitter, threshold, hysteresis, plus an enable switch.
 - Randomize positions, Reset positions.
-- **Use drones' own threshold/hysteresis** clears the overrides. Each drone goes back to its
+- **Use nodes' own threshold/hysteresis** clears the overrides. Each node goes back to its
   own `SWARM_THRESHOLD` and hysteresis.
-- Pick a drone and move it with the x / y / z sliders.
-- **applied on X/N** shows how many live drones run the newest config.
+- Pick a node and move it with the x / y / z sliders.
+- **applied on X/N** shows how many live nodes run the newest config.
 
 Try it: move a worker next to another leader, and within a few seconds it re-homes. Set the
 threshold to 0.5 and watch the leader count grow.
@@ -183,7 +183,7 @@ blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json
 
 The add-on polls the same `/api/state` the dashboard uses, so a slider move here shows up
 there within a second, and moving a cone in Blender plus **Push positions** moves the real
-drone. Full reference: [Blender Scene Tooling](./blender-scene).
+node. Full reference: [Blender Scene Tooling](./blender-scene).
 
 ## Break it
 
@@ -205,7 +205,7 @@ curl -s -H 'Content-Type: application/json' \
 curl -s 127.0.0.1:8080/api/state | jq '.nodes[] | {id, role, leader, connected}'
 ```
 
-### Killed drones stay down
+### Killed nodes stay down
 
 Node containers use `restart: on-failure`:
 
@@ -215,9 +215,9 @@ Node containers use `restart: on-failure`:
 | crash or config error | non-zero | yes |
 | `docker kill` / `docker stop` | any | no, under any policy |
 
-- The dashboard shows a chaos-killed drone as `killed` for 30s, then drops it.
+- The dashboard shows a chaos-killed node as `killed` for 30s, then drops it.
 - If the same ID connects again, the mark is cleared.
-- Bring killed drones back with:
+- Bring killed nodes back with:
 
 ```bash
 docker compose up -d
@@ -258,7 +258,7 @@ flowchart LR
 | 5-6 | `docker kill` a leader, a new leader appears, survivors re-attach |
 | 7 | a task batch finishes again |
 | 8 | CHAOS kill a worker: exit code 0, not restarted after `E2E_KILL_WAIT` s, shown as `killed`, swarm healthy |
-| 9 | `POST /api/sim` sets `per_unit_ms`: newer version, applied by the connected drones (`sim_version`), swarm healthy |
+| 9 | `POST /api/sim` sets `per_unit_ms`: newer version, applied by the connected nodes (`sim_version`), swarm healthy |
 
 It checks the exact leader count from the formula, not just "at least one".
 
@@ -285,7 +285,7 @@ an operator would, and checks each against what the design predicts:
 
 | Phase | Change | Expected |
 |---|---|---|
-| 1 baseline | reset positions | the most central drones lead, every worker on its nearest leader |
+| 1 baseline | reset positions | the most central nodes lead, every worker on its nearest leader |
 | 2 workload | 30 tasks | all done, spread over the clusters |
 | 3 fly | park a worker beside another leader | it re-homes, or is elected leader if that spot made it central |
 | 4 stretch | `per_unit_ms` 2 to 5 | every RTT scales, so the groups hold |
@@ -294,17 +294,17 @@ an operator would, and checks each against what the design predicts:
 | 7 restore | clear the overrides | back to $\max(1, \lceil N \times 0.3 \rceil)$ |
 
 ```bash
-NODE_REPLICAS=9 docker compose up -d          # 10 drones
-python3 scripts/simulate.py --record blender/scenario-10-drones.json
-docker compose up -d                          # bring the killed drone back
+NODE_REPLICAS=9 docker compose up -d          # 10 nodes
+python3 scripts/simulate.py --record blender/scenario-10-nodes.json
+docker compose up -d                          # bring the killed node back
 ```
 
 A phase passes only once the swarm is correct **and unchanged for 8s**. Scores are
 EWMA-smoothed and hysteresis holds a leader, so a swarm can look right for a moment and
 then legitimately re-elect; judging too early blames the next phase for it.
 
-`--record` writes a Blender timeline of the whole run. `blender/scenario-10-drones.json`
-is one such recording from 10 drones: the failover at about 41s and the threshold change
+`--record` writes a Blender timeline of the whole run. `blender/scenario-10-nodes.json`
+is one such recording from 10 nodes: the failover at about 41s and the threshold change
 at about 51s are both in it.
 
 ## Without Docker
@@ -332,9 +332,9 @@ port 8080. A chaos kill ends the process for good here, since nothing restarts i
 | dashboard loads but shows no data | check that `control-center` is running: `docker compose ps` |
 | a node exits with code 2 and restarts in a loop | config error. The first log line says which. |
 | node IDs look like `3f9c0a1b2c4d` | the name lookup failed. Still works. |
-| a chaos-killed drone never comes back | expected. Run `docker compose up -d`. |
-| a chaos-killed drone comes back at once | the `node` service lost `restart: on-failure`, or the node exited non-zero |
+| a chaos-killed node never comes back | expected. Run `docker compose up -d`. |
+| a chaos-killed node comes back at once | the `node` service lost `restart: on-failure`, or the node exited non-zero |
 | Advanced panel is disabled | the CC reports no `sim` config. The CC image is older than the frontend. |
-| "applied on" stays below N | some drones are not connected to the CC. Check `docker compose logs node`. |
+| "applied on" stays below N | some nodes are not connected to the CC. Check `docker compose logs node`. |
 | all RTTs are below 1 ms | emulation is off (`SWARM_SIM_ENABLED=false` or the switch in the panel) |
 | local run: nodes never find each other | `-advertise` is missing or not dialable |
