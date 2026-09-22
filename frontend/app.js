@@ -68,10 +68,24 @@
   var SIM_THROTTLE_MS = 150;
   var SLIDER_HOLD_MS = 1500;  // after the last touch, the user owns the slider
 
-  var TASK_DEFAULTS = {
-    echo: '{\n  "msg": "hello swarm"\n}',
-    sleep: '{\n  "ms": 200\n}',
-    hash: '{\n  "data": "abc"\n}'
+  // The three built-in task kinds (backend/pkg/cluster/executor.go). The form
+  // asks for one plain value and builds the JSON body from it.
+  var TASK_KINDS = {
+    echo: {
+      desc: "A worker replies with your text.",
+      label: "Text", type: "text", value: "hello swarm",
+      body: function (v) { return { msg: v }; }
+    },
+    hash: {
+      desc: "A worker replies with the SHA-256 of your text.",
+      label: "Text to hash", type: "text", value: "abc",
+      body: function (v) { return { data: v }; }
+    },
+    sleep: {
+      desc: "A worker waits, then replies. Useful for watching tasks pile up.",
+      label: "Wait (ms, up to 10000)", type: "number", value: "200", max: 10000,
+      body: function (v) { return { ms: Number(v) }; }
+    }
   };
 
   var KNOWN_STATES = { alive: 1, suspect: 1, dead: 1 };
@@ -2908,22 +2922,35 @@
   // ---------------------------------------------------------------- task form
 
   function initTaskForm() {
-    var kindSel = $("task-kind");
-    var body = $("task-body");
+    var kindBtns = document.querySelectorAll(".task-kinds .btn");
+    var input = $("task-input");
     var count = $("task-count");
     var msgEl = $("task-msg");
-    var lastDefault = TASK_DEFAULTS[kindSel.value];
-    body.value = lastDefault;
+    var kind = "echo";
+    // What the user typed for each kind, so switching back keeps it.
+    var values = {};
+    Object.keys(TASK_KINDS).forEach(function (k) { values[k] = TASK_KINDS[k].value; });
 
-    kindSel.addEventListener("change", function () {
-      var def = TASK_DEFAULTS[kindSel.value] || "{}";
-      // Only overwrite the body if the user has not edited it.
-      if (body.value.trim() === "" || body.value === lastDefault) body.value = def;
-      lastDefault = def;
-      body.classList.remove("invalid");
+    function pick(k) {
+      values[kind] = input.value;
+      kind = k;
+      var def = TASK_KINDS[k];
+      kindBtns.forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.kind === k)); });
+      setText($("task-desc"), def.desc);
+      setText($("task-input-lbl"), def.label);
+      input.type = def.type;
+      if (def.type === "number") { input.min = "0"; input.max = String(def.max); }
+      else { input.removeAttribute("min"); input.removeAttribute("max"); }
+      input.value = values[k];
+      input.classList.remove("invalid");
+    }
+
+    kindBtns.forEach(function (b) {
+      b.addEventListener("click", function () { pick(b.dataset.kind); });
     });
+    pick(kind);
 
-    body.addEventListener("input", function () { body.classList.remove("invalid"); });
+    input.addEventListener("input", function () { input.classList.remove("invalid"); });
 
     function say(text, cls) {
       msgEl.textContent = text;
@@ -2932,22 +2959,24 @@
 
     $("task-form").addEventListener("submit", function (ev) {
       ev.preventDefault();
-      var parsed;
-      try {
-        parsed = body.value.trim() === "" ? {} : JSON.parse(body.value);
-      } catch (e) {
-        body.classList.add("invalid");
-        say("body is not valid JSON: " + e.message, "err");
-        return;
+      var def = TASK_KINDS[kind];
+      if (def.type === "number") {
+        var ms = Number(input.value);
+        if (input.value.trim() === "" || !isFinite(ms) || ms < 0 || ms > def.max) {
+          input.classList.add("invalid");
+          say("enter a number from 0 to " + def.max, "err");
+          return;
+        }
       }
       var n = Math.round(Number(count.value));
       if (!isFinite(n) || n < 1) n = 1;
       if (n > 100) n = 100;
       count.value = String(n);
-      var msg = { type: "task", kind: kindSel.value, body: parsed, count: n };
+      var sentKind = kind;
+      var msg = { type: "task", kind: sentKind, body: def.body(input.value), count: n };
       say("sending...", "");
       send(msg).then(function (via) {
-        say("sent " + n + " " + kindSel.value + " task" + (n === 1 ? "" : "s") + " (" + via + ")", "ok");
+        say("sent " + n + " " + sentKind + " task" + (n === 1 ? "" : "s") + " (" + via + ")", "ok");
       }).catch(function (err) {
         say("failed: " + err.message, "err");
       });

@@ -122,23 +122,24 @@
     </section>
 
     <section class="panel task-panel" aria-label="Submit tasks">
-      <h2>Broadcast task</h2>
+      <h2>Send a task</h2>
+      <p class="hint">Each task goes to a leader, which hands it to one of its workers.
+        The reply shows up in the Tasks table.</p>
       <form id="task-form" autocomplete="off">
-        <label>Kind
-          <select id="task-kind">
-            <option value="echo">echo</option>
-            <option value="sleep">sleep</option>
-            <option value="hash">hash</option>
-          </select>
+        <span class="seg task-kinds" role="group" aria-label="Task type">
+          <button type="button" class="btn" data-kind="echo" aria-pressed="true">Echo</button>
+          <button type="button" class="btn" data-kind="hash" aria-pressed="false">Hash</button>
+          <button type="button" class="btn" data-kind="sleep" aria-pressed="false">Sleep</button>
+        </span>
+        <p class="hint" id="task-desc"></p>
+        <label><span id="task-input-lbl">Text</span>
+          <input id="task-input" type="text" spellcheck="false">
         </label>
-        <label>Body (JSON)
-          <textarea id="task-body" rows="4" spellcheck="false"></textarea>
-        </label>
-        <label>Count
+        <label>How many
           <input id="task-count" type="number" min="1" max="100" value="1">
         </label>
         <div class="row">
-          <button type="submit" class="btn primary">Submit</button>
+          <button type="submit" class="btn primary">Send</button>
           <span id="task-msg" class="form-msg" role="status" aria-live="polite"></span>
         </div>
       </form>

@@ -250,7 +250,7 @@ h2 { font-size: 15px; margin-bottom: 8px; }
 /* ---------- forms and buttons ---------- */
 
 form label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
-select, textarea, input {
+select, input {
   display: block;
   width: 100%;
   margin-top: 3px;
@@ -261,13 +261,14 @@ select, textarea, input {
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-textarea { resize: vertical; }
-textarea.invalid { border-color: var(--dead); outline: 2px solid var(--dead); }
+input.invalid { border-color: var(--dead); outline: 2px solid var(--dead); }
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .form-msg { font-size: 12px; color: var(--muted); }
 .form-msg.err { color: var(--dead); font-weight: 600; }
 .form-msg.ok { color: var(--alive); }
+.task-kinds { margin-bottom: 4px; }
+.task-panel form .hint { margin: 6px 0 10px; }
 
 .btn {
   font: 600 12px var(--sans);
