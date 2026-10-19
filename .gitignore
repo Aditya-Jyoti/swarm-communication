@@ -24,3 +24,6 @@ docs/.vitepress/cache/
 # Python bytecode (the Blender tooling)
 __pycache__/
 *.pyc
+
+# Python venv for the optional pymavlink conformance test
+.venv/
