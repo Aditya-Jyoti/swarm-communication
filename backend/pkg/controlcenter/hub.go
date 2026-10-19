@@ -454,6 +454,12 @@ func (h *hub) event(kind string, node protocol.NodeID, detail string) {
 		return
 	}
 	h.broadcast(b)
+	if h.s.sink != nil {
+		// Still on the hub goroutine: a sink must not block and must not call
+		// back into the CC. See Config.EventSink. The dashboard is served
+		// first, so a misbehaving sink cannot delay the browsers.
+		h.s.sink(kind, node, detail)
+	}
 }
 
 func (h *hub) snapshot() Snapshot {

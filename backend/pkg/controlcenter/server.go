@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"swarm-net/pkg/geo"
+	"swarm-net/pkg/mavlink"
 	"swarm-net/pkg/network"
+	"swarm-net/pkg/protocol"
 )
 
 // Defaults for Config.
@@ -75,6 +77,22 @@ type Config struct {
 	// A pointer because the zero Params is a legal model, not "unset".
 	// Default geo.DefaultParams().
 	SimParams *geo.Params
+	// MAVLink, when non-nil, runs the MAVLink bridge alongside the hub: every
+	// node becomes a vehicle in a ground station. New binds its UDP socket and
+	// Run serves it. Source is filled in here and any value set by the caller
+	// is replaced -- the CC is the only swarm the bridge may read.
+	// See mavlink.go and docs/architecture/mavlink-bridge.md.
+	MAVLink *mavlink.BridgeConfig
+	// EventSink, if non-nil, is called for every event the dashboard gets:
+	// node_up, node_down, leader_change, and the rest (see the Event* kinds).
+	//
+	// It runs ON the hub goroutine, so it must not block, must not panic, and
+	// must not call back into the Server -- a do from inside an op deadlocks.
+	// The MAVLink bridge's OnEvent is written to that contract; it is a
+	// non-blocking enqueue. A sink rather than a poll because an event is a
+	// moment, and polling for moments either misses them or holds a queue
+	// nobody owns.
+	EventSink func(kind string, node protocol.NodeID, detail string)
 	// Rand returns a uniform draw in [0, 1) for randomized positions.
 	// Called only from the hub. Default math/rand/v2's Float64.
 	Rand func() float64
@@ -158,6 +176,12 @@ type Server struct {
 
 	// tokenSum is sha256(cfg.APIToken), fixed at New. Read-only afterwards.
 	tokenSum [sha256.Size]byte
+	// mav is the MAVLink bridge, nil when disabled. Fixed at New; it owns its
+	// own state and goroutines, and Run joins it. Read-only afterwards.
+	mav *mavlink.Bridge
+	// sink is cfg.EventSink, composed with the bridge's. Fixed at New,
+	// read-only afterwards, and called only from the hub goroutine.
+	sink func(kind string, node protocol.NodeID, detail string)
 	// handshakes is a semaphore of MaxPendingHandshakes slots. The accept
 	// loop takes a slot without blocking; serveNode returns it when the
 	// handshake ends either way.
@@ -183,7 +207,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("controlcenter: listen for nodes on %s: %w", cfg.NodeListen, err)
 	}
-	return &Server{
+	s := &Server{
 		cfg:        cfg,
 		log:        cfg.Logger.With("node", NodeID),
 		ln:         ln,
@@ -192,7 +216,35 @@ func New(cfg Config) (*Server, error) {
 		tokenSum:   sha256.Sum256([]byte(cfg.APIToken)),
 		handshakes: make(chan struct{}, cfg.MaxPendingHandshakes),
 		socks:      make(map[net.Conn]struct{}),
-	}, nil
+		sink:       cfg.EventSink,
+	}
+	if cfg.MAVLink != nil {
+		// A copy: the caller's struct is theirs, and Source must be ours.
+		bc := *cfg.MAVLink
+		bc.Source = mavSource{s}
+		if bc.Logger == nil {
+			bc.Logger = cfg.Logger
+		}
+		if bc.Now == nil {
+			bc.Now = cfg.Now
+		}
+		br, err := mavlink.NewBridge(bc)
+		if err != nil {
+			_ = ln.Close()
+			return nil, fmt.Errorf("controlcenter: mavlink bridge: %w", err)
+		}
+		s.mav = br
+		s.sink = chainSinks(cfg.EventSink, br.OnEvent)
+	}
+	return s, nil
+}
+
+// MAVAddr is the bridge's bound UDP address, or nil when the bridge is off.
+func (s *Server) MAVAddr() net.Addr {
+	if s.mav == nil {
+		return nil
+	}
+	return s.mav.Addr()
 }
 
 // NodeAddr is the bound node listener address.
@@ -207,6 +259,21 @@ func (s *Server) Run(ctx context.Context) error {
 	s.wg.Add(1)
 	go s.acceptLoop()
 	s.log.Info("accepting nodes", "addr", s.ln.Addr())
+
+	// The bridge goroutine. Counted in wg like every other, and it returns
+	// when ctx is cancelled -- the same ctx the hub watches -- so it is always
+	// joined by the Wait below. It is started before the hub so that a ground
+	// station connecting at the same moment as the first node is already
+	// learned; it simply has no vehicles until its first sync.
+	if s.mav != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			if err := s.mav.Run(ctx); err != nil {
+				s.log.Error("mavlink bridge stopped early", "err", err)
+			}
+		}()
+	}
 
 	h := newHub(s)
 	h.run(ctx)
