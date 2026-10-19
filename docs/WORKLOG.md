@@ -1642,3 +1642,51 @@ Chaos kills still trigger failover: the margin only damps peaceful takeovers.
 | Mission | 4 and 6 item uploads accepted, armed, started, all items reached |
 | Migration | Owner killed mid-mission: vehicle went silent, remaining items flew on a new leader's cluster |
 | Failover | `node_down` CRITICAL then `leader_change`, delivered to two stations at once |
+
+## 2026-10-20 -- Ground station phase: progress report
+
+### 13.1 What shipped
+
+| Piece | State |
+|---|---|
+| MAVLink v2 protocol, 28 messages | Done, cross-checked against pymavlink both directions |
+| Bridge: every node a vehicle | Done, verified on an 11-node swarm |
+| Swarm-level missions | Done: upload to a leader, its cluster splits the waypoints |
+| Mission migration on leader death | Done, the headline result |
+| Arm, takeoff, land, return, mission start | Done; arming gates mission execution |
+| Health, GPS, battery, HUD, attitude | Done, so a ground station shows a ready vehicle |
+| `MAV_MOTION=drift|patrol|still` | Done, patrol for demos |
+| `GET /metrics` (Prometheus) | Done, 338 series on an 11-node swarm |
+
+### 13.2 Verified end to end
+
+A 14-item QGC survey plan (`test-mission-1.plan`) uploaded to a leader, armed and started:
+
+```
+t+17.6s  waypoint 0 reached              (the owner's cluster)
+t+23.2s  waypoints 1, 2 reached
+t+24.5s  node_down: swarm-net-node-1 (killed)     CRITICAL
+t+25.0s  mission moved here: 10 items left        (a different vehicle)
+t+29.4s  ... all 11 remaining waypoints reached, finishing t+61.6s
+```
+
+All 14 items completed although the vehicle the mission was uploaded to was dead.
+
+### 13.3 Demo settings
+
+A 100 m box (`MAV_METRES_PER_UNIT=1`) sized to that survey, origin at 12.844715 / 80.156063,
+3 m/s mission flight, patrol idle motion, `SWARM_THRESHOLD=0.2` for bigger clusters, and
+`SWARM_SIM_HYSTERESIS=40` so leadership holds steady while drones fly.
+
+### 13.4 Bugs only a live swarm found
+
+System ids allocated upward (so a kill reported the wrong aircraft), altitude measured from
+the wrong datum, mission legs cancelled every second by a stale position sync, and -- the
+instructive one -- an unreachable `MAV_GCS` whose ICMP port-unreachable was reported on the
+NEXT send, starving the real ground station. Each is written up in section 12.3.
+
+### 13.5 Not done
+
+Vehicle count in the metrics (the bridge does not export it), per-node flow counters, a
+histogram for task durations (the hub keeps no buckets), and physics of any kind -- vehicles
+translate at constant speed. Synthetic fields are listed in the contract, section 9.
