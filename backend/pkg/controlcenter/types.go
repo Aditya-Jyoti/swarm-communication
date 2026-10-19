@@ -11,6 +11,7 @@ package controlcenter
 import (
 	"encoding/json"
 
+	"swarm-net/pkg/mavlink"
 	"swarm-net/pkg/protocol"
 )
 
@@ -56,6 +57,14 @@ type Snapshot struct {
 	Sim      SimView    `json:"sim"`
 	Nodes    []NodeView `json:"nodes"`
 	Tasks    []TaskView `json:"tasks"`
+	// Missions is the MAVLink bridge's mission state, absent when the bridge
+	// is disabled or holds no mission. The dashboard maps an item to a node
+	// through MissionItemView.Node, so Nodes needs nothing added to it.
+	//
+	// The type lives in pkg/mavlink because the bridge owns the state and
+	// builds the value; the shape is documented in section 5 of
+	// docs/architecture/mavlink-bridge.md.
+	Missions []mavlink.MissionView `json:"missions,omitempty"`
 }
 
 // SimView is the CC's latency-simulation settings as the browser sees them: in

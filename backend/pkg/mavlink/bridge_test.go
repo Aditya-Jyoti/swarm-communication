@@ -54,14 +54,16 @@ func (c *testClock) advance(d time.Duration) {
 // fakeSwarm is a SwarmSource with no Control Center behind it. Mutex-guarded:
 // the bridge's syncer calls it, and tests read what it recorded.
 type fakeSwarm struct {
-	mu        sync.Mutex
-	nodes     []NodeState
-	pushed    map[protocol.NodeID]protocol.Position
-	pushes    int
-	nodesErr  error
-	pushedSig chan struct{} // closed-on-first-push signal, may be nil
-	tasks     []MissionTask
-	taskErr   error
+	mu         sync.Mutex
+	nodes      []NodeState
+	pushed     map[protocol.NodeID]protocol.Position
+	pushes     int
+	nodesErr   error
+	pushedSig  chan struct{} // closed-on-first-push signal, may be nil
+	tasks      []MissionTask
+	taskErr    error
+	missions   []MissionView
+	missionSig chan struct{} // closed on the first SetMissions, may be nil
 }
 
 func newFakeSwarm(nodes ...NodeState) *fakeSwarm {
@@ -107,6 +109,34 @@ func (f *fakeSwarm) SetPositions(_ context.Context, pos map[protocol.NodeID]prot
 		f.pushedSig = nil
 	}
 	return nil
+}
+
+// SetMissions records what the bridge publishes.
+func (f *fakeSwarm) SetMissions(_ context.Context, ms []MissionView) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.missions = ms
+	if f.missionSig != nil {
+		close(f.missionSig)
+		f.missionSig = nil
+	}
+	return nil
+}
+
+// publishedMissions is the last view SetMissions was given.
+func (f *fakeSwarm) publishedMissions() []MissionView {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.missions
+}
+
+// onMissions returns a channel closed by the next SetMissions, so a test can
+// wait for the bridge's own tick instead of sleeping.
+func (f *fakeSwarm) onMissions() chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.missionSig = make(chan struct{})
+	return f.missionSig
 }
 
 func (f *fakeSwarm) set(nodes ...NodeState) {
