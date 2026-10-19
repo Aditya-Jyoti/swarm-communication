@@ -10,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"swarm-net/pkg/controlcenter"
 	"swarm-net/pkg/geo"
@@ -47,6 +48,9 @@ type Config struct {
 	// Out of range is a config error here, unlike the API, which clamps: a
 	// typo in a compose file should stop the CC, not be quietly corrected.
 	SimParams geo.Params
+	// SimHysteresis is the starting election margin pushed to every node, or
+	// negative for "leave each node's own". SWARM_SIM_HYSTERESIS.
+	SimHysteresis float64
 	// MAV is the MAVLink bridge configuration. Off unless MAV_ENABLED.
 	MAV MAVSettings
 	// Version is set by -version; nothing else is meaningful then.
@@ -116,6 +120,7 @@ var settings = []setting{
 	{"sim-base-ms", "SIM_BASE_MS", fmtFloat(geo.DefaultBaseMS), "emulated latency: fixed part, ms", false},
 	{"sim-per-unit-ms", "SIM_PER_UNIT_MS", fmtFloat(geo.DefaultPerUnitMS), "emulated latency: ms per unit of distance", false},
 	{"sim-jitter-ms", "SIM_JITTER_MS", fmtFloat(geo.DefaultJitterMS), "emulated latency: maximum random extra, ms", false},
+	{"sim-hysteresis", "SIM_HYSTERESIS", "-1", "election margin pushed to every node; -1 leaves each node's own", false},
 
 	{flag: "mav-enabled", env: "MAV_ENABLED", def: "false", usage: "expose every node to a ground station over MAVLink", noPrefix: true},
 	{flag: "mav-bind", env: "MAV_BIND", def: mavlink.DefaultBind, usage: "UDP bind address for MAVLink", noPrefix: true},
@@ -206,6 +211,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	// Hysteresis spans [-1, maxSimHysteresis]: -1 is the documented "leave each
+	// node's own margin alone", so it cannot go through parseRange's [0, max].
+	if cfg.SimHysteresis, err = parseSpan("sim-hysteresis", *raw["sim-hysteresis"], -1, maxSimHysteresis); err != nil {
+		return Config{}, err
+	}
 	if cfg.MAV, err = loadMAV(raw); err != nil {
 		return Config{}, err
 	}
@@ -263,6 +273,11 @@ func loadMAV(raw map[string]*string) (MAVSettings, error) {
 }
 
 // parseRange parses a float in [0, max].
+// maxSimHysteresis caps the start-up election margin. It matches the API's own
+// cap: the margin is in score units, and a score is an emulated round trip in
+// milliseconds, so geo.MaxDelay is the largest margin that can mean anything.
+const maxSimHysteresis = float64(geo.MaxDelay / time.Millisecond)
+
 func parseRange(name, raw string, max float64) (float64, error) {
 	return parseSpan(name, raw, 0, max)
 }

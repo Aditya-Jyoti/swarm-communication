@@ -30,7 +30,8 @@ func TestLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	simDefaults := geo.DefaultParams()
-	if cfg != (Config{NodeListen: ":7000", HTTPListen: ":8080", LogLevel: slog.LevelInfo, SimEnabled: true, SimParams: simDefaults, MAV: defaultMAV()}) {
+	// SimHysteresis -1 is "leave each node's own election margin alone".
+	if cfg != (Config{NodeListen: ":7000", HTTPListen: ":8080", LogLevel: slog.LevelInfo, SimEnabled: true, SimParams: simDefaults, SimHysteresis: -1, MAV: defaultMAV()}) {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 
@@ -39,7 +40,7 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (Config{NodeListen: "0.0.0.0:9000", HTTPListen: ":9090", LogLevel: slog.LevelDebug, SimEnabled: true, SimParams: simDefaults, MAV: defaultMAV()}) {
+	if cfg != (Config{NodeListen: "0.0.0.0:9000", HTTPListen: ":9090", LogLevel: slog.LevelDebug, SimEnabled: true, SimParams: simDefaults, SimHysteresis: -1, MAV: defaultMAV()}) {
 		t.Fatalf("env = %+v", cfg)
 	}
 

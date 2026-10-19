@@ -97,11 +97,12 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 		return fmt.Errorf("control-center: listen http on %s: %w", cfg.HTTPListen, err)
 	}
 	ccCfg := controlcenter.Config{
-		NodeListen:  cfg.NodeListen,
-		APIToken:    cfg.APIToken,
-		SimDisabled: !cfg.SimEnabled,
-		SimParams:   &cfg.SimParams,
-		Logger:      log,
+		NodeListen:    cfg.NodeListen,
+		APIToken:      cfg.APIToken,
+		SimDisabled:   !cfg.SimEnabled,
+		SimParams:     &cfg.SimParams,
+		SimHysteresis: &cfg.SimHysteresis,
+		Logger:        log,
 	}
 	if cfg.MAV.Enabled {
 		// Off by default: the bridge binds a UDP port and emits telemetry for

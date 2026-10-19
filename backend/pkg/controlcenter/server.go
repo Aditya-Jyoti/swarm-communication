@@ -73,6 +73,13 @@ type Config struct {
 	// SimDisabled starts the CC with the emulated latency switched off.
 	// Inverted so the zero value is the contract default (enabled).
 	SimDisabled bool
+	// SimHysteresis is the starting election-margin override pushed to every
+	// node, or negative for "none, use each node's own". A flying swarm needs a
+	// stiffer margin than a static one: position drives emulated latency, so
+	// movement alone can flip an election. See docs/architecture/mavlink-bridge.md.
+	// A pointer because 0 is a real margin ("any improvement wins"), so the zero
+	// value cannot stand for "unset".
+	SimHysteresis *float64
 	// SimParams is the starting latency model, clamped to geo's ranges.
 	// A pointer because the zero Params is a legal model, not "unset".
 	// Default geo.DefaultParams().

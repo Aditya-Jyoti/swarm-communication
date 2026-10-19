@@ -64,10 +64,14 @@ func newSimState(cfg Config) simState {
 	if cfg.SimParams != nil {
 		params = cfg.SimParams.Clamp()
 	}
+	hysteresis := float64(noHysteresis)
+	if cfg.SimHysteresis != nil && *cfg.SimHysteresis >= 0 {
+		hysteresis = min(*cfg.SimHysteresis, maxHysteresis)
+	}
 	return simState{
 		enabled:    !cfg.SimDisabled,
 		params:     params,
-		hysteresis: noHysteresis,
+		hysteresis: hysteresis,
 		positions:  make(map[protocol.NodeID]protocol.Position),
 	}
 }

@@ -135,3 +135,42 @@ func TestMAVSettingsBridge(t *testing.T) {
 		t.Errorf("Bridge() = %+v", bc)
 	}
 }
+
+// TestSimHysteresisConfig: the start-up election margin. -1 means "leave each
+// node's own alone", and 0 is a real value (any improvement wins), which is why
+// the Server takes a pointer.
+func TestSimHysteresisConfig(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want float64
+		bad  bool
+	}{
+		{raw: "", want: -1},
+		{raw: "0", want: 0},
+		{raw: "0.8", want: 0.8},
+		{raw: "-1", want: -1},
+		{raw: "-2", bad: true},
+		{raw: "99999", bad: true},
+		{raw: "nonsense", bad: true},
+	} {
+		t.Run("hysteresis="+tc.raw, func(t *testing.T) {
+			env := map[string]string{}
+			if tc.raw != "" {
+				env["SWARM_SIM_HYSTERESIS"] = tc.raw
+			}
+			cfg, err := Load(nil, func(k string) string { return env[k] })
+			if tc.bad {
+				if err == nil {
+					t.Fatalf("%q was accepted, got %v", tc.raw, cfg.SimHysteresis)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%q: %v", tc.raw, err)
+			}
+			if cfg.SimHysteresis != tc.want {
+				t.Errorf("SimHysteresis = %v, want %v", cfg.SimHysteresis, tc.want)
+			}
+		})
+	}
+}

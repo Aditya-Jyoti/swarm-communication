@@ -106,12 +106,26 @@ services:
       SWARM_SIM_BASE_MS: "${SWARM_SIM_BASE_MS:-1}"
       SWARM_SIM_PER_UNIT_MS: "${SWARM_SIM_PER_UNIT_MS:-2}"
       SWARM_SIM_JITTER_MS: "${SWARM_SIM_JITTER_MS:-0.5}"
+      # Election margin pushed to every node, in milliseconds of RTT. A
+      # challenger must beat the sitting leader by this much to displace it.
+      # The node default is 0.5ms, which is right for a static swarm and far
+      # too twitchy for a flying one: at 2ms per unit, a drone crossing the
+      # cube swings scores by hundreds of milliseconds, so leadership flaps
+      # every few seconds. 40ms is about 20 units, or 100m at this scale.
+      # -1 leaves each node's own margin alone.
+      SWARM_SIM_HYSTERESIS: "${SWARM_SIM_HYSTERESIS:--1}"
       # MAVLink bridge: every node becomes a vehicle in a ground station
       # (docs/architecture/mavlink-bridge.md). Off unless MAV_ENABLED=true.
       # The bridge SENDS to MAV_GCS, so a ground station on the Docker host is
       # reached through host.docker.internal (see extra_hosts below).
       MAV_ENABLED: "${MAV_ENABLED:-false}"
-      MAV_GCS: "${MAV_GCS:-host.docker.internal:14550}"
+      # Empty by default: a ground station dials IN to the published port below
+      # and the bridge learns its address. Pointing this at an unreachable host
+      # is actively harmful -- the ICMP port-unreachable it provokes surfaces as
+      # an error on the NEXT sendto on this socket, which is the one aimed at the
+      # real ground station, so messages to it are dropped intermittently.
+      # Set it only for a station that cannot dial in.
+      MAV_GCS: "${MAV_GCS-}"
       MAV_ORIGIN_LAT: "${MAV_ORIGIN_LAT:-12.843736}"
       MAV_ORIGIN_LON: "${MAV_ORIGIN_LON:-80.154725}"
       MAV_ORIGIN_ALT: "${MAV_ORIGIN_ALT:-15}"
