@@ -70,6 +70,33 @@ with distance and RTT, and animates messages between nodes.
 These are start-up values for the CC. The panel changes them at run time. Details:
 [Latency Simulation](docs/architecture/latency-simulation.md).
 
+## QGroundControl
+
+Every node can appear in QGroundControl, or any MAVLink ground station, as its own vehicle.
+
+```bash
+MAV_ENABLED=true docker compose up -d
+```
+
+Then in QGC: **Application Settings -> Comm Links -> Add**, type UDP, listening port 14550,
+with `127.0.0.1:14555` as a target host. Ten nodes show up as ten vehicles within a second or
+two.
+
+- **Vehicle numbers follow node names.** `swarm-net-node-3` is vehicle 3; `seed` is 254.
+- **Leaders report a different custom mode** from workers, so the vehicle list shows roles.
+- **A killed node stops heartbeating**, so QGC reports the link lost. Leadership changes
+  arrive as `STATUSTEXT`.
+- **Nodes drift** slowly around their home position. `MAV_DRIFT=false` holds them still, which
+  is what you want when debugging clustering: position drives emulated latency, so drift makes
+  election results jitter.
+
+Positions are shared with the latency simulation, so a node that moves really does get slower
+RTTs to its peers and election follows. QGC and the dashboard cannot disagree.
+
+`MAV_ORIGIN_LAT` / `MAV_ORIGIN_LON` set the lab origin and `MAV_METRES_PER_UNIT` the scale
+(`5` makes the cube a 500 m area). Details:
+[MAVLink Bridge](docs/architecture/mavlink-bridge.md).
+
 ## Blender
 
 ```bash
