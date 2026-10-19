@@ -54,21 +54,22 @@ func TestSysIDAssignment(t *testing.T) {
 	if id, err := v.SysID("swarm-net-node-3"); err != nil || id != 3 {
 		t.Fatalf("node-3 got (%d, %v), want 3", id, err)
 	}
-	// Rule 2: no digits means lowest free. 1 is free even though 3 is taken.
-	if id, err := v.SysID("seed"); err != nil || id != 1 {
-		t.Fatalf("seed got (%d, %v), want 1", id, err)
+	// Rule 2: no digits means highest free, so the low ids stay clear for the
+	// nodes that have a claim on them. Assigning upward instead let "seed" take
+	// id 1 and pushed every numbered node off its own number.
+	if id, err := v.SysID("seed"); err != nil || id != 254 {
+		t.Fatalf("seed got (%d, %v), want 254", id, err)
 	}
-	if id, err := v.SysID("control"); err != nil || id != 2 {
-		t.Fatalf("control got (%d, %v), want 2", id, err)
+	if id, err := v.SysID("control"); err != nil || id != 253 {
+		t.Fatalf("control got (%d, %v), want 253", id, err)
 	}
-	// 3 is taken, so the next digit-less node skips it.
-	if id, err := v.SysID("observer"); err != nil || id != 4 {
-		t.Fatalf("observer got (%d, %v), want 4", id, err)
+	if id, err := v.SysID("observer"); err != nil || id != 252 {
+		t.Fatalf("observer got (%d, %v), want 252", id, err)
 	}
 	// A collision on the preferred id is a naming clash, not an error: the second
 	// node still gets a working vehicle.
-	if id, err := v.SysID("other-3"); err != nil || id != 5 {
-		t.Fatalf("other-3 got (%d, %v), want 5 (lowest free after a collision)", id, err)
+	if id, err := v.SysID("other-3"); err != nil || id != 251 {
+		t.Fatalf("other-3 got (%d, %v), want 251 (highest free after a collision)", id, err)
 	}
 
 	if v.Len() != 5 {
@@ -243,5 +244,40 @@ func TestVehiclesZeroValueMapsAreInitialised(t *testing.T) {
 	}
 	if node, ok := v.Node(9); !ok || node != "swarm-net-node-9" {
 		t.Errorf("Node(9) = (%q, %v)", node, ok)
+	}
+}
+
+// TestSysIDIgnoresArrivalOrder is a regression test for a bug that reached a
+// running swarm: ids were allocated upward from 1, so "seed" (no digits, and it
+// sorts first) took id 1 and every numbered node was pushed off its own number.
+// A ground station then showed node-3 as vehicle 4, and a kill of node-3
+// reported vehicle 4 going down -- the wrong aircraft.
+//
+// A node with digits must get its number whatever order the swarm connects in.
+func TestSysIDIgnoresArrivalOrder(t *testing.T) {
+	orders := [][]protocol.NodeID{
+		{"seed", "swarm-net-node-1", "swarm-net-node-2", "swarm-net-node-3"},
+		{"swarm-net-node-3", "seed", "swarm-net-node-1", "swarm-net-node-2"},
+		{"swarm-net-node-2", "swarm-net-node-1", "swarm-net-node-3", "seed"},
+	}
+	for _, order := range orders {
+		t.Run(string(order[0])+"-first", func(t *testing.T) {
+			v := NewVehicles()
+			for _, node := range order {
+				if _, err := v.SysID(node); err != nil {
+					t.Fatalf("SysID(%q): %v", node, err)
+				}
+			}
+			for node, want := range map[protocol.NodeID]byte{
+				"swarm-net-node-1": 1,
+				"swarm-net-node-2": 2,
+				"swarm-net-node-3": 3,
+				"seed":             254,
+			} {
+				if got, _ := v.Lookup(node); got != want {
+					t.Errorf("%s got sysid %d, want %d", node, got, want)
+				}
+			}
+		})
 	}
 }

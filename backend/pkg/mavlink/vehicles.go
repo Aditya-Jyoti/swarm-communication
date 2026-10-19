@@ -95,7 +95,18 @@ func (v *Vehicles) SysID(node protocol.NodeID) (byte, error) {
 		// an arbitrary id and still works, just with a less readable capture.
 	}
 
-	for id := int(MinSysID); id <= int(MaxSysID); id++ {
+	// Allocate DOWNWARD from MaxSysID, not upward from MinSysID.
+	//
+	// Upward allocation makes every number depend on arrival order. "seed"
+	// carries no digits and sorts before "swarm-net-node-1", so it took id 1,
+	// and then every numbered node found its own number occupied and shifted:
+	// node-3 became vehicle 4 and node-4 became vehicle 9. A ground station
+	// then reports the wrong aircraft dying, which is worse than an ugly id.
+	//
+	// Going downward keeps the low ids clear for the nodes that have a claim on
+	// them, so a numbered node gets its number no matter when it connects, and
+	// the odd one out gets 254.
+	for id := int(MaxSysID); id >= int(MinSysID); id-- {
 		if _, taken := v.bySys[byte(id)]; !taken {
 			v.assignLocked(node, byte(id))
 			return byte(id), nil
