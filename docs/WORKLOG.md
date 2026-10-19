@@ -1591,3 +1591,54 @@ Docs commands now run inside `docs/`:
 ```bash
 cd docs && npm ci && npm run check   # ASCII, Mermaid, build
 ```
+
+## 2026-10-20 -- MAVLink bridge: the swarm in a ground station
+
+Every node appears in QGroundControl as its own vehicle, with telemetry and mission planning.
+Contract: `docs/architecture/mavlink-bridge.md`. No cluster or network code changed; the
+bridge is a second reader of positions the Control Center already owns.
+
+### 12.1 Why it is more than a map view
+
+Positions feed the latency model, so a drone that flies somewhere really does get slower RTTs
+and the election follows. QGC and the dashboard cannot disagree, because both read the same
+positions.
+
+### 12.2 Protocol, hand-rolled
+
+MAVLink v2 framing and 23 message codecs generated from the vendored dialect XML, with
+CRC_EXTRA computed from the XML rather than copied. Cross-checked against pymavlink in both
+directions, including byte equality of the two encoders, which pins field order, CRC_EXTRA and
+payload truncation at once.
+
+### 12.3 Four bugs that only a live swarm found
+
+| Bug | Symptom | Cause |
+|---|---|---|
+| System ids | node-3 was vehicle 4, so a kill reported the wrong aircraft | Ids allocated upward, so `seed` took 1 and pushed every numbered node off its number |
+| Altitude | The whole swarm read as sitting on the ground | Relative altitude measured from each vehicle's own drift centre, not the ground plane |
+| Missions cancelled | Vehicles crawled and never reached a waypoint | The 1 Hz swarm sync adopted a position that is always a tick stale, and adopting clears the flight target |
+| Telemetry starved | A fifth of the expected rate, `STATUSTEXT` missing | One learned station slot thrashed between two stations, and an unreachable `MAV_GCS` stole datagrams from live ones via ICMP reported on the next send |
+
+The last one is the instructive one. `MAV_GCS` pointed at a host where nothing listened. On an
+unconnected UDP socket Linux reports that ICMP port-unreachable on the NEXT `sendto`, which
+was the one aimed at the real ground station. Sends now retry once per destination, stations
+are a set with an idle timeout, and `MAV_GCS` defaults to empty.
+
+### 12.4 Election stability
+
+`SWARM_SIM_HYSTERESIS` is in milliseconds of RTT. The node default of 0.5 ms suits a static
+swarm; at 2 ms per unit, a drone crossing the cube swings scores by hundreds of milliseconds,
+so leadership flapped every few seconds. The compose default is now 40 ms, about 20 units.
+Chaos kills still trigger failover: the margin only damps peaceful takeovers.
+
+### 12.5 Verified against the live swarm
+
+| Check | Result |
+|---|---|
+| Vehicles | 11 nodes, 11 vehicles, sysid = node number, `seed` = 254 |
+| Rates | 1 Hz heartbeat and status, 5 Hz position, to every connected station |
+| Geometry | `z = 73.63` units reported as 368.1 m, exactly `z * 5` |
+| Mission | 4 and 6 item uploads accepted, armed, started, all items reached |
+| Migration | Owner killed mid-mission: vehicle went silent, remaining items flew on a new leader's cluster |
+| Failover | `node_down` CRITICAL then `leader_change`, delivered to two stations at once |
