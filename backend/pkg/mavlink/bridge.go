@@ -50,6 +50,10 @@ const (
 	// eventDepth bounds swarm events queued for STATUSTEXT. One per election or
 	// failure, so a burst is a whole swarm restarting.
 	eventDepth = 64
+	// taskDepth bounds waypoint tasks queued for the swarm. A task is submitted
+	// once per arrival, so this holds a whole swarm reaching waypoints at once
+	// while the hub is busy with an election.
+	taskDepth = 64
 
 	// positionEpsilon is how far the swarm's idea of a node's position may
 	// differ from what the bridge last pushed before the bridge concludes
@@ -95,6 +99,11 @@ type NodeState struct {
 	// Leader is true while the node reports role leader. It becomes
 	// HEARTBEAT.custom_mode.
 	Leader bool
+	// LeaderID is the node this one currently follows, empty for a node with no
+	// leader. It is how the bridge knows cluster membership, which a
+	// swarm-level mission needs: the items go to the leader's cluster. The
+	// bridge only observes it.
+	LeaderID protocol.NodeID
 	// Connected is false for a node that is killed, disconnected or expired. A
 	// vehicle heartbeats exactly while this is true, which is how a failover
 	// looks like a lost link in a ground station.
@@ -124,6 +133,12 @@ type SwarmSource interface {
 	// the whole map is passed rather than a delta: the receiver stores a
 	// snapshot and the call is idempotent.
 	SetPositions(ctx context.Context, positions map[protocol.NodeID]protocol.Position) error
+
+	// SubmitTask hands the swarm one task for a reached waypoint. Called from
+	// the bridge's task goroutine, never from its loop: submitting crosses into
+	// the swarm and can be slow exactly when a mission is interesting (mid
+	// election), and a ground station must keep being answered meanwhile.
+	SubmitTask(ctx context.Context, t MissionTask) error
 }
 
 // BridgeConfig configures a Bridge. Every zero value has a usable default
@@ -145,6 +160,10 @@ type BridgeConfig struct {
 	PositionInterval time.Duration
 	// SyncInterval is the swarm read/write period. Default 1s.
 	SyncInterval time.Duration
+	// MissionUploadTimeout abandons a transfer that stops making progress.
+	// Default DefaultMissionUploadTimeout. Without it a ground station that
+	// disappears mid-upload leaves the vehicle waiting for an item for ever.
+	MissionUploadTimeout time.Duration
 	// Source is the swarm. Required.
 	Source SwarmSource
 	// Now is the clock. Default time.Now. Socket deadlines do not use it: a
@@ -171,6 +190,9 @@ func (c BridgeConfig) withDefaults() BridgeConfig {
 	if c.SyncInterval <= 0 {
 		c.SyncInterval = DefaultSyncInterval
 	}
+	if c.MissionUploadTimeout <= 0 {
+		c.MissionUploadTimeout = DefaultMissionUploadTimeout
+	}
 	c.Move = c.Move.withDefaults()
 	if c.Now == nil {
 		c.Now = time.Now
@@ -187,6 +209,14 @@ type vehicle struct {
 	sysID  byte
 	mover  *Mover
 	leader bool
+	// leaderID is the node this one currently follows, which is how the bridge
+	// knows who is in whose cluster. It observes the swarm's election; it never
+	// influences it.
+	leaderID protocol.NodeID
+	// armed gates mission execution. A ground station's Arm button sets it, and
+	// MAV_CMD_MISSION_START refuses while it is false, so the flag means
+	// something instead of decorating a heartbeat.
+	armed bool
 	// connected gates every outbound message for this vehicle.
 	connected bool
 	// pushed is the position last handed to the swarm. An external move is
@@ -281,9 +311,20 @@ type Bridge struct {
 	boot    time.Time
 	lastPos time.Time
 
+	// missions is the stored mission per owning sysid, and uploads the
+	// transfers in flight. Both are keyed by sysid rather than node id: a
+	// mission belongs to the vehicle the ground station addressed, and it
+	// outlives the node dying (that is the point -- see mission.migrate).
+	missions map[byte]*mission
+	uploads  map[byte]*upload
+	// warnedMissionBroadcast keeps a confused ground station from filling the
+	// log: target_system 0 is refused once, not once per request.
+	warnedMissionBroadcast bool
+
 	inbox  chan datagram
 	events chan swarmEvent
 	syncs  chan syncReq
+	tasks  chan MissionTask
 }
 
 // NewBridge opens the UDP socket. Nothing is sent or received until Run.
@@ -323,9 +364,12 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 		out:        make([]byte, 0, MaxFrameLen),
 		boot:       cfg.Now(),
 		lastPos:    cfg.Now(),
+		missions:   make(map[byte]*mission),
+		uploads:    make(map[byte]*upload),
 		inbox:      make(chan datagram, inboxDepth),
 		events:     make(chan swarmEvent, eventDepth),
 		syncs:      make(chan syncReq),
+		tasks:      make(chan MissionTask, taskDepth),
 	}, nil
 }
 
@@ -398,9 +442,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); b.readLoop(ctx) }()
 	go func() { defer wg.Done(); b.syncLoop(ctx) }()
+	go func() { defer wg.Done(); b.taskLoop(ctx) }()
 
 	b.log.Info("mavlink bridge listening", "addr", b.conn.LocalAddr(), "gcs", b.cfg.GCS)
 	b.loop(ctx)
@@ -433,8 +478,13 @@ func (b *Bridge) loop(ctx context.Context) {
 			r.reply <- b.applyNodes(r.nodes)
 		case <-status.C:
 			b.tickStatus()
+			b.expireUploads()
 		case <-pos.C:
 			b.tickPositions()
+			// Mission progress runs at the position rate: arrivals are detected
+			// from the same movement step a ground station is watching, so
+			// MISSION_ITEM_REACHED cannot lag the position that caused it.
+			b.runMissions()
 		}
 	}
 }
@@ -503,6 +553,26 @@ func (b *Bridge) syncLoop(ctx context.Context) {
 	}
 }
 
+// taskLoop submits waypoint tasks to the swarm.
+//
+// Its own goroutine for the reason in SwarmSource.SubmitTask: the submission is
+// a call into the hub, and the bridge's loop must stay free to answer the
+// ground station while it happens. A failed submission is logged and dropped --
+// the waypoint has already been flown and reported, and re-queueing a task
+// behind a busy hub would trade a missing dashboard row for a growing backlog.
+func (b *Bridge) taskLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-b.tasks:
+			if err := b.cfg.Source.SubmitTask(ctx, t); err != nil && ctx.Err() == nil {
+				b.log.Warn("mavlink: submit waypoint task", "peer", t.Node, "seq", t.Seq, "err", err)
+			}
+		}
+	}
+}
+
 func (b *Bridge) syncOnce(ctx context.Context) {
 	nodes, err := b.cfg.Source.Nodes(ctx)
 	if err != nil {
@@ -565,13 +635,23 @@ func (b *Bridge) applyNodes(nodes []NodeState) map[protocol.NodeID]protocol.Posi
 		}
 		v.seen = true
 		v.leader = n.Leader
+		v.leaderID = n.LeaderID
 		v.connected = n.Connected
 		v.dropped = n.Dropped
 		v.ledger = n.LedgerSize
 
-		// External moves win. A mission in flight is the one case that should
-		// not be overridden by a stale slider -- that is the hook the mission
-		// task needs: skip the adoption while v.mover.Flying().
+		// External moves win, EXCEPT while the vehicle is flying a mission.
+		//
+		// Adopt clears the flight target, so adopting mid-mission cancels the
+		// leg. And the swarm's position for a flying node is always a little
+		// behind: the bridge moves it at 5 Hz and pushes once a second, so the
+		// snapshot that comes back is up to a tick stale and differs by more
+		// than the epsilon. Without this guard every mission leg was cancelled
+		// and reassigned once a second, which looked like vehicles crawling at
+		// half speed and never reaching a waypoint.
+		if v.mover.Flying() {
+			continue
+		}
 		if lenP(subP(n.Pos, v.pushed)) > positionEpsilon {
 			v.mover.Adopt(n.Pos)
 			v.pushed = n.Pos
@@ -585,6 +665,10 @@ func (b *Bridge) applyNodes(nodes []NodeState) map[protocol.NodeID]protocol.Posi
 			// Vehicles holds an assignment for the process's lifetime, so a
 			// node that comes back is the same vehicle rather than a second
 			// aircraft next to the dead one.
+			// Any mission item this node was flying goes back in the pool
+			// before the vehicle is forgotten, so a migration can hand it to a
+			// survivor instead of losing it.
+			b.releaseItems(id)
 			delete(b.vs, id)
 			pruned = true
 		}
@@ -665,7 +749,11 @@ func (b *Bridge) heartbeat(v *vehicle) *Heartbeat {
 	}
 	base := uint8(MavModeFlagCustomModeEnabled)
 	state := uint8(MavStateStandby)
-	if v.mover.Flying() {
+	if v.armed {
+		// Armed is what the ground station's Arm button sets, and it gates
+		// mission execution. Flying while disarmed is impossible, but a vehicle
+		// can be armed and holding station, which is what an operator expects to
+		// see before starting a mission.
 		base |= MavModeFlagSafetyArmed
 		state = MavStateActive
 	}
@@ -877,29 +965,54 @@ func (b *Bridge) onDatagram(d datagram) {
 		b.onParamRequestRead(msg)
 	case *CommandLong:
 		b.onCommandLong(f, msg)
+	case *MissionRequestList:
+		b.onMissionRequestList(f, msg)
+	case *MissionRequestInt:
+		b.onMissionRequest(f, msg.TargetSystem, msg.TargetComponent, msg.Seq, msg.MissionType)
+	case *MissionRequest:
+		// Legacy float variant. Answered with MISSION_ITEM_INT all the same:
+		// capabilities advertise MISSION_INT, and a station that asks the old
+		// way still understands the new reply.
+		b.onMissionRequest(f, msg.TargetSystem, msg.TargetComponent, msg.Seq, msg.MissionType)
+	case *MissionCount:
+		b.onMissionCount(f, msg)
+	case *MissionItemInt:
+		b.onMissionItemInt(f, msg)
+	case *MissionItem:
+		b.onMissionItem(f, msg)
+	case *MissionClearAll:
+		b.onMissionClearAll(f, msg)
+	case *MissionSetCurrent:
+		b.onMissionSetCurrent(f, msg)
+	case *MissionAck:
+		// The station acknowledging a download it asked for. Nothing to do, and
+		// nothing to warn about.
 	default:
 		// Everything else, HEARTBEAT from the ground station included, needs no
-		// answer. The mission protocol lands here: MISSION_* handling is a
-		// separate piece of work, and this is where it hooks in.
+		// answer.
 		b.log.Debug("mavlink: unhandled message", "msg", f.ID, "from", d.from)
 	}
 }
 
-// onCommandLong refuses every command, but refuses it explicitly.
+// onCommandLong runs a command and always answers.
 //
 // Silence is the one unacceptable answer: a ground station retries an
 // unacknowledged COMMAND_LONG for ever, so an ignored arm request becomes a
-// permanent retry storm and a user staring at a spinner. MAV_RESULT_UNSUPPORTED
-// is the honest reply -- these vehicles are a simulation of a swarm, and
-// nothing here can arm, take off or change mode.
+// permanent retry storm and a user staring at a spinner. runCommand handles arm,
+// takeoff, land, return and mission start; everything else is answered
+// MAV_RESULT_UNSUPPORTED, which is honest rather than silent.
 func (b *Bridge) onCommandLong(f *Frame, m *CommandLong) {
 	sysID, ok := b.targetSysID(m.TargetSystem)
 	if !ok {
 		return
 	}
+	result := uint8(MavResultUnsupported)
+	if v := b.vehicleBySysID(sysID); v != nil {
+		result = b.runCommand(v, m)
+	}
 	b.send(sysID, &CommandAck{
 		Command:         m.Command,
-		Result:          MavResultUnsupported,
+		Result:          result,
 		TargetSystem:    f.SysID,
 		TargetComponent: f.CompID,
 	})

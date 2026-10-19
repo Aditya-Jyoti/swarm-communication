@@ -61,10 +61,30 @@ type fakeSwarm struct {
 	pushes    int
 	nodesErr  error
 	pushedSig chan struct{} // closed-on-first-push signal, may be nil
+	tasks     []MissionTask
+	taskErr   error
 }
 
 func newFakeSwarm(nodes ...NodeState) *fakeSwarm {
 	return &fakeSwarm{nodes: nodes, pushed: map[protocol.NodeID]protocol.Position{}}
+}
+
+// SubmitTask records the tasks a reached waypoint submits.
+func (f *fakeSwarm) SubmitTask(_ context.Context, t MissionTask) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.taskErr != nil {
+		return f.taskErr
+	}
+	f.tasks = append(f.tasks, t)
+	return nil
+}
+
+// submittedTasks is a copy of what SubmitTask has seen.
+func (f *fakeSwarm) submittedTasks() []MissionTask {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]MissionTask(nil), f.tasks...)
 }
 
 func (f *fakeSwarm) Nodes(context.Context) ([]NodeState, error) {
@@ -360,12 +380,17 @@ func TestBridgeHeartbeatFields(t *testing.T) {
 	}{
 		{"idle worker", false, false, 0, MavModeFlagCustomModeEnabled, MavStateStandby},
 		{"idle leader", true, false, 1, MavModeFlagCustomModeEnabled, MavStateStandby},
-		{"flying leader", true, true, 1, MavModeFlagCustomModeEnabled | MavModeFlagSafetyArmed, MavStateActive},
+		// Armed is what the ground station's Arm button sets. Flying implies it
+		// in practice, because takeoff and mission start both refuse while
+		// disarmed, but the heartbeat reports the flag itself rather than
+		// inferring it from motion.
+		{"armed leader", true, true, 1, MavModeFlagCustomModeEnabled | MavModeFlagSafetyArmed, MavStateActive},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			v := b.vs["swarm-net-node-7"]
 			v.leader = tc.leader
+			v.armed = tc.flying
 			if tc.flying {
 				v.mover.SetTarget(at(60, 60, 60))
 			} else {
@@ -710,7 +735,7 @@ func TestBridgeAnswersParamRequestRead(t *testing.T) {
 	b.gcs.expectQuiet()
 }
 
-func TestBridgeAcksUnknownCommand(t *testing.T) {
+func TestBridgeAcksUnsupportedCommand(t *testing.T) {
 	swarm := newFakeSwarm(node("swarm-net-node-2", false, true, at(10, 10, 10)))
 	b := newTestBridge(t, swarm, nil)
 	b.sync(t)
@@ -721,13 +746,15 @@ func TestBridgeAcksUnknownCommand(t *testing.T) {
 		cmd    uint16
 		acked  bool
 	}{
-		{"arm", 2, MavCmdComponentArmDisarm, true},
-		{"takeoff", 2, MavCmdNavTakeoff, true},
-		{"set mode", 2, MavCmdDoSetMode, true},
+		// Commands this simulation has no meaning for are refused explicitly.
+		// Arm, takeoff, land, return and mission start are handled, and are
+		// covered by TestBridgeArming and the mission tests.
+		{"set servo", 2, 183, true},
+		{"video start", 2, 2500, true},
 		// Broadcast is acked once, by the lowest vehicle, not N times.
-		{"broadcast", 0, MavCmdMissionStart, true},
+		{"broadcast", 0, 183, true},
 		// A command for a vehicle that does not exist is not ours to answer.
-		{"unknown vehicle", 99, MavCmdNavLand, false},
+		{"unknown vehicle", 99, 183, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

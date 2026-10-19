@@ -2,6 +2,8 @@ package controlcenter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sort"
 
 	"swarm-net/pkg/geo"
@@ -60,7 +62,11 @@ func (h *hub) mavNodes() []mavlink.NodeState {
 			ID: id,
 			// A disconnected node's last report said "leader"; it is not one
 			// now, and a ground station must not show a dead leader's mode.
-			Leader:     connected && n.tel.Role == "leader",
+			Leader: connected && n.tel.Role == "leader",
+			// Who this node follows, for cluster membership. Empty while it is
+			// disconnected: a dead node's last known leader is not a cluster a
+			// mission should be handed to.
+			LeaderID:   leaderOf(connected, n.tel.Leader),
 			Connected:  connected,
 			Pos:        h.positionOf(id),
 			Dropped:    n.tel.Dropped,
@@ -69,6 +75,46 @@ func (h *hub) mavNodes() []mavlink.NodeState {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// leaderOf is the node's current leader, or empty while it is disconnected.
+func leaderOf(connected bool, leader protocol.NodeID) protocol.NodeID {
+	if !connected {
+		return ""
+	}
+	return leader
+}
+
+// SubmitTask implements mavlink.SwarmSource: a reached waypoint becomes a real
+// task on the swarm's own TASK / TASK_RESULT path.
+//
+// The body carries the waypoint, so the dashboard's task table shows which
+// mission item a row came from. Count is 1: one arrival is one task.
+func (m mavSource) SubmitTask(ctx context.Context, t mavlink.MissionTask) error {
+	body, err := json.Marshal(map[string]any{
+		"msg":  fmt.Sprintf("waypoint %d reached by %s", t.Seq, t.Node),
+		"node": string(t.Node),
+		"seq":  t.Seq,
+	})
+	if err != nil {
+		return err
+	}
+	var ids []string
+	if !m.s.do(ctx, func(h *hub) {
+		ids, err = h.submitTasks(ClientMessage{Kind: t.Kind, Body: body, Count: 1})
+	}) {
+		return ErrUnavailable
+	}
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		// submitTasks returns no ids when the swarm has no leader to take the
+		// task, which happens mid-election. Not an error worth retrying: the
+		// waypoint is already flown.
+		m.s.log.Debug("mavlink: waypoint task accepted by nobody", "peer", t.Node, "seq", t.Seq)
+	}
+	return nil
 }
 
 // mavSetPositions applies the bridge's positions. Hub-owned.
