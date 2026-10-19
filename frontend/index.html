@@ -73,7 +73,24 @@
         <span class="toolbar">
           <label class="chk"><input type="checkbox" id="show-peers"> all peer links</label>
           <label class="chk"><input type="checkbox" id="show-labels" checked> link labels</label>
+          <!-- Mission waypoints, route and assignment lines. On by default;
+               there is simply nothing to draw until a mission is uploaded. -->
+          <label class="chk"><input type="checkbox" id="show-mission" checked> mission overlay</label>
         </span>
+      </div>
+      <div class="panel-head sub-head">
+        <!-- Waypoints are numbered SQUARES, drones are circles, so the two
+             never read as the same thing even in greyscale. -->
+        <ul class="legend" aria-label="Mission legend">
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><g class="wp wps-flying"><rect x="4" y="4" width="12" height="12" rx="2" class="wp-mark"/></g></svg>waypoint flying (filled, ring)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><g class="wp wps-done"><rect x="4" y="4" width="12" height="12" rx="2" class="wp-mark"/></g></svg>done (filled, muted)</li>
+          <li><svg viewBox="0 0 20 20" aria-hidden="true"><g class="wp wps-pending"><rect x="4" y="4" width="12" height="12" rx="2" class="wp-mark"/></g></svg>pending (outline)</li>
+          <li><svg viewBox="0 0 24 20" aria-hidden="true"><line x1="2" y1="16" x2="22" y2="4" class="assign"/></svg>drone -&gt; its waypoint</li>
+          <li><svg viewBox="0 0 24 20" aria-hidden="true"><path d="M2,16L9,6L15,14L22,4" class="wp-route"/></svg>route, in sequence order</li>
+          <!-- Skipped items, and commands whose target is not known until a
+               vehicle takes them, have no coordinate: list rows only. -->
+          <li><span class="badge b-wp-skipped">skipped</span>in the Mission panel only (no position)</li>
+        </ul>
       </div>
 
       <div class="topo-wrap">
@@ -87,6 +104,13 @@
             <g id="g3-peers"></g>
             <g id="g3-links"></g>
             <g id="g3-dots"></g>
+            <!-- Mission overlay. Below g3-nodes on purpose: a waypoint marker
+                 must never hide the drone flying it. -->
+            <g id="g3-mission">
+              <g id="g3-mroute"></g>
+              <g id="g3-massign"></g>
+              <g id="g3-mmarks"></g>
+            </g>
             <g id="g3-nodes"></g>
             <g id="g3-labels"></g>
           </g>
@@ -182,6 +206,17 @@
 blender --python blender/swarm_blender.py -- --scene blender/swarm-scene.json</code></pre>
         <p class="eff">See <code>blender/README.md</code>.</p>
       </details>
+    </section>
+
+    <!-- Hidden until the snapshot carries a mission, so an older control
+         center (or an idle swarm) shows no empty panel at all. -->
+    <section class="panel mission-panel" id="mission-panel" aria-label="Mission" hidden>
+      <h2>Mission <span class="count" id="mission-count-label"></span></h2>
+      <p class="hint">A mission uploaded to a leader is flown by its whole cluster: each item goes
+        to the member closest to it. "Migrated" means a re-election handed the mission to another
+        node -- the items left over are now that node's to fly. Items with no position yet
+        (skipped ones, and a LAND or RTL nobody has picked up) are listed here but drawn nowhere.</p>
+      <div id="mission-body"></div>
     </section>
 
     <section class="panel nodes-panel" aria-label="Nodes">

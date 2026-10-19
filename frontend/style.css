@@ -19,6 +19,7 @@
   --leader-ring: #1b1f24;
   --row-hover: #eef1f5;
   --flash: rgba(36, 99, 209, 0.25);
+  --mission: #7b2d8e;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
 }
@@ -39,6 +40,7 @@
     --leader-ring: #e6e9ee;
     --row-hover: #1e242c;
     --flash: rgba(110, 160, 255, 0.3);
+    --mission: #e39bf5;
   }
 }
 
@@ -124,14 +126,16 @@ h2 { font-size: 15px; margin-bottom: 8px; }
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
   grid-template-areas:
-    "topo  task"
-    "nodes nodes"
-    "tasks events";
+    "topo    task"
+    "mission mission"
+    "nodes   nodes"
+    "tasks   events";
   gap: 12px;
   padding: 12px 20px 20px;
 }
-.topo-panel   { grid-area: topo; }
-.task-panel   { grid-area: task; }
+.topo-panel    { grid-area: topo; }
+.task-panel    { grid-area: task; }
+.mission-panel { grid-area: mission; }
 .nodes-panel  { grid-area: nodes; }
 .tasks-panel  { grid-area: tasks; }
 .events-panel { grid-area: events; }
@@ -139,7 +143,7 @@ h2 { font-size: 15px; margin-bottom: 8px; }
 @media (max-width: 900px) {
   .grid {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "topo" "task" "nodes" "tasks" "events";
+    grid-template-areas: "topo" "task" "mission" "nodes" "tasks" "events";
     padding: 12px;
   }
   .summary { padding: 12px 12px 0; }
@@ -578,3 +582,94 @@ tr.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
 .node.stacked .stack-edge { display: inline; }
 .node.stacked .n-shape { fill-opacity: 0.45; }
 .mode-cap { fill: var(--muted); font: 700 12px var(--sans); letter-spacing: 0.04em; pointer-events: none; }
+
+/* ---------- mission overlay ---------- */
+
+/* Waypoints are numbered rounded SQUARES; drones are circles. State is
+ * carried by fill (filled / hollow), stroke dash and a strike line, so the
+ * four states still separate in greyscale and from across a room.
+ * Geometry is set in app.js; only paint lives here. */
+
+.wp { cursor: help; }
+.wp-mark { stroke-width: 2.5; }
+.wp-body .wp-mark,
+.wp-body .wp-halo,
+.wp-body .wp-slash { vector-effect: non-scaling-stroke; }
+
+.wps-done    .wp-mark { fill: var(--muted);   fill-opacity: 0.85; stroke: var(--muted); }
+.wps-flying  .wp-mark { fill: var(--mission); fill-opacity: 1;    stroke: var(--fg); stroke-width: 3.5; }
+.wps-pending .wp-mark { fill: none; stroke: var(--mission); }
+.wps-skipped .wp-mark { fill: none; stroke: var(--muted); stroke-dasharray: 3 3; }
+
+.wp-slash { stroke: var(--muted); stroke-width: 2.5; stroke-linecap: round; }
+
+/* The one the eye should go to: a pulsing ring, plus the only filled-and
+ * outlined marker on screen. */
+.wp-halo {
+  fill: none;
+  stroke: var(--mission);
+  stroke-width: 3;
+  stroke-dasharray: 4 4;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.wp-seq {
+  font: 700 11px var(--sans);
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  fill: var(--fg);
+}
+.wps-done .wp-seq,
+.wps-flying .wp-seq { fill: var(--panel); }
+.wps-skipped .wp-seq { fill: var(--muted); }
+
+.wp-hit { fill: transparent; pointer-events: fill; }
+
+.wp.hl .wp-mark, .wp.sel .wp-mark { stroke: var(--accent); stroke-width: 4; }
+
+/* The route: thin, dotted, in sequence order. It is scenery, not a link. */
+.wp-route {
+  fill: none;
+  stroke: var(--mission);
+  stroke-opacity: 0.6;
+  stroke-width: 1.6;
+  stroke-dasharray: 3 4;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* Assignment line: drone -> the item it is flying. Marching dashes and a
+ * round cap set it apart from the solid cluster links and the hairline
+ * peer links without relying on its colour. */
+.assign {
+  fill: none;
+  stroke: var(--mission);
+  stroke-width: 2.4;
+  stroke-opacity: 0.95;
+  stroke-dasharray: 7 5;
+  stroke-linecap: round;
+  animation: march 0.9s linear infinite;
+}
+.assign.hl { stroke-width: 4; }
+@keyframes march { to { stroke-dashoffset: -12; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .wp-halo, .assign { animation: none !important; }
+}
+
+/* ---------- mission panel ---------- */
+
+.mission-block + .mission-block { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.mission-block.flash { animation: rowflash 1.6s ease-out 1; }
+.mission-mig { color: var(--degraded); font-weight: 700; }
+.wp-row.pick-row { cursor: pointer; }
+tr.wp-row.hl { background: var(--row-hover); outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.b-wp-done    { color: var(--muted); }
+.b-wp-flying  { color: var(--mission); border-width: 3px; }
+.b-wp-pending { color: var(--suspect); border-style: dashed; }
+.b-wp-skipped { color: var(--disconnected); border-style: dotted; text-decoration: line-through; }
+
+.ev-mission { border-left-color: var(--mission) !important; }
+.ev-mission .k { color: var(--mission); }
