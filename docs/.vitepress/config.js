@@ -51,6 +51,7 @@ export default withMermaid(defineConfig({
           { text: 'The Control Center', link: '/architecture/control-center' },
           { text: 'Latency Simulation', link: '/architecture/latency-simulation' },
           { text: 'Running the Swarm', link: '/architecture/running-the-swarm' },
+          { text: 'MAVLink Bridge', link: '/architecture/mavlink-bridge' },
           { text: 'Blender Scene Tooling', link: '/architecture/blender-scene' },
           { text: 'Why Not Consensus', link: '/architecture/why-not-consensus' },
           { text: 'Case Study: Convergence Bugs', link: '/architecture/convergence-debugging' },
