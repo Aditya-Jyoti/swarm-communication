@@ -20,8 +20,8 @@ const maxRequestBytes = 64 << 10
 // (frontend/, served by nginx), so the CC only says where it is and which
 // routes it owns. Plain text keeps it readable with a bare curl.
 const rootText = `swarm-net control center API; dashboard is served by the frontend
-routes: GET /healthz, GET /api/state, POST /api/tasks, POST /api/chaos,
-        GET /api/sim, POST /api/sim, GET /ws
+routes: GET /healthz, GET /metrics, GET /api/state, POST /api/tasks,
+        POST /api/chaos, GET /api/sim, POST /api/sim, GET /ws
 `
 
 // Handler returns the HTTP routes from the contract.
@@ -31,6 +31,10 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok")
 	})
+	// GET only: the method pattern makes the mux answer 405 (with Allow) for
+	// anything else on this path, which is what a scraper misconfigured to
+	// POST needs to see.
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/tasks", s.guardMutation(s.handleTasks))
 	mux.HandleFunc("POST /api/chaos", s.guardMutation(s.handleChaos))

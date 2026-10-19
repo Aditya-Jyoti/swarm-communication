@@ -105,6 +105,25 @@ server {
         proxy_read_timeout 5s;
     }
 
+    # Prometheus scrape target. Same token injection as /api/, so a scraper on
+    # the host reaches the CC exactly as the dashboard does and needs no copy
+    # of the token. The CC leaves /metrics as open as GET /api/state (reads are
+    # not token-gated; see backend/pkg/controlcenter/auth.go), so publishing
+    # this port is publishing the swarm's topology -- guard it with BIND_ADDR.
+    # Scrapes are cheap but not free: ?peer_scores=0 drops the O(N^2) per-pair
+    # RTT family. A scrape of a large swarm can take longer than the API's 5s,
+    # hence the 30s read timeout, matching /api/.
+    location = /metrics {
+        proxy_pass $control_center;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Authorization $cc_authorization;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 30s;
+    }
+
     location = /ws {
         proxy_pass $control_center;
         proxy_http_version 1.1;

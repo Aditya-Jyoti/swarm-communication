@@ -102,6 +102,7 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 		SimDisabled:   !cfg.SimEnabled,
 		SimParams:     &cfg.SimParams,
 		SimHysteresis: &cfg.SimHysteresis,
+		Version:       version,
 		Logger:        log,
 	}
 	if cfg.MAV.Enabled {

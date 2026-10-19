@@ -70,6 +70,10 @@ type Config struct {
 	// mutating requests and on WebSockets that send commands. Empty disables
 	// the check. Must pass CheckAPIToken. See auth.go for the threat model.
 	APIToken string
+	// Version is the build string published by GET /metrics as
+	// swarm_build_info. Empty falls back to the module's build info, then to
+	// "dev"; see metrics.go. The binary passes its own -ldflags value.
+	Version string
 	// SimDisabled starts the CC with the emulated latency switched off.
 	// Inverted so the zero value is the contract default (enabled).
 	SimDisabled bool
