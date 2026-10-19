@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"sync"
 	"testing"
@@ -169,6 +168,49 @@ func (g *fakeGCS) recvN(n int) []*Frame {
 	return out
 }
 
+// recvID reads frames until one carries id, and fails if the burst ends
+// without it.
+//
+// Matching by id rather than by position in the stream is what keeps these
+// tests from being rewritten every time a message joins a tick: one status tick
+// is statusBurst messages per vehicle (see Bridge.tickStatus) and most
+// assertions here care about exactly one of them.
+func (g *fakeGCS) recvID(id MsgID) *Frame {
+	g.t.Helper()
+	// Bounded by the largest burst a driven test can produce: a status tick for
+	// a handful of vehicles.
+	for i := 0; i < 8*statusBurst; i++ {
+		if f := g.recv(); f.ID == id {
+			return f
+		}
+	}
+	g.t.Fatalf("no %s in the burst", id)
+	return nil
+}
+
+// flush discards everything already queued.
+//
+// A driven test that advances the clock for ten simulated minutes emits
+// thousands of frames that nobody reads; flushing lets the next assertion be
+// about the NEXT tick instead of about the backlog.
+func (g *fakeGCS) flush() {
+	g.t.Helper()
+	for {
+		_ = g.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		if _, _, err := g.conn.ReadFromUDP(g.buf); err != nil {
+			return
+		}
+	}
+}
+
+// drain reads and discards n frames.
+func (g *fakeGCS) drain(n int) {
+	g.t.Helper()
+	for i := 0; i < n; i++ {
+		g.recv()
+	}
+}
+
 // expectQuiet fails if anything else arrives.
 func (g *fakeGCS) expectQuiet() {
 	g.t.Helper()
@@ -285,16 +327,18 @@ func TestBridgeVehiclesPerNode(t *testing.T) {
 		}
 	}
 
-	// One HEARTBEAT and one SYS_STATUS per vehicle per status tick.
+	// One whole status burst per vehicle per status tick, HEARTBEAT first: a
+	// ground station shows nothing at all until it has one.
 	b.tickStatus()
-	got := bySysID(b.gcs.recvN(6))
+	got := bySysID(b.gcs.recvN(3 * statusBurst))
 	b.gcs.expectQuiet()
 	if len(got) != 3 {
 		t.Fatalf("heard from %d vehicles, want 3", len(got))
 	}
 	for sysID, frames := range got {
-		if len(frames) != 2 || frames[0].ID != MsgIDHeartbeat || frames[1].ID != MsgIDSysStatus {
-			t.Errorf("sysid %d sent %v, want HEARTBEAT then SYS_STATUS", sysID, idsOf(frames))
+		if len(frames) != statusBurst || frames[0].ID != MsgIDHeartbeat || frames[1].ID != MsgIDSysStatus {
+			t.Errorf("sysid %d sent %v, want %d messages starting HEARTBEAT, SYS_STATUS",
+				sysID, idsOf(frames), statusBurst)
 		}
 		if frames[0].CompID != MavCompIDAutopilot1 {
 			t.Errorf("sysid %d used compid %d, want %d", sysID, frames[0].CompID, MavCompIDAutopilot1)
@@ -304,9 +348,9 @@ func TestBridgeVehiclesPerNode(t *testing.T) {
 	// Sequence numbers are per vehicle, not per process: a shared counter would
 	// make a ground station report 90% packet loss on every vehicle at once.
 	b.tickStatus()
-	for sysID, frames := range bySysID(b.gcs.recvN(6)) {
-		if frames[0].Seq != 2 {
-			t.Errorf("sysid %d second heartbeat seq = %d, want 2", sysID, frames[0].Seq)
+	for sysID, frames := range bySysID(b.gcs.recvN(3 * statusBurst)) {
+		if want := byte(statusBurst); frames[0].Seq != want {
+			t.Errorf("sysid %d second heartbeat seq = %d, want %d", sysID, frames[0].Seq, want)
 		}
 	}
 }
@@ -327,7 +371,7 @@ func TestBridgeKilledNodeStopsHeartbeating(t *testing.T) {
 	b := newTestBridge(t, swarm, nil)
 	b.sync(t)
 	b.tickStatus()
-	if n := len(bySysID(b.gcs.recvN(4))); n != 2 {
+	if n := len(bySysID(b.gcs.recvN(2 * statusBurst))); n != 2 {
 		t.Fatalf("heard from %d vehicles, want 2", n)
 	}
 
@@ -340,7 +384,7 @@ func TestBridgeKilledNodeStopsHeartbeating(t *testing.T) {
 	)
 	b.sync(t)
 	b.tickStatus()
-	got := bySysID(b.gcs.recvN(2))
+	got := bySysID(b.gcs.recvN(statusBurst))
 	b.gcs.expectQuiet()
 	if len(got) != 1 || got[2] == nil {
 		t.Fatalf("after the kill, heard from %v, want only sysid 2", keysOf(got))
@@ -397,8 +441,8 @@ func TestBridgeHeartbeatFields(t *testing.T) {
 				v.mover.ClearTarget()
 			}
 			b.tickStatus()
-			f := b.gcs.recv()
-			b.gcs.recv() // SYS_STATUS
+			f := b.gcs.recvID(MsgIDHeartbeat)
+			b.gcs.drain(statusBurst - 1)
 			hb, ok := f.Msg.(*Heartbeat)
 			if !ok {
 				t.Fatalf("got %s, want HEARTBEAT", f.ID)
@@ -424,8 +468,7 @@ func TestBridgeSysStatusMapping(t *testing.T) {
 	b := newTestBridge(t, swarm, nil)
 	b.sync(t)
 	b.tickStatus()
-	b.gcs.recv() // HEARTBEAT
-	st, ok := b.gcs.recv().Msg.(*SysStatus)
+	st, ok := b.gcs.recvID(MsgIDSysStatus).Msg.(*SysStatus)
 	if !ok {
 		t.Fatal("want SYS_STATUS")
 	}
@@ -434,17 +477,19 @@ func TestBridgeSysStatusMapping(t *testing.T) {
 	if st.Load != 120 || st.ErrorsComm != 7 || st.ErrorsCount1 != 12 || st.DropRateComm != 700 {
 		t.Errorf("sys_status = %+v, want load 120 errors_comm 7 count1 12 drop_rate 700", st)
 	}
-	// Battery sentinels, not invented values.
-	if st.VoltageBattery != math.MaxUint16 || st.CurrentBattery != -1 || st.BatteryRemaining != -1 {
-		t.Errorf("battery fields = %d/%d/%d, want the 'not sent' sentinels",
-			st.VoltageBattery, st.CurrentBattery, st.BatteryRemaining)
+	// The battery fields are synthesised rather than sent as "not available"
+	// sentinels, because a ground station with no power source shows a grey
+	// health bar. A fresh vehicle's pack is full; the model is in health.go and
+	// the honesty note is in doc.go.
+	if st.BatteryRemaining != 100 || st.VoltageBattery != batteryCells*cellFullVolts*1000 {
+		t.Errorf("battery = %d%% at %d mV, want a full 6S pack",
+			st.BatteryRemaining, st.VoltageBattery)
 	}
 
 	// The rate is a delta, so a quiet second reads as zero rather than
 	// repeating the total.
 	b.tickStatus()
-	b.gcs.recv()
-	st = b.gcs.recv().Msg.(*SysStatus)
+	st = b.gcs.recvID(MsgIDSysStatus).Msg.(*SysStatus)
 	if st.DropRateComm != 0 || st.ErrorsComm != 7 {
 		t.Errorf("second sample = %+v, want drop_rate 0 errors_comm 7", st)
 	}
@@ -454,8 +499,7 @@ func TestBridgeSysStatusMapping(t *testing.T) {
 	swarm.set(NodeState{ID: "swarm-net-node-5", Connected: true, Pos: at(5, 5, 5), Dropped: 0})
 	b.sync(t)
 	b.tickStatus()
-	b.gcs.recv()
-	if st = b.gcs.recv().Msg.(*SysStatus); st.DropRateComm != 0 {
+	if st = b.gcs.recvID(MsgIDSysStatus).Msg.(*SysStatus); st.DropRateComm != 0 {
 		t.Errorf("after a counter reset, drop_rate = %d, want 0", st.DropRateComm)
 	}
 }
@@ -468,7 +512,7 @@ func TestBridgePositionProjection(t *testing.T) {
 
 	b.clock.advance(200 * time.Millisecond)
 	b.tickPositions()
-	f := b.gcs.recv()
+	f := b.gcs.recvID(MsgIDGlobalPositionInt)
 	gp, ok := f.Msg.(*GlobalPositionInt)
 	if !ok {
 		t.Fatalf("got %s, want GLOBAL_POSITION_INT", f.ID)
@@ -496,7 +540,7 @@ func TestBridgeFlightVelocityAndHeading(t *testing.T) {
 
 	b.clock.advance(time.Second)
 	b.tickPositions()
-	gp := b.gcs.recv().Msg.(*GlobalPositionInt)
+	gp := b.gcs.recvID(MsgIDGlobalPositionInt).Msg.(*GlobalPositionInt)
 	if gp.Vx != 6000 || gp.Vy != 0 || gp.Vz != 0 {
 		t.Errorf("velocity = %d/%d/%d cm/s, want 6000 north", gp.Vx, gp.Vy, gp.Vz)
 	}
@@ -510,7 +554,7 @@ func TestBridgeFlightVelocityAndHeading(t *testing.T) {
 	b.vs["swarm-net-node-4"].mover.SetTarget(at(50, 50, 10))
 	b.clock.advance(time.Second)
 	b.tickPositions()
-	gp = b.gcs.recv().Msg.(*GlobalPositionInt)
+	gp = b.gcs.recvID(MsgIDGlobalPositionInt).Msg.(*GlobalPositionInt)
 	if gp.Vz != 6000 {
 		t.Errorf("descending: vz = %d cm/s, want +6000 (down is positive)", gp.Vz)
 	}
@@ -529,7 +573,7 @@ func TestBridgePositionRateIsFasterThanStatus(t *testing.T) {
 		b.tickPositions()
 	}
 	b.tickStatus()
-	frames := b.gcs.recvN(7)
+	frames := b.gcs.recvN(5*positionBurst + statusBurst)
 	b.gcs.expectQuiet()
 	var pos, hb int
 	for _, f := range frames {
@@ -867,8 +911,7 @@ func TestBridgeConfiguredAndLearnedAreDeduplicated(t *testing.T) {
 	b.gcs.sendMsg(b.Addr(), &Heartbeat{})
 	b.pumpOne(t)
 	b.tickStatus()
-	b.gcs.recv() // HEARTBEAT
-	b.gcs.recv() // SYS_STATUS
+	b.gcs.drain(statusBurst)
 	b.gcs.expectQuiet()
 }
 
@@ -982,7 +1025,12 @@ func TestBridgeDefaults(t *testing.T) {
 	}
 	// The zero MoveConfig is a drifting vehicle at the contract's speeds, not a
 	// stationary one at zero.
-	want := MoveConfig{SpeedUnitsPerSec: DefaultSpeedUnitsPerSec, DriftRadius: DefaultDriftRadius, DriftSpeed: DefaultDriftSpeed}
+	want := MoveConfig{
+		SpeedUnitsPerSec: DefaultSpeedUnitsPerSec,
+		Idle:             IdleDrift,
+		DriftRadius:      DefaultDriftRadius,
+		DriftSpeed:       DefaultDriftSpeed,
+	}
 	if b.cfg.Move != want {
 		t.Errorf("move = %+v, want %+v", b.cfg.Move, want)
 	}
@@ -1016,7 +1064,7 @@ func TestBridgeServesTwoGroundStations(t *testing.T) {
 	b.tickStatus()
 	for name, g := range map[string]*fakeGCS{"first": b.gcs, "second": second} {
 		var sawHeartbeat bool
-		for _, f := range g.recvN(2) {
+		for _, f := range g.recvN(statusBurst) {
 			if _, ok := f.Msg.(*Heartbeat); ok {
 				sawHeartbeat = true
 			}

@@ -596,6 +596,8 @@ func (b *Bridge) runCommand(v *vehicle, m *CommandLong) uint8 {
 		return b.cmdReturnToLaunch(v)
 	case MavCmdMissionStart:
 		return b.cmdMissionStart(v)
+	case MavCmdRequestMessage:
+		return b.cmdRequestMessage(v, m)
 	case MavCmdDoSetMode:
 		// UNSUPPORTED, and the reason is structural rather than laziness:
 		// HEARTBEAT.custom_mode carries the swarm role (1 = leader), which is
@@ -608,6 +610,39 @@ func (b *Bridge) runCommand(v *vehicle, m *CommandLong) uint8 {
 	default:
 		return MavResultUnsupported
 	}
+}
+
+// cmdRequestMessage answers MAV_CMD_REQUEST_MESSAGE: param1 is the id of the
+// message wanted, once.
+//
+// This is how a modern ground station asks for AUTOPILOT_VERSION, and it asks
+// on every connection: until it has the capability bitmap it does not know
+// whether to upload missions as MISSION_ITEM_INT or as the float message, and
+// some versions will not start a mission transfer at all. The other three
+// answered here are the reference positions, which a station also requests once
+// and then never again.
+//
+// The reply is QUEUED rather than sent, so it follows the COMMAND_ACK; see
+// Bridge.onCommandLong. Anything else is UNSUPPORTED: the streams this bridge
+// emits arrive on their own, and a station that asked for one of them has
+// already got it.
+func (b *Bridge) cmdRequestMessage(v *vehicle, m *CommandLong) uint8 {
+	now := b.cfg.Now()
+	var reply Message
+	switch MsgID(uint32(m.Param1)) {
+	case MsgIDAutopilotVersion:
+		reply = b.autopilotVersion(v)
+	case MsgIDHomePosition:
+		reply = b.homePosition(v, now)
+	case MsgIDGPSGlobalOrigin:
+		reply = b.gpsGlobalOrigin(now)
+	case MsgIDExtendedSysState:
+		reply = b.extendedSysState(v)
+	default:
+		return MavResultUnsupported
+	}
+	b.afterAck = append(b.afterAck, pendingMsg{sysID: v.sysID, msg: reply})
+	return MavResultAccepted
 }
 
 // cmdArm arms or disarms. param1 is 1 to arm, 0 to disarm.

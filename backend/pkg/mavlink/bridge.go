@@ -127,6 +127,10 @@ type NodeState struct {
 	// Bridge.sysStatus for the mapping and why it is a lie worth telling.
 	Dropped    uint64
 	LedgerSize int
+	// Degraded is the swarm's own degraded flag (chaos "delay" injected on this
+	// node). It withdraws ONE sensor health bit and drops the GPS fix to 2D;
+	// see degradedSensors for why one bit and not the whole bitmap.
+	Degraded bool
 }
 
 // SwarmSource is everything the bridge needs from the swarm.
@@ -230,6 +234,14 @@ type vehicle struct {
 	armed bool
 	// connected gates every outbound message for this vehicle.
 	connected bool
+	// degraded is the swarm's degraded flag for this node. It subtracts one
+	// sensor health bit and one GPS fix level; see degradedSensors.
+	degraded bool
+	// batt and att are the synthetic pack and the kinematic attitude. Both are
+	// driven from the mover on the position tick, so all three agree within a
+	// tick; see health.go and instruments.go.
+	batt battery
+	att  attitudeState
 	// pushed is the position last handed to the swarm. An external move is
 	// detected by the swarm reporting something else.
 	pushed protocol.Position
@@ -265,6 +277,13 @@ type datagram struct {
 	// b is a private copy: the reader reuses its receive buffer immediately.
 	b    []byte
 	from *net.UDPAddr
+}
+
+// pendingMsg is one message queued to go out after the COMMAND_ACK of the
+// command that asked for it.
+type pendingMsg struct {
+	sysID byte
+	msg   Message
 }
 
 // swarmEvent is one swarm event waiting to become a STATUSTEXT.
@@ -349,6 +368,9 @@ type Bridge struct {
 	// warnedMissionBroadcast keeps a confused ground station from filling the
 	// log: target_system 0 is refused once, not once per request.
 	warnedMissionBroadcast bool
+	// afterAck holds messages a command asked for, to be sent once the
+	// COMMAND_ACK for that command has gone out. See onCommandLong.
+	afterAck []pendingMsg
 
 	inbox  chan datagram
 	events chan swarmEvent
@@ -667,6 +689,7 @@ func (b *Bridge) applyNodes(nodes []NodeState) map[protocol.NodeID]protocol.Posi
 		v.leader = n.Leader
 		v.leaderID = n.LeaderID
 		v.connected = n.Connected
+		v.degraded = n.Degraded
 		v.dropped = n.Dropped
 		v.ledger = n.LedgerSize
 
@@ -732,8 +755,22 @@ func (b *Bridge) reorder() {
 
 // --- loop: outbound ------------------------------------------------------------
 
-// tickStatus emits HEARTBEAT and SYS_STATUS for every connected vehicle.
+// tickStatus emits the 1 Hz stream for every connected vehicle.
+//
+// # Why these messages, in this order
+//
+// HEARTBEAT and SYS_STATUS first, because they are what a ground station waits
+// for before it will show a vehicle at all. Then the three that make it show
+// the vehicle as FLYABLE -- a power source, a GPS fix and an airborne state --
+// and then the two reference positions that put a home marker on the map.
+//
+// All seven in one tick, from one read of the vehicle's state, so a station
+// cannot see a battery percentage from one second beside a voltage from the
+// next. The rate is the MAVLink convention for status streams and is not a
+// tuning knob; the instruments that need to be smooth are on the position tick
+// instead.
 func (b *Bridge) tickStatus() {
+	now := b.cfg.Now()
 	for _, id := range b.order {
 		v := b.vs[id]
 		if v == nil || !v.connected {
@@ -741,10 +778,27 @@ func (b *Bridge) tickStatus() {
 		}
 		b.send(v.sysID, b.heartbeat(v))
 		b.send(v.sysID, b.sysStatus(v))
+		b.send(v.sysID, b.batteryStatus(v))
+		b.send(v.sysID, b.gpsRawInt(v, now))
+		b.send(v.sysID, b.extendedSysState(v))
+		b.send(v.sysID, b.homePosition(v, now))
+		b.send(v.sysID, b.gpsGlobalOrigin(now))
 	}
 }
 
-// tickPositions advances every vehicle and emits GLOBAL_POSITION_INT.
+// statusBurst is how many messages one vehicle emits per status tick. It exists
+// so the tests can assert the shape of a tick without counting by hand.
+const statusBurst = 7
+
+// tickPositions advances every vehicle and emits the fast stream:
+// GLOBAL_POSITION_INT, ATTITUDE and VFR_HUD.
+//
+// The three travel together because they are three views of ONE movement step.
+// Splitting them across tickers would let a ground station read a groundspeed
+// of zero beside a position that had just moved, which renders as a HUD that
+// argues with the map. The battery is drained on the same step for the same
+// reason: it is the only place the elapsed time and the achieved speed are both
+// in hand.
 //
 // dt comes from the injected clock, not from the ticker period: a tick that was
 // late (a stalled process, a loaded host) must advance the vehicle by the time
@@ -764,9 +818,21 @@ func (b *Bridge) tickPositions() {
 			continue
 		}
 		v.mover.Step(dt)
+		// The battery is driven by the FULL 3D speed, including the climb: on a
+		// real multirotor climbing is the most expensive thing it can do, and
+		// a model that only charged for horizontal travel would show a takeoff
+		// as free. Pitch and the throttle bar use horizontal speed, which is
+		// the quantity they are actually about.
+		v.batt.step(dt, lenP(v.mover.Vel())/b.cfg.Move.SpeedUnitsPerSec)
+		v.att.step(dt, v.mover, b.cfg.Move.SpeedUnitsPerSec, b.cfg.Projection.MetresPerUnit)
 		b.send(v.sysID, b.globalPosition(v, now))
+		b.send(v.sysID, b.attitude(v, now))
+		b.send(v.sysID, b.vfrHud(v))
 	}
 }
+
+// positionBurst is how many messages one vehicle emits per position tick.
+const positionBurst = 3
 
 func (b *Bridge) heartbeat(v *vehicle) *Heartbeat {
 	// custom_mode carries the swarm role, which is the one piece of swarm state
@@ -810,9 +876,11 @@ func (b *Bridge) heartbeat(v *vehicle) *Heartbeat {
 //	                 (100 = 1%), so one drop per second reads as 1%.
 //	errors_count1 <- ledger size again, unscaled, for the raw number.
 //
-// The battery fields carry their documented "not sent by autopilot" sentinels
-// rather than invented values, so no ground station draws a fuel gauge for a
-// vehicle that has no fuel.
+// The sensor bitmaps and the battery fields are the other direction: they are
+// synthesised, because a ground station will not call a vehicle ready to fly
+// without them. See sensorsPresent for what is claimed and degradedSensors for
+// what a struggling node withdraws; the battery fields repeat what
+// BATTERY_STATUS says in the same tick, because a station may show either.
 func (b *Bridge) sysStatus(v *vehicle) *SysStatus {
 	delta := v.dropped - v.lastDropped
 	if v.dropped < v.lastDropped {
@@ -820,15 +888,16 @@ func (b *Bridge) sysStatus(v *vehicle) *SysStatus {
 	}
 	v.lastDropped = v.dropped
 	return &SysStatus{
-		// Nothing is claimed present, so nothing can be reported unhealthy. A
-		// bitmap of invented sensors would earn a sensor warning per vehicle.
-		OnboardControlSensorsPresent: 0,
-		OnboardControlSensorsEnabled: 0,
-		OnboardControlSensorsHealth:  0,
+		// Present and enabled are the same set: there is no sensor here that
+		// could be fitted and switched off, so claiming a difference would
+		// invent a configuration nobody can change.
+		OnboardControlSensorsPresent: sensorsPresent,
+		OnboardControlSensorsEnabled: sensorsPresent,
+		OnboardControlSensorsHealth:  sensorHealth(v),
 		Load:                         uint16(min(v.ledger*10, 1000)),
-		VoltageBattery:               math.MaxUint16, // "not sent by autopilot"
-		CurrentBattery:               -1,
-		BatteryRemaining:             -1,
+		VoltageBattery:               v.batt.voltageMV(),
+		CurrentBattery:               v.batt.currentCA(),
+		BatteryRemaining:             int8(math.Round(v.batt.remaining())),
 		DropRateComm:                 saturateU16(delta * 100),
 		ErrorsComm:                   saturateU16(v.dropped),
 		ErrorsCount1:                 saturateU16(uint64(max(v.ledger, 0))),
@@ -1088,6 +1157,14 @@ func (b *Bridge) onCommandLong(f *Frame, m *CommandLong) {
 		TargetSystem:    f.SysID,
 		TargetComponent: f.CompID,
 	})
+	// Anything the command asked for goes out AFTER its ack. A ground station
+	// that issued MAV_CMD_REQUEST_MESSAGE is waiting on the ack before it will
+	// look for the message, so sending the message first makes it arrive while
+	// the station is not listening and the request time out.
+	for _, p := range b.afterAck {
+		b.send(p.sysID, p.msg)
+	}
+	b.afterAck = b.afterAck[:0]
 }
 
 // targetSysID resolves a request's target_system to one of our vehicles.
