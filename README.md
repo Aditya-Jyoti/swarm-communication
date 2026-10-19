@@ -79,8 +79,11 @@ MAV_ENABLED=true docker compose up -d
 ```
 
 Then in QGC: **Application Settings -> Comm Links -> Add**, type UDP, listening port 14550,
-with `127.0.0.1:14555` as a target host. Ten nodes show up as ten vehicles within a second or
-two.
+with `127.0.0.1:14555` as a target host (press Add so it appears in the list). Ten nodes show
+up as ten vehicles within a second or two.
+
+QGC must dial in: the bridge learns a station from its first packet, so a link with no target
+address just listens and nothing arrives. Several stations can be connected at once.
 
 - **Vehicle numbers follow node names.** `swarm-net-node-3` is vehicle 3; `seed` is 254.
 - **Leaders report a different custom mode** from workers, so the vehicle list shows roles.
@@ -89,6 +92,11 @@ two.
 - **Nodes drift** slowly around their home position. `MAV_DRIFT=false` holds them still, which
   is what you want when debugging clustering: position drives emulated latency, so drift makes
   election results jitter.
+- **Plan a mission on a leader** and its whole cluster flies it, items going to the nearest
+  idle member, so several vehicles move at once. Plan on a worker and it flies alone. Arm
+  first: `MISSION_START` refuses while disarmed.
+- **Kill the leader mid-mission** and the unflown waypoints move to whoever wins the
+  re-election. The mission survives the vehicle it was uploaded to.
 
 Positions are shared with the latency simulation, so a node that moves really does get slower
 RTTs to its peers and election follows. QGC and the dashboard cannot disagree.

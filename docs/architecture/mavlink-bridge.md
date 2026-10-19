@@ -105,10 +105,25 @@ A node is a vehicle exactly while it heartbeats. A killed node stops, and QGC re
 link lost -- which is what you want a failover to look like.
 
 In: the mission protocol (`MISSION_COUNT`, `MISSION_REQUEST_LIST`, `MISSION_REQUEST_INT`,
-`MISSION_ITEM_INT`, `MISSION_ACK`, `MISSION_CLEAR_ALL`), `PARAM_REQUEST_LIST` (answered with a
-short read-only list, so QGC stops waiting on parameters) and `COMMAND_LONG`. Unsupported
-commands are acked with `MAV_RESULT_UNSUPPORTED` rather than ignored, because silence makes
-QGC retry forever.
+`MISSION_ITEM_INT`, `MISSION_ACK`, `MISSION_CLEAR_ALL`, `MISSION_SET_CURRENT`),
+`PARAM_REQUEST_LIST` (answered with a short read-only list, so QGC stops waiting on
+parameters) and `COMMAND_LONG`. Unsupported commands are acked with `MAV_RESULT_UNSUPPORTED`
+rather than ignored, because silence makes QGC retry forever.
+
+Commands that do something: `MAV_CMD_COMPONENT_ARM_DISARM`, `NAV_TAKEOFF`, `NAV_LAND`,
+`NAV_RETURN_TO_LAUNCH` and `MISSION_START`. Arming is not decoration -- `MISSION_START`
+refuses while disarmed.
+
+**`MISSION_REQUEST_LIST` must be answered for all three list types.** QGC asks every vehicle
+for its mission, its geofence and its rally points the moment it connects. Leaving any one
+unanswered produces:
+
+```
+Mission transfer failed. Error: Mission request list failed, maximum retries exceeded.
+```
+
+Fence and rally are always empty here, and are answered with `MISSION_COUNT` 0 rather than
+ignored.
 
 `HEARTBEAT` uses `MAV_AUTOPILOT_GENERIC`, not the ArduPilot id. Claiming ArduPilot makes QGC
 demand a full parameter set and real flight modes.
@@ -155,7 +170,43 @@ table. Flight is simulated; the task is not.
 A mission therefore survives the loss of the node it was uploaded to, which is the whole
 point of the swarm underneath it.
 
-## 6. Movement
+## 6. Ground stations
+
+The bridge keeps a SET of stations, not one address:
+
+- Any station that sends a packet is learned and kept for 15 seconds past its last one.
+- `MAV_GCS`, when set, is always a destination.
+- Every message goes to all of them.
+
+A single "newest sender" slot looks fine until two stations talk at once -- QGC plus a
+diagnostic script, which is what a demo looks like. They then thrash the slot and each goes
+silent a second at a time.
+
+**Leave `MAV_GCS` empty unless a station cannot dial in.** Pointing it at a host where nothing
+listens is actively harmful: the ICMP port-unreachable it provokes is reported by Linux on the
+NEXT send on that socket, which is the one aimed at the real station. The symptom is telemetry
+arriving at a fraction of its rate with `STATUSTEXT` missing entirely. Writes retry once per
+destination for the same reason, and a learned station is dropped after 20 consecutive
+failures.
+
+## 7. Election stability while flying
+
+Position drives emulated latency, and latency drives election. So flight perturbs the
+election, which is the point -- and too much of it makes leadership flap every few seconds.
+
+The margin is `SWARM_SIM_HYSTERESIS`, **in milliseconds of RTT**, not a ratio. The node
+default is `0.5`, which suits a static swarm. At `per_unit_ms = 2` a drone crossing the cube
+swings scores by hundreds of milliseconds, so 0.5 ms damps nothing.
+
+| Setting | Effect |
+|---|---|
+| `-1` | Each node's own margin (0.5 ms). Leadership flaps during flight. |
+| `40` | Compose default. About 20 units, or 100 m at `MAV_METRES_PER_UNIT=5`. Steady through a mission. |
+
+A chaos kill still triggers failover at any setting: the margin only damps peaceful takeovers,
+not the loss of a node.
+
+## 8. Movement
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -172,7 +223,7 @@ Drift is deliberately slow. Position feeds latency feeds election, so fast drift
 elections flap and you lose the ability to say what caused a re-election. If you are
 debugging clustering rather than demoing, set `MAV_DRIFT=false` and nodes hold still.
 
-## 7. Running it
+## 9. Running it
 
 ```bash
 MAV_ENABLED=true docker compose up -d
