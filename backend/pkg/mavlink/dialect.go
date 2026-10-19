@@ -231,6 +231,142 @@ const (
 	MavParamTypeReal64 = 10
 )
 
+// MAV_SYS_STATUS_SENSOR: These encode the sensors whose status is sent as part of the SYS_STATUS message.
+//
+// Only the entries the bridge uses are generated.
+const (
+	// MAV_SYS_STATUS_SENSOR_3D_GYRO: 0x01 3D gyro
+	MavSysStatusSensor3dGyro = 1
+	// MAV_SYS_STATUS_SENSOR_3D_ACCEL: 0x02 3D accelerometer
+	MavSysStatusSensor3dAccel = 2
+	// MAV_SYS_STATUS_SENSOR_3D_MAG: 0x04 3D magnetometer
+	MavSysStatusSensor3dMag = 4
+	// MAV_SYS_STATUS_SENSOR_ABSOLUTE_PRESSURE: 0x08 absolute pressure
+	MavSysStatusSensorAbsolutePressure = 8
+	// MAV_SYS_STATUS_SENSOR_GPS: 0x20 GPS
+	MavSysStatusSensorGPS = 32
+	// MAV_SYS_STATUS_SENSOR_ANGULAR_RATE_CONTROL: 0x400 3D angular rate control
+	MavSysStatusSensorAngularRateControl = 1024
+	// MAV_SYS_STATUS_SENSOR_ATTITUDE_STABILIZATION: 0x800 attitude stabilization
+	MavSysStatusSensorAttitudeStabilization = 2048
+	// MAV_SYS_STATUS_SENSOR_YAW_POSITION: 0x1000 yaw position
+	MavSysStatusSensorYawPosition = 4096
+	// MAV_SYS_STATUS_SENSOR_Z_ALTITUDE_CONTROL: 0x2000 z/altitude control
+	MavSysStatusSensorZAltitudeControl = 8192
+	// MAV_SYS_STATUS_SENSOR_XY_POSITION_CONTROL: 0x4000 x/y position control
+	MavSysStatusSensorXyPositionControl = 16384
+	// MAV_SYS_STATUS_SENSOR_MOTOR_OUTPUTS: 0x8000 motor outputs / control
+	MavSysStatusSensorMotorOutputs = 32768
+	// MAV_SYS_STATUS_SENSOR_BATTERY: 0x2000000 Battery
+	MavSysStatusSensorBattery = 33554432
+)
+
+// GPS_FIX_TYPE: Type of GPS fix
+const (
+	// GPS_FIX_TYPE_NO_GPS: No GPS connected
+	GPSFixTypeNoGPS = 0
+	// GPS_FIX_TYPE_NO_FIX: No position information, GPS is connected
+	GPSFixTypeNoFix = 1
+	// GPS_FIX_TYPE_2D_FIX: 2D position
+	GPSFixType2dFix = 2
+	// GPS_FIX_TYPE_3D_FIX: 3D position
+	GPSFixType3dFix = 3
+	// GPS_FIX_TYPE_DGPS: DGPS/SBAS aided 3D position
+	GPSFixTypeDgps = 4
+	// GPS_FIX_TYPE_RTK_FLOAT: RTK float, 3D position
+	GPSFixTypeRtkFloat = 5
+	// GPS_FIX_TYPE_RTK_FIXED: RTK Fixed, 3D position
+	GPSFixTypeRtkFixed = 6
+	// GPS_FIX_TYPE_STATIC: Static fixed, typically used for base stations
+	GPSFixTypeStatic = 7
+	// GPS_FIX_TYPE_PPP: PPP, 3D position.
+	GPSFixTypePpp = 8
+)
+
+// MAV_LANDED_STATE: Enumeration of landed detector states
+const (
+	// MAV_LANDED_STATE_UNDEFINED: MAV landed state is unknown
+	MavLandedStateUndefined = 0
+	// MAV_LANDED_STATE_ON_GROUND: MAV is landed (on ground)
+	MavLandedStateOnGround = 1
+	// MAV_LANDED_STATE_IN_AIR: MAV is in air
+	MavLandedStateInAir = 2
+	// MAV_LANDED_STATE_TAKEOFF: MAV currently taking off
+	MavLandedStateTakeoff = 3
+	// MAV_LANDED_STATE_LANDING: MAV currently landing
+	MavLandedStateLanding = 4
+)
+
+// MAV_VTOL_STATE: Enumeration of VTOL states
+const (
+	// MAV_VTOL_STATE_UNDEFINED: MAV is not configured as VTOL
+	MavVtolStateUndefined = 0
+	// MAV_VTOL_STATE_TRANSITION_TO_FW: VTOL is in transition from multicopter to fixed-wing
+	MavVtolStateTransitionToFw = 1
+	// MAV_VTOL_STATE_TRANSITION_TO_MC: VTOL is in transition from fixed-wing to multicopter
+	MavVtolStateTransitionToMc = 2
+	// MAV_VTOL_STATE_MC: VTOL is in multicopter state
+	MavVtolStateMc = 3
+	// MAV_VTOL_STATE_FW: VTOL is in fixed-wing state
+	MavVtolStateFw = 4
+)
+
+// MAV_BATTERY_FUNCTION: Enumeration of battery functions
+//
+// Only the entries the bridge uses are generated.
+const (
+	// MAV_BATTERY_FUNCTION_UNKNOWN: Battery function is unknown
+	MavBatteryFunctionUnknown = 0
+	// MAV_BATTERY_FUNCTION_ALL: Battery supports all flight systems
+	MavBatteryFunctionAll = 1
+	// MAV_BATTERY_FUNCTION_PROPULSION: Battery for the propulsion system
+	MavBatteryFunctionPropulsion = 2
+)
+
+// MAV_BATTERY_TYPE: Enumeration of battery types
+//
+// Only the entries the bridge uses are generated.
+const (
+	// MAV_BATTERY_TYPE_UNKNOWN: Not specified.
+	MavBatteryTypeUnknown = 0
+	// MAV_BATTERY_TYPE_LIPO: Lithium polymer battery
+	MavBatteryTypeLipo = 1
+)
+
+// MAV_BATTERY_CHARGE_STATE: Enumeration for battery charge states.
+const (
+	// MAV_BATTERY_CHARGE_STATE_UNDEFINED: Low battery state is not provided
+	MavBatteryChargeStateUndefined = 0
+	// MAV_BATTERY_CHARGE_STATE_OK: Battery is not in low state. Normal operation.
+	MavBatteryChargeStateOk = 1
+	// MAV_BATTERY_CHARGE_STATE_LOW: Battery state is low, warn and monitor close.
+	MavBatteryChargeStateLow = 2
+	// MAV_BATTERY_CHARGE_STATE_CRITICAL: Battery state is critical, return or abort immediately.
+	MavBatteryChargeStateCritical = 3
+	// MAV_BATTERY_CHARGE_STATE_EMERGENCY: Battery state is too low for ordinary abort sequence. Perform fastest possible emergency stop to prevent damage.
+	MavBatteryChargeStateEmergency = 4
+	// MAV_BATTERY_CHARGE_STATE_FAILED: Battery failed, damage unavoidable. Possible causes (faults) are listed in MAV_BATTERY_FAULT.
+	MavBatteryChargeStateFailed = 5
+	// MAV_BATTERY_CHARGE_STATE_UNHEALTHY: Battery is diagnosed to be defective or an error occurred, usage is discouraged / prohibited. Possible causes (faults) are listed in MAV_BATTERY_FAULT.
+	MavBatteryChargeStateUnhealthy = 6
+	// MAV_BATTERY_CHARGE_STATE_CHARGING: Battery is charging.
+	MavBatteryChargeStateCharging = 7
+)
+
+// MAV_PROTOCOL_CAPABILITY: Bitmask of (optional) autopilot capabilities (64 bit). If a bit is set, the autopilot supports this capability.
+//
+// Only the entries the bridge uses are generated.
+const (
+	// MAV_PROTOCOL_CAPABILITY_MISSION_FLOAT: Autopilot supports the MISSION_ITEM float message type. Note that MISSION_ITEM is deprecated, and autopilots should use MISSION_ITEM_INT instead.
+	MavProtocolCapabilityMissionFloat = 1
+	// MAV_PROTOCOL_CAPABILITY_MISSION_INT: Autopilot supports MISSION_ITEM_INT scaled integer message type. Note that this flag must always be set if missions are supported, because missions must always ...
+	MavProtocolCapabilityMissionInt = 4
+	// MAV_PROTOCOL_CAPABILITY_COMMAND_INT: Autopilot supports COMMAND_INT scaled integer message type.
+	MavProtocolCapabilityCommandInt = 8
+	// MAV_PROTOCOL_CAPABILITY_MAVLINK2: Autopilot supports MAVLink version 2.
+	MavProtocolCapabilityMavlink2 = 8192
+)
+
 // Message ids. These are the numbers that appear in the 24-bit msgid field of
 // a v2 frame and in every packet capture, so they are the primary identity of
 // a message in this package.
@@ -252,11 +388,16 @@ const (
 	MsgIDMissionClearAll    MsgID = 45  // MISSION_CLEAR_ALL
 	MsgIDMissionItemReached MsgID = 46  // MISSION_ITEM_REACHED
 	MsgIDMissionAck         MsgID = 47  // MISSION_ACK
+	MsgIDGPSGlobalOrigin    MsgID = 49  // GPS_GLOBAL_ORIGIN
 	MsgIDMissionRequestInt  MsgID = 51  // MISSION_REQUEST_INT
 	MsgIDMissionItemInt     MsgID = 73  // MISSION_ITEM_INT
+	MsgIDVfrHud             MsgID = 74  // VFR_HUD
 	MsgIDCommandLong        MsgID = 76  // COMMAND_LONG
 	MsgIDCommandAck         MsgID = 77  // COMMAND_ACK
+	MsgIDBatteryStatus      MsgID = 147 // BATTERY_STATUS
 	MsgIDAutopilotVersion   MsgID = 148 // AUTOPILOT_VERSION
+	MsgIDHomePosition       MsgID = 242 // HOME_POSITION
+	MsgIDExtendedSysState   MsgID = 245 // EXTENDED_SYS_STATE
 	MsgIDStatustext         MsgID = 253 // STATUSTEXT
 )
 
@@ -1536,6 +1677,71 @@ func (m *MissionAck) Unmarshal(p []byte) error {
 }
 
 // ---------------------------------------------------------------------------
+// GPS_GLOBAL_ORIGIN (49)
+// ---------------------------------------------------------------------------
+
+// GPSGlobalOrigin is MAVLink message GPS_GLOBAL_ORIGIN (49).
+//
+// Publishes the GPS coordinates of the vehicle local origin (0,0,0) position. Emitted whenever a new GPS-Local position mapping is requested or set - e.g. following SET_GPS_GLOBAL_ORIGIN message.
+//
+// Fields are in WIRE order, not the order common.xml declares them: base
+// fields sorted by descending type size, then 1 extension field(s)
+// unsorted. Payload is 20 bytes.
+type GPSGlobalOrigin struct {
+	// latitude: Latitude (WGS84) [degE7]
+	Latitude int32
+	// longitude: Longitude (WGS84) [degE7]
+	Longitude int32
+	// altitude: Altitude (MSL). Positive for up. [mm]
+	Altitude int32
+
+	// Extension fields. Absent from CRC_EXTRA, so a sender that predates
+	// them produces frames this build still accepts; they arrive zeroed.
+	// time_usec: Timestamp (UNIX Epoch time or time since system boot). The receiving end can infer timestamp format (since 1.1.1970 or since system boot) by checking for the magnitude of the number. [us]
+	TimeUsec uint64
+}
+
+// MsgID implements Message.
+func (*GPSGlobalOrigin) MsgID() MsgID { return MsgIDGPSGlobalOrigin }
+
+// MsgName implements Message.
+func (*GPSGlobalOrigin) MsgName() string { return "GPS_GLOBAL_ORIGIN" }
+
+// CRCExtra implements Message.
+func (*GPSGlobalOrigin) CRCExtra() byte { return 39 }
+
+// PayloadLen implements Message.
+func (*GPSGlobalOrigin) PayloadLen() int { return 20 }
+
+// Marshal implements Message: it appends the little-endian wire payload of m
+// to dst and returns the extended slice. Every one of the 20 bytes is
+// written, so no zeroing is needed; MAVLink payloads have no padding.
+func (m *GPSGlobalOrigin) Marshal(dst []byte) []byte {
+	var b [20]byte
+	binary.LittleEndian.PutUint32(b[0:], uint32(m.Latitude))
+	binary.LittleEndian.PutUint32(b[4:], uint32(m.Longitude))
+	binary.LittleEndian.PutUint32(b[8:], uint32(m.Altitude))
+	binary.LittleEndian.PutUint64(b[12:], m.TimeUsec)
+	return append(dst, b[:]...)
+}
+
+// Unmarshal implements Message. A payload longer than 20 bytes is accepted
+// and the excess ignored, so a newer peer that has grown an extension field
+// does not break this build. A SHORTER payload is rejected: zero-extending a
+// truncated v2 payload is the frame decoder's job, because only it knows the
+// payload was trimmed rather than corrupted.
+func (m *GPSGlobalOrigin) Unmarshal(p []byte) error {
+	if len(p) < 20 {
+		return fmt.Errorf("mavlink: GPS_GLOBAL_ORIGIN payload is %d bytes, want 20: %w", len(p), ErrShortPayload)
+	}
+	m.Latitude = int32(binary.LittleEndian.Uint32(p[0:]))
+	m.Longitude = int32(binary.LittleEndian.Uint32(p[4:]))
+	m.Altitude = int32(binary.LittleEndian.Uint32(p[8:]))
+	m.TimeUsec = binary.LittleEndian.Uint64(p[12:])
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // MISSION_REQUEST_INT (51)
 // ---------------------------------------------------------------------------
 
@@ -1714,6 +1920,76 @@ func (m *MissionItemInt) Unmarshal(p []byte) error {
 }
 
 // ---------------------------------------------------------------------------
+// VFR_HUD (74)
+// ---------------------------------------------------------------------------
+
+// VfrHud is MAVLink message VFR_HUD (74).
+//
+// Metrics typically displayed on a HUD for fixed wing aircraft.
+//
+// Fields are in WIRE order, not the order common.xml declares them: base
+// fields sorted by descending type size, then 0 extension field(s)
+// unsorted. Payload is 20 bytes.
+type VfrHud struct {
+	// airspeed: Vehicle speed in form appropriate for vehicle type. For standard aircraft this is typically calibrated airspeed (CAS) or indicated airspeed (IAS) - either of which can be used by a pilot to estimate ... [m/s]
+	Airspeed float32
+	// groundspeed: Current ground speed. [m/s]
+	Groundspeed float32
+	// alt: Current altitude (MSL). [m]
+	Alt float32
+	// climb: Current climb rate. [m/s]
+	Climb float32
+	// heading: Current heading in compass units (0-360, 0=north). [deg]
+	Heading int16
+	// throttle: Current throttle setting (0 to 100). [%]
+	Throttle uint16
+}
+
+// MsgID implements Message.
+func (*VfrHud) MsgID() MsgID { return MsgIDVfrHud }
+
+// MsgName implements Message.
+func (*VfrHud) MsgName() string { return "VFR_HUD" }
+
+// CRCExtra implements Message.
+func (*VfrHud) CRCExtra() byte { return 20 }
+
+// PayloadLen implements Message.
+func (*VfrHud) PayloadLen() int { return 20 }
+
+// Marshal implements Message: it appends the little-endian wire payload of m
+// to dst and returns the extended slice. Every one of the 20 bytes is
+// written, so no zeroing is needed; MAVLink payloads have no padding.
+func (m *VfrHud) Marshal(dst []byte) []byte {
+	var b [20]byte
+	binary.LittleEndian.PutUint32(b[0:], math.Float32bits(m.Airspeed))
+	binary.LittleEndian.PutUint32(b[4:], math.Float32bits(m.Groundspeed))
+	binary.LittleEndian.PutUint32(b[8:], math.Float32bits(m.Alt))
+	binary.LittleEndian.PutUint32(b[12:], math.Float32bits(m.Climb))
+	binary.LittleEndian.PutUint16(b[16:], uint16(m.Heading))
+	binary.LittleEndian.PutUint16(b[18:], m.Throttle)
+	return append(dst, b[:]...)
+}
+
+// Unmarshal implements Message. A payload longer than 20 bytes is accepted
+// and the excess ignored, so a newer peer that has grown an extension field
+// does not break this build. A SHORTER payload is rejected: zero-extending a
+// truncated v2 payload is the frame decoder's job, because only it knows the
+// payload was trimmed rather than corrupted.
+func (m *VfrHud) Unmarshal(p []byte) error {
+	if len(p) < 20 {
+		return fmt.Errorf("mavlink: VFR_HUD payload is %d bytes, want 20: %w", len(p), ErrShortPayload)
+	}
+	m.Airspeed = math.Float32frombits(binary.LittleEndian.Uint32(p[0:]))
+	m.Groundspeed = math.Float32frombits(binary.LittleEndian.Uint32(p[4:]))
+	m.Alt = math.Float32frombits(binary.LittleEndian.Uint32(p[8:]))
+	m.Climb = math.Float32frombits(binary.LittleEndian.Uint32(p[12:]))
+	m.Heading = int16(binary.LittleEndian.Uint16(p[16:]))
+	m.Throttle = binary.LittleEndian.Uint16(p[18:])
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // COMMAND_LONG (76)
 // ---------------------------------------------------------------------------
 
@@ -1880,6 +2156,124 @@ func (m *CommandAck) Unmarshal(p []byte) error {
 }
 
 // ---------------------------------------------------------------------------
+// BATTERY_STATUS (147)
+// ---------------------------------------------------------------------------
+
+// BatteryStatus is MAVLink message BATTERY_STATUS (147).
+//
+// Battery information. Updates GCS with flight controller battery status. Smart batteries also use this message, but may additionally send BATTERY_INFO.
+//
+// Fields are in WIRE order, not the order common.xml declares them: base
+// fields sorted by descending type size, then 5 extension field(s)
+// unsorted. Payload is 54 bytes.
+type BatteryStatus struct {
+	// current_consumed: Consumed charge, -1: autopilot does not provide consumption estimate [mAh]
+	CurrentConsumed int32
+	// energy_consumed: Consumed energy, -1: autopilot does not provide energy consumption estimate [hJ]
+	EnergyConsumed int32
+	// temperature: Temperature of the battery. INT16_MAX for unknown temperature. [cdegC]
+	Temperature int16
+	// voltages: Battery voltage of cells 1 to 10 (see voltages_ext for cells 11-14). Cells in this field above the valid cell count for this battery should have the UINT16_MAX value. If individual cell voltages are ... [mV]
+	Voltages [10]uint16
+	// current_battery: Battery current, -1: autopilot does not measure the current. Value may overflow/rollover for very high currents (> 327.67A) [cA]
+	CurrentBattery int16
+	// id: Battery ID
+	ID uint8
+	// battery_function: Function of the battery
+	// Values come from the MAV_BATTERY_FUNCTION enum.
+	BatteryFunction uint8
+	// type: Type (chemistry) of the battery
+	// Values come from the MAV_BATTERY_TYPE enum.
+	Type uint8
+	// battery_remaining: Remaining battery energy. Values: [0-100], -1: autopilot does not estimate the remaining battery. [%]
+	BatteryRemaining int8
+
+	// Extension fields. Absent from CRC_EXTRA, so a sender that predates
+	// them produces frames this build still accepts; they arrive zeroed.
+	// time_remaining: Remaining battery time, 0: autopilot does not provide remaining battery time estimate [s]
+	TimeRemaining int32
+	// charge_state: State for extent of discharge, provided by autopilot for warning or external reactions
+	// Values come from the MAV_BATTERY_CHARGE_STATE enum.
+	ChargeState uint8
+	// voltages_ext: Battery voltages for cells 11 to 14. Cells above the valid cell count for this battery should have a value of 0, where zero indicates not supported (note, this is different than for the voltages ... [mV]
+	VoltagesExt [4]uint16
+	// mode: Battery mode. Default (0) is that battery mode reporting is not supported or battery is in normal-use mode.
+	// Values come from the MAV_BATTERY_MODE enum.
+	Mode uint8
+	// fault_bitmask: Fault/health indications. These should be set when charge_state is MAV_BATTERY_CHARGE_STATE_FAILED or MAV_BATTERY_CHARGE_STATE_UNHEALTHY (if not, fault reporting is not supported).
+	// Values come from the MAV_BATTERY_FAULT enum.
+	FaultBitmask uint32
+}
+
+// MsgID implements Message.
+func (*BatteryStatus) MsgID() MsgID { return MsgIDBatteryStatus }
+
+// MsgName implements Message.
+func (*BatteryStatus) MsgName() string { return "BATTERY_STATUS" }
+
+// CRCExtra implements Message.
+func (*BatteryStatus) CRCExtra() byte { return 154 }
+
+// PayloadLen implements Message.
+func (*BatteryStatus) PayloadLen() int { return 54 }
+
+// Marshal implements Message: it appends the little-endian wire payload of m
+// to dst and returns the extended slice. Every one of the 54 bytes is
+// written, so no zeroing is needed; MAVLink payloads have no padding.
+func (m *BatteryStatus) Marshal(dst []byte) []byte {
+	var b [54]byte
+	binary.LittleEndian.PutUint32(b[0:], uint32(m.CurrentConsumed))
+	binary.LittleEndian.PutUint32(b[4:], uint32(m.EnergyConsumed))
+	binary.LittleEndian.PutUint16(b[8:], uint16(m.Temperature))
+	for i := range m.Voltages {
+		binary.LittleEndian.PutUint16(b[10+i*2:], m.Voltages[i])
+	}
+	binary.LittleEndian.PutUint16(b[30:], uint16(m.CurrentBattery))
+	b[32] = m.ID
+	b[33] = m.BatteryFunction
+	b[34] = m.Type
+	b[35] = byte(m.BatteryRemaining)
+	binary.LittleEndian.PutUint32(b[36:], uint32(m.TimeRemaining))
+	b[40] = m.ChargeState
+	for i := range m.VoltagesExt {
+		binary.LittleEndian.PutUint16(b[41+i*2:], m.VoltagesExt[i])
+	}
+	b[49] = m.Mode
+	binary.LittleEndian.PutUint32(b[50:], m.FaultBitmask)
+	return append(dst, b[:]...)
+}
+
+// Unmarshal implements Message. A payload longer than 54 bytes is accepted
+// and the excess ignored, so a newer peer that has grown an extension field
+// does not break this build. A SHORTER payload is rejected: zero-extending a
+// truncated v2 payload is the frame decoder's job, because only it knows the
+// payload was trimmed rather than corrupted.
+func (m *BatteryStatus) Unmarshal(p []byte) error {
+	if len(p) < 54 {
+		return fmt.Errorf("mavlink: BATTERY_STATUS payload is %d bytes, want 54: %w", len(p), ErrShortPayload)
+	}
+	m.CurrentConsumed = int32(binary.LittleEndian.Uint32(p[0:]))
+	m.EnergyConsumed = int32(binary.LittleEndian.Uint32(p[4:]))
+	m.Temperature = int16(binary.LittleEndian.Uint16(p[8:]))
+	for i := range m.Voltages {
+		m.Voltages[i] = binary.LittleEndian.Uint16(p[10+i*2:])
+	}
+	m.CurrentBattery = int16(binary.LittleEndian.Uint16(p[30:]))
+	m.ID = p[32]
+	m.BatteryFunction = p[33]
+	m.Type = p[34]
+	m.BatteryRemaining = int8(p[35])
+	m.TimeRemaining = int32(binary.LittleEndian.Uint32(p[36:]))
+	m.ChargeState = p[40]
+	for i := range m.VoltagesExt {
+		m.VoltagesExt[i] = binary.LittleEndian.Uint16(p[41+i*2:])
+	}
+	m.Mode = p[49]
+	m.FaultBitmask = binary.LittleEndian.Uint32(p[50:])
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // AUTOPILOT_VERSION (148)
 // ---------------------------------------------------------------------------
 
@@ -1978,6 +2372,159 @@ func (m *AutopilotVersion) Unmarshal(p []byte) error {
 }
 
 // ---------------------------------------------------------------------------
+// HOME_POSITION (242)
+// ---------------------------------------------------------------------------
+
+// HomePosition is MAVLink message HOME_POSITION (242).
+//
+// Contains the home position. The home position is the default position that the system will return to and land on. The position must be set automatically by the system during the takeoff, and may also be explicitly set using MAV_CMD_DO_SET_HOME. The global and local positions encode the position in the respective coordinate frames, while the q parameter encodes the orientation of the surface ...
+//
+// Fields are in WIRE order, not the order common.xml declares them: base
+// fields sorted by descending type size, then 1 extension field(s)
+// unsorted. Payload is 60 bytes.
+type HomePosition struct {
+	// latitude: Latitude (WGS84) [degE7]
+	Latitude int32
+	// longitude: Longitude (WGS84) [degE7]
+	Longitude int32
+	// altitude: Altitude (MSL). Positive for up. [mm]
+	Altitude int32
+	// x: Local X position of this position in the local coordinate frame (NED) [m]
+	X float32
+	// y: Local Y position of this position in the local coordinate frame (NED) [m]
+	Y float32
+	// z: Local Z position of this position in the local coordinate frame (NED: positive "down") [m]
+	Z float32
+	// q: Quaternion indicating world-to-surface-normal and heading transformation of the takeoff position. Used to indicate the heading and slope of the ground. All fields should be set to NaN if an accurate ...
+	Q [4]float32
+	// approach_x: Local X position of the end of the approach vector. Multicopters should set this position based on their takeoff path. Grass-landing fixed wing aircraft should set it the same way as multicopters ... [m]
+	ApproachX float32
+	// approach_y: Local Y position of the end of the approach vector. Multicopters should set this position based on their takeoff path. Grass-landing fixed wing aircraft should set it the same way as multicopters ... [m]
+	ApproachY float32
+	// approach_z: Local Z position of the end of the approach vector. Multicopters should set this position based on their takeoff path. Grass-landing fixed wing aircraft should set it the same way as multicopters ... [m]
+	ApproachZ float32
+
+	// Extension fields. Absent from CRC_EXTRA, so a sender that predates
+	// them produces frames this build still accepts; they arrive zeroed.
+	// time_usec: Timestamp (UNIX Epoch time or time since system boot). The receiving end can infer timestamp format (since 1.1.1970 or since system boot) by checking for the magnitude of the number. [us]
+	TimeUsec uint64
+}
+
+// MsgID implements Message.
+func (*HomePosition) MsgID() MsgID { return MsgIDHomePosition }
+
+// MsgName implements Message.
+func (*HomePosition) MsgName() string { return "HOME_POSITION" }
+
+// CRCExtra implements Message.
+func (*HomePosition) CRCExtra() byte { return 104 }
+
+// PayloadLen implements Message.
+func (*HomePosition) PayloadLen() int { return 60 }
+
+// Marshal implements Message: it appends the little-endian wire payload of m
+// to dst and returns the extended slice. Every one of the 60 bytes is
+// written, so no zeroing is needed; MAVLink payloads have no padding.
+func (m *HomePosition) Marshal(dst []byte) []byte {
+	var b [60]byte
+	binary.LittleEndian.PutUint32(b[0:], uint32(m.Latitude))
+	binary.LittleEndian.PutUint32(b[4:], uint32(m.Longitude))
+	binary.LittleEndian.PutUint32(b[8:], uint32(m.Altitude))
+	binary.LittleEndian.PutUint32(b[12:], math.Float32bits(m.X))
+	binary.LittleEndian.PutUint32(b[16:], math.Float32bits(m.Y))
+	binary.LittleEndian.PutUint32(b[20:], math.Float32bits(m.Z))
+	for i := range m.Q {
+		binary.LittleEndian.PutUint32(b[24+i*4:], math.Float32bits(m.Q[i]))
+	}
+	binary.LittleEndian.PutUint32(b[40:], math.Float32bits(m.ApproachX))
+	binary.LittleEndian.PutUint32(b[44:], math.Float32bits(m.ApproachY))
+	binary.LittleEndian.PutUint32(b[48:], math.Float32bits(m.ApproachZ))
+	binary.LittleEndian.PutUint64(b[52:], m.TimeUsec)
+	return append(dst, b[:]...)
+}
+
+// Unmarshal implements Message. A payload longer than 60 bytes is accepted
+// and the excess ignored, so a newer peer that has grown an extension field
+// does not break this build. A SHORTER payload is rejected: zero-extending a
+// truncated v2 payload is the frame decoder's job, because only it knows the
+// payload was trimmed rather than corrupted.
+func (m *HomePosition) Unmarshal(p []byte) error {
+	if len(p) < 60 {
+		return fmt.Errorf("mavlink: HOME_POSITION payload is %d bytes, want 60: %w", len(p), ErrShortPayload)
+	}
+	m.Latitude = int32(binary.LittleEndian.Uint32(p[0:]))
+	m.Longitude = int32(binary.LittleEndian.Uint32(p[4:]))
+	m.Altitude = int32(binary.LittleEndian.Uint32(p[8:]))
+	m.X = math.Float32frombits(binary.LittleEndian.Uint32(p[12:]))
+	m.Y = math.Float32frombits(binary.LittleEndian.Uint32(p[16:]))
+	m.Z = math.Float32frombits(binary.LittleEndian.Uint32(p[20:]))
+	for i := range m.Q {
+		m.Q[i] = math.Float32frombits(binary.LittleEndian.Uint32(p[24+i*4:]))
+	}
+	m.ApproachX = math.Float32frombits(binary.LittleEndian.Uint32(p[40:]))
+	m.ApproachY = math.Float32frombits(binary.LittleEndian.Uint32(p[44:]))
+	m.ApproachZ = math.Float32frombits(binary.LittleEndian.Uint32(p[48:]))
+	m.TimeUsec = binary.LittleEndian.Uint64(p[52:])
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// EXTENDED_SYS_STATE (245)
+// ---------------------------------------------------------------------------
+
+// ExtendedSysState is MAVLink message EXTENDED_SYS_STATE (245).
+//
+// # Provides state for additional features
+//
+// Fields are in WIRE order, not the order common.xml declares them: base
+// fields sorted by descending type size, then 0 extension field(s)
+// unsorted. Payload is 2 bytes.
+type ExtendedSysState struct {
+	// vtol_state: The VTOL state if applicable. Is set to MAV_VTOL_STATE_UNDEFINED if UAV is not in VTOL configuration.
+	// Values come from the MAV_VTOL_STATE enum.
+	VtolState uint8
+	// landed_state: The landed state. Is set to MAV_LANDED_STATE_UNDEFINED if landed state is unknown.
+	// Values come from the MAV_LANDED_STATE enum.
+	LandedState uint8
+}
+
+// MsgID implements Message.
+func (*ExtendedSysState) MsgID() MsgID { return MsgIDExtendedSysState }
+
+// MsgName implements Message.
+func (*ExtendedSysState) MsgName() string { return "EXTENDED_SYS_STATE" }
+
+// CRCExtra implements Message.
+func (*ExtendedSysState) CRCExtra() byte { return 130 }
+
+// PayloadLen implements Message.
+func (*ExtendedSysState) PayloadLen() int { return 2 }
+
+// Marshal implements Message: it appends the little-endian wire payload of m
+// to dst and returns the extended slice. Every one of the 2 bytes is
+// written, so no zeroing is needed; MAVLink payloads have no padding.
+func (m *ExtendedSysState) Marshal(dst []byte) []byte {
+	var b [2]byte
+	b[0] = m.VtolState
+	b[1] = m.LandedState
+	return append(dst, b[:]...)
+}
+
+// Unmarshal implements Message. A payload longer than 2 bytes is accepted
+// and the excess ignored, so a newer peer that has grown an extension field
+// does not break this build. A SHORTER payload is rejected: zero-extending a
+// truncated v2 payload is the frame decoder's job, because only it knows the
+// payload was trimmed rather than corrupted.
+func (m *ExtendedSysState) Unmarshal(p []byte) error {
+	if len(p) < 2 {
+		return fmt.Errorf("mavlink: EXTENDED_SYS_STATE payload is %d bytes, want 2: %w", len(p), ErrShortPayload)
+	}
+	m.VtolState = p[0]
+	m.LandedState = p[1]
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // STATUSTEXT (253)
 // ---------------------------------------------------------------------------
 
@@ -2072,11 +2619,16 @@ var messageFactory = map[MsgID]func() Message{
 	MsgIDMissionClearAll:    func() Message { return new(MissionClearAll) },
 	MsgIDMissionItemReached: func() Message { return new(MissionItemReached) },
 	MsgIDMissionAck:         func() Message { return new(MissionAck) },
+	MsgIDGPSGlobalOrigin:    func() Message { return new(GPSGlobalOrigin) },
 	MsgIDMissionRequestInt:  func() Message { return new(MissionRequestInt) },
 	MsgIDMissionItemInt:     func() Message { return new(MissionItemInt) },
+	MsgIDVfrHud:             func() Message { return new(VfrHud) },
 	MsgIDCommandLong:        func() Message { return new(CommandLong) },
 	MsgIDCommandAck:         func() Message { return new(CommandAck) },
+	MsgIDBatteryStatus:      func() Message { return new(BatteryStatus) },
 	MsgIDAutopilotVersion:   func() Message { return new(AutopilotVersion) },
+	MsgIDHomePosition:       func() Message { return new(HomePosition) },
+	MsgIDExtendedSysState:   func() Message { return new(ExtendedSysState) },
 	MsgIDStatustext:         func() Message { return new(Statustext) },
 }
 
@@ -2100,11 +2652,16 @@ var messageNames = map[MsgID]string{
 	MsgIDMissionClearAll:    "MISSION_CLEAR_ALL",
 	MsgIDMissionItemReached: "MISSION_ITEM_REACHED",
 	MsgIDMissionAck:         "MISSION_ACK",
+	MsgIDGPSGlobalOrigin:    "GPS_GLOBAL_ORIGIN",
 	MsgIDMissionRequestInt:  "MISSION_REQUEST_INT",
 	MsgIDMissionItemInt:     "MISSION_ITEM_INT",
+	MsgIDVfrHud:             "VFR_HUD",
 	MsgIDCommandLong:        "COMMAND_LONG",
 	MsgIDCommandAck:         "COMMAND_ACK",
+	MsgIDBatteryStatus:      "BATTERY_STATUS",
 	MsgIDAutopilotVersion:   "AUTOPILOT_VERSION",
+	MsgIDHomePosition:       "HOME_POSITION",
+	MsgIDExtendedSysState:   "EXTENDED_SYS_STATE",
 	MsgIDStatustext:         "STATUSTEXT",
 }
 
@@ -2129,11 +2686,16 @@ var knownPayloadLen = map[MsgID]int{
 	MsgIDMissionClearAll:    3,
 	MsgIDMissionItemReached: 2,
 	MsgIDMissionAck:         8,
+	MsgIDGPSGlobalOrigin:    20,
 	MsgIDMissionRequestInt:  5,
 	MsgIDMissionItemInt:     38,
+	MsgIDVfrHud:             20,
 	MsgIDCommandLong:        33,
 	MsgIDCommandAck:         10,
+	MsgIDBatteryStatus:      54,
 	MsgIDAutopilotVersion:   78,
+	MsgIDHomePosition:       60,
+	MsgIDExtendedSysState:   2,
 	MsgIDStatustext:         54,
 }
 
@@ -2158,10 +2720,15 @@ var crcExtras = map[MsgID]byte{
 	MsgIDMissionClearAll:    232,
 	MsgIDMissionItemReached: 11,
 	MsgIDMissionAck:         153,
+	MsgIDGPSGlobalOrigin:    39,
 	MsgIDMissionRequestInt:  196,
 	MsgIDMissionItemInt:     38,
+	MsgIDVfrHud:             20,
 	MsgIDCommandLong:        152,
 	MsgIDCommandAck:         143,
+	MsgIDBatteryStatus:      154,
 	MsgIDAutopilotVersion:   178,
+	MsgIDHomePosition:       104,
+	MsgIDExtendedSysState:   130,
 	MsgIDStatustext:         83,
 }

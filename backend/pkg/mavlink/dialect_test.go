@@ -40,11 +40,16 @@ func TestCRCExtraGoldens(t *testing.T) {
 		{MsgIDMissionClearAll, 232},
 		{MsgIDMissionItemReached, 11},
 		{MsgIDMissionAck, 153},
+		{MsgIDGPSGlobalOrigin, 39},
 		{MsgIDMissionRequestInt, 196},
 		{MsgIDMissionItemInt, 38},
+		{MsgIDVfrHud, 20},
 		{MsgIDCommandLong, 152},
 		{MsgIDCommandAck, 143},
+		{MsgIDBatteryStatus, 154},
 		{MsgIDAutopilotVersion, 178},
+		{MsgIDHomePosition, 104},
+		{MsgIDExtendedSysState, 130},
 		{MsgIDStatustext, 83},
 	}
 

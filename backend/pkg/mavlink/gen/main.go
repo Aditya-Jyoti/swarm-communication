@@ -90,11 +90,16 @@ var wantMessages = []uint32{
 	45,  // MISSION_CLEAR_ALL
 	46,  // MISSION_ITEM_REACHED
 	47,  // MISSION_ACK
+	49,  // GPS_GLOBAL_ORIGIN
 	51,  // MISSION_REQUEST_INT
 	73,  // MISSION_ITEM_INT
+	74,  // VFR_HUD
 	76,  // COMMAND_LONG
 	77,  // COMMAND_ACK
+	147, // BATTERY_STATUS
 	148, // AUTOPILOT_VERSION
+	242, // HOME_POSITION
+	245, // EXTENDED_SYS_STATE
 	253, // STATUSTEXT
 }
 
@@ -155,6 +160,44 @@ var wantEnums = []enumSelection{
 	{name: "MAV_RESULT"},
 	{name: "MAV_MISSION_RESULT"},
 	{name: "MAV_PARAM_TYPE"},
+	// The sensor bitmap SYS_STATUS carries. Only the bits a multirotor is
+	// expected to have are generated, because a ground station turns a bit
+	// that is present-but-unhealthy into a red health bar and a bit that is
+	// absent into no opinion at all -- so the allowlist IS the claim this
+	// bridge makes about the airframe. See bridge.go sensorsPresent.
+	{name: "MAV_SYS_STATUS_SENSOR", entries: []string{
+		"MAV_SYS_STATUS_SENSOR_3D_GYRO",
+		"MAV_SYS_STATUS_SENSOR_3D_ACCEL",
+		"MAV_SYS_STATUS_SENSOR_3D_MAG",
+		"MAV_SYS_STATUS_SENSOR_ABSOLUTE_PRESSURE",
+		"MAV_SYS_STATUS_SENSOR_GPS",
+		"MAV_SYS_STATUS_SENSOR_ANGULAR_RATE_CONTROL",
+		"MAV_SYS_STATUS_SENSOR_ATTITUDE_STABILIZATION",
+		"MAV_SYS_STATUS_SENSOR_YAW_POSITION",
+		"MAV_SYS_STATUS_SENSOR_Z_ALTITUDE_CONTROL",
+		"MAV_SYS_STATUS_SENSOR_XY_POSITION_CONTROL",
+		"MAV_SYS_STATUS_SENSOR_MOTOR_OUTPUTS",
+		"MAV_SYS_STATUS_SENSOR_BATTERY",
+	}},
+	{name: "GPS_FIX_TYPE"},
+	{name: "MAV_LANDED_STATE"},
+	{name: "MAV_VTOL_STATE"},
+	{name: "MAV_BATTERY_FUNCTION", entries: []string{
+		"MAV_BATTERY_FUNCTION_UNKNOWN",
+		"MAV_BATTERY_FUNCTION_ALL",
+		"MAV_BATTERY_FUNCTION_PROPULSION",
+	}},
+	{name: "MAV_BATTERY_TYPE", entries: []string{
+		"MAV_BATTERY_TYPE_UNKNOWN",
+		"MAV_BATTERY_TYPE_LIPO",
+	}},
+	{name: "MAV_BATTERY_CHARGE_STATE"},
+	{name: "MAV_PROTOCOL_CAPABILITY", entries: []string{
+		"MAV_PROTOCOL_CAPABILITY_MISSION_FLOAT",
+		"MAV_PROTOCOL_CAPABILITY_MISSION_INT",
+		"MAV_PROTOCOL_CAPABILITY_COMMAND_INT",
+		"MAV_PROTOCOL_CAPABILITY_MAVLINK2",
+	}},
 }
 
 // ---------------------------------------------------------------------------
