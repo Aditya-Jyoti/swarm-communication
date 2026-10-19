@@ -106,6 +106,33 @@ services:
       SWARM_SIM_BASE_MS: "${SWARM_SIM_BASE_MS:-1}"
       SWARM_SIM_PER_UNIT_MS: "${SWARM_SIM_PER_UNIT_MS:-2}"
       SWARM_SIM_JITTER_MS: "${SWARM_SIM_JITTER_MS:-0.5}"
+      # MAVLink bridge: every node becomes a vehicle in a ground station
+      # (docs/architecture/mavlink-bridge.md). Off unless MAV_ENABLED=true.
+      # The bridge SENDS to MAV_GCS, so a ground station on the Docker host is
+      # reached through host.docker.internal (see extra_hosts below).
+      MAV_ENABLED: "${MAV_ENABLED:-false}"
+      MAV_GCS: "${MAV_GCS:-host.docker.internal:14550}"
+      MAV_ORIGIN_LAT: "${MAV_ORIGIN_LAT:-12.843736}"
+      MAV_ORIGIN_LON: "${MAV_ORIGIN_LON:-80.154725}"
+      MAV_ORIGIN_ALT: "${MAV_ORIGIN_ALT:-15}"
+      # 500m working area / 100 cube units = 5 metres per unit.
+      MAV_METRES_PER_UNIT: "${MAV_METRES_PER_UNIT:-5}"
+      MAV_SPEED_UNITS_S: "${MAV_SPEED_UNITS_S:-3}"
+      MAV_DRIFT: "${MAV_DRIFT:-true}"
+      MAV_DRIFT_RADIUS: "${MAV_DRIFT_RADIUS:-4}"
+      MAV_DRIFT_SPEED: "${MAV_DRIFT_SPEED:-0.4}"
+    # host.docker.internal is not a Docker Engine builtin on Linux; this maps it
+    # to the host gateway so the bridge can reach a ground station running on
+    # the same machine as Docker.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The bridge's UDP port, published so a ground station on this machine can
+    # dial IN. That is the path to prefer: the bridge learns the station's
+    # address from its first packet and streams back to it, which needs no
+    # route from the container to the host. The host port differs from 14550 on
+    # purpose, because QGroundControl itself binds 14550 locally.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MAV_PORT:-14555}:14550/udp"
     # Not published by default: the dashboard and API are reached through
     # `frontend`. To expose the CC directly (e.g. to bypass nginx while
     # debugging), uncomment these two lines and set CC_HTTP_PORT in .env:
