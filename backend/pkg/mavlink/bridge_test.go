@@ -257,9 +257,9 @@ func TestBridgeVehiclesPerNode(t *testing.T) {
 	b := newTestBridge(t, swarm, nil)
 	b.sync(t)
 
-	// Sysids follow the contract: trailing digits where there are any, lowest
-	// free id otherwise, so "seed" takes 1.
-	for node, want := range map[protocol.NodeID]byte{"seed": 1, "swarm-net-node-2": 2, "swarm-net-node-3": 3} {
+	// Sysids follow the contract: trailing digits where there are any, highest
+	// free id otherwise, so "seed" takes 254 and leaves the numbers alone.
+	for node, want := range map[protocol.NodeID]byte{"seed": 254, "swarm-net-node-2": 2, "swarm-net-node-3": 3} {
 		if got, ok := b.vehicles.Lookup(node); !ok || got != want {
 			t.Errorf("%s got sysid (%d, %v), want %d", node, got, ok, want)
 		}
@@ -452,8 +452,9 @@ func TestBridgePositionProjection(t *testing.T) {
 	if gp.Lat != want.LatE7 || gp.Lon != want.LonE7 || gp.Alt != want.AltMM {
 		t.Errorf("position = %d/%d/%d, want %+v", gp.Lat, gp.Lon, gp.Alt, want)
 	}
-	// Home is where it is, so relative altitude is zero and nothing is moving.
-	if gp.RelativeAlt != 0 || gp.Vx != 0 || gp.Vy != 0 || gp.Vz != 0 {
+	// Relative altitude is height above the ground plane: z = 1 unit at the
+	// default 20 m per unit is 20 m, or 20000 mm. Nothing is moving.
+	if gp.RelativeAlt != 20000 || gp.Vx != 0 || gp.Vy != 0 || gp.Vz != 0 {
 		t.Errorf("a stationary vehicle reported %+v", gp)
 	}
 	if gp.TimeBootMs != 200 {

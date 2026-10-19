@@ -719,7 +719,13 @@ func (b *Bridge) sysStatus(v *vehicle) *SysStatus {
 
 func (b *Bridge) globalPosition(v *vehicle, now time.Time) *GlobalPositionInt {
 	g := b.cfg.Projection.Project(v.mover.Pos())
-	homeAlt := b.cfg.Projection.Project(v.mover.Home()).AltMM
+	// RelativeAlt is height above the GROUND PLANE (cube z, scaled), not above
+	// this vehicle's drift centre. Measuring from home makes a node at z = 91
+	// report roughly zero, because its home is at the same height -- and a
+	// ground station puts relative altitude on the main flight display, so the
+	// whole swarm reads as sitting on the ground. Ground level is z = 0, which
+	// projects to exactly the origin altitude.
+	groundAlt := b.cfg.Projection.Project(protocol.Position{}).AltMM
 	vel := v.mover.Vel()
 	k := b.cfg.Projection.MetresPerUnit
 	// cm/s in NED: x north, y east, z DOWN. The sign on z is the one that is
@@ -736,7 +742,7 @@ func (b *Bridge) globalPosition(v *vehicle, now time.Time) *GlobalPositionInt {
 		Lat:         g.LatE7,
 		Lon:         g.LonE7,
 		Alt:         g.AltMM,
-		RelativeAlt: g.AltMM - homeAlt,
+		RelativeAlt: g.AltMM - groundAlt,
 		Vx:          toCMS(vel.Y),
 		Vy:          toCMS(vel.X),
 		Vz:          toCMS(-vel.Z),
