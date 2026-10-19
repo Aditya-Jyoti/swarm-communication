@@ -27,7 +27,9 @@ flowchart LR
 | Framing, CRC, message codecs | `backend/pkg/mavlink/` |
 | Sysid assignment, vehicle state | `backend/pkg/mavlink/vehicles.go` |
 | Mission protocol state machine | `backend/pkg/mavlink/mission.go` |
-| Flight and idle drift | `backend/pkg/mavlink/mover.go` |
+| Flight, idle drift, idle patrol | `backend/pkg/mavlink/mover.go` |
+| Sensor health, GPS, battery, home | `backend/pkg/mavlink/health.go` |
+| VFR_HUD and ATTITUDE | `backend/pkg/mavlink/instruments.go` |
 | CC wiring | `backend/pkg/controlcenter/mavlink.go` |
 | Config | `backend/cmd/control-center/config.go` |
 
@@ -95,11 +97,29 @@ Out, per vehicle:
 | Message | Rate | Carries |
 |---|---|---|
 | `HEARTBEAT` (0) | 1 Hz | Liveness. `custom_mode` is 1 for a leader, 0 for a worker. Armed while flying. |
+| `SYS_STATUS` (1) | 1 Hz | Sensor health bits, battery, plus dropped frames and ledger size mapped onto load and error counters |
+| `BATTERY_STATUS` (147) | 1 Hz | The 6S pack: cell voltages, current, consumed charge, percentage |
+| `GPS_RAW_INT` (24) | 1 Hz | Fix type, satellite count, dilution of position |
+| `EXTENDED_SYS_STATE` (245) | 1 Hz | `ON_GROUND` at cube z = 0, `IN_AIR` otherwise |
+| `HOME_POSITION` (242) | 1 Hz | Where drift is centred and where Return flies to |
+| `GPS_GLOBAL_ORIGIN` (49) | 1 Hz | The local frame's origin, cube (0, 0, 0) |
 | `GLOBAL_POSITION_INT` (33) | 5 Hz | Projected position, altitude, ground velocity |
-| `SYS_STATUS` (1) | 1 Hz | Dropped frames and ledger size, mapped onto load and error counters |
+| `ATTITUDE` (30) | 5 Hz | Roll, pitch, yaw and rates, derived from the Mover |
+| `VFR_HUD` (74) | 5 Hz | Groundspeed, airspeed, heading, climb, throttle, altitude |
 | `STATUSTEXT` (253) | on event | `leader_change`, `node_down`, re-election, mission reassignment |
 | `MISSION_CURRENT` (42) | on change | Item the cluster is working on |
 | `MISSION_ITEM_REACHED` (46) | on arrival | Completed item index |
+| `AUTOPILOT_VERSION` (148) | on request | Capability bitmap: `MISSION_INT`, `MISSION_FLOAT`, `MAVLINK2` |
+
+The 1 Hz messages all come from one read of a vehicle's state, and the 5 Hz
+messages all come from one movement step, so the HUD can never argue with the
+map.
+
+**Why so many.** With only `HEARTBEAT`, `SYS_STATUS` and
+`GLOBAL_POSITION_INT`, QGC shows a grey "not ready" health bar, no GPS lock, no
+battery and no HUD: it has nothing to draw. Each message above turns one of
+those off. `EXTENDED_SYS_STATE` also decides whether QGC offers Takeoff or Land,
+and `HOME_POSITION` is what puts the home marker on the map and un-greys Return.
 
 A node is a vehicle exactly while it heartbeats. A killed node stops, and QGC reports the
 link lost -- which is what you want a failover to look like.
@@ -127,6 +147,16 @@ ignored.
 
 `HEARTBEAT` uses `MAV_AUTOPILOT_GENERIC`, not the ArduPilot id. Claiming ArduPilot makes QGC
 demand a full parameter set and real flight modes.
+
+`MAV_CMD_REQUEST_MESSAGE` is answered for `AUTOPILOT_VERSION`, `HOME_POSITION`,
+`GPS_GLOBAL_ORIGIN` and `EXTENDED_SYS_STATE`. The requested message is sent
+AFTER the `COMMAND_ACK`, because QGC waits for the ack before it starts looking
+for the reply.
+
+`AUTOPILOT_VERSION` advertises `MISSION_INT` and `MISSION_FLOAT` but NOT
+`COMMAND_INT`: the bridge handles `COMMAND_LONG` only, and advertising a
+capability it does not implement would earn silence on the one path that must
+never be silent.
 
 ## 5. Swarm-level missions
 
@@ -211,19 +241,95 @@ not the loss of a node.
 | Env var | Default | Meaning |
 |---|---|---|
 | `MAV_SPEED_UNITS_S` | `3` | Flight speed toward a waypoint, cube units per second |
-| `MAV_DRIFT` | `true` | Idle drift on or off |
-| `MAV_DRIFT_RADIUS` | `4` | Maximum drift from the home position, in units |
-| `MAV_DRIFT_SPEED` | `0.4` | Drift speed, units per second |
+| `MAV_MOTION` | `drift` | What an idle node does: `drift`, `patrol` or `still` |
+| `MAV_DRIFT` | `true` | Idle motion on or off. Overrides `MAV_MOTION` when false |
+| `MAV_DRIFT_RADIUS` | `4` | Drift bound and patrol radius, in units |
+| `MAV_DRIFT_SPEED` | `0.4` | Drift and patrol speed, units per second |
 
-Idle nodes wander around their home position: a seeded random walk pulled back toward home,
-so a node stays inside `MAV_DRIFT_RADIUS` and never wanders off. The seed comes from the node
-id, so a restart drifts the same way.
+`drift` (the default, and the only behaviour before `MAV_MOTION` existed): nodes wander around
+their home position on a seeded random walk pulled back toward home, so a node stays inside
+`MAV_DRIFT_RADIUS` and never wanders off. The seed comes from the node id, so a restart drifts
+the same way.
 
-Drift is deliberately slow. Position feeds latency feeds election, so fast drift makes
-elections flap and you lose the ability to say what caused a re-election. If you are
-debugging clustering rather than demoing, set `MAV_DRIFT=false` and nodes hold still.
+`patrol`: each node flies a slow circuit of radius `MAV_DRIFT_RADIUS` around its home, at
+`MAV_DRIFT_SPEED`. At the defaults that is one lap a minute. The starting bearing comes from
+the node id, so the fleet is spread around its circuits instead of flying in formation. Use it
+for a demo: the swarm keeps moving on its own, with no mission uploaded.
 
-## 9. Running it
+`still`: nothing moves unless a mission or an operator moves it. Same as `MAV_DRIFT=false`,
+which still wins if it is set.
+
+**The trade-off, whichever mode you pick.** Position feeds emulated latency, which feeds the
+election (section 1). Faster or wider motion therefore means more re-elections, and at some
+point you lose the ability to say what caused one. `patrol` moves further from home than
+`drift` does, so pair it with a real election margin:
+
+```bash
+MAV_MOTION=patrol SWARM_SIM_HYSTERESIS=40 docker compose up -d
+```
+
+See section 7: the margin is in milliseconds of RTT, and the compose default of `40` is steady
+through a mission. If you are debugging clustering rather than demoing, `MAV_MOTION=still`.
+
+## 9. What is real and what is synthesised
+
+A ground station draws everything it is told as a measurement. Most of what the
+bridge tells it is not one. There is no airframe: no IMU, no magnetometer, no
+GPS receiver, no battery. QGC will not show a vehicle as flyable without them,
+so they are invented.
+
+| Field | Source |
+|---|---|
+| Position, altitude, velocity | **Real.** Cube position the CC owns, projected |
+| Leader or worker (`custom_mode`) | **Real.** The swarm's own election |
+| Liveness (a vehicle heartbeats at all) | **Real.** The node's link |
+| Dropped frames, ledger size | **Real.** Node telemetry |
+| Degraded (one withdrawn health bit) | **Real.** The swarm's chaos-delay flag |
+| Mission assignment and arrivals | **Real.** And each arrival submits a swarm task |
+| Sensor health bits | Synthetic. Twelve sensors claimed; none exist |
+| GPS fix type, satellites, eph/epv | Synthetic. The POSITION is real, the receiver is not |
+| Battery voltage, current, percentage | Synthetic. A model drained by the Mover's speed |
+| Roll, pitch, yaw and rates | Synthetic. Read backwards off the motion, kinematic not dynamic |
+| Airspeed, throttle | Synthetic. Airspeed equals groundspeed: there is no wind |
+| Firmware version, uid | Synthetic |
+| Armed | A flag, not an airframe. It does gate mission execution |
+
+Two rules keep this honest rather than decorative:
+
+1. **No noise.** Nothing is fuzzed to look convincing. `GPS_RAW_INT` carries the
+   same projected position as `GLOBAL_POSITION_INT`, because a station that saw
+   them disagree would report a position-estimate failure.
+2. **Derived from real state where possible.** The battery drains faster when a
+   vehicle flies. The attitude comes from the velocity the Mover measured. A
+   degraded node drops its GPS health bit AND its fix level, in the same tick.
+
+### The sensor health mapping
+
+`SYS_STATUS` claims twelve sensors present and enabled: 3D gyro, 3D
+accelerometer, 3D magnetometer, absolute pressure, GPS, angular rate control,
+attitude stabilisation, yaw position, Z altitude control, XY position control,
+motor outputs, battery. Not claimed: differential pressure (no pitot on a
+multirotor), optical flow, RC receiver (there is no pilot), geofence, terrain,
+logging, prearm check.
+
+A node the swarm reports as **degraded** (chaos `delay` injected) withdraws ONE
+bit, `MAV_SYS_STATUS_SENSOR_GPS`, and drops to a 2D fix with four fewer
+satellites. One bit, not the whole bitmap, for two reasons: a vehicle with every
+sensor unhealthy is indistinguishable from one that has crashed, and the kill
+demo needs "slow" to look different from "gone" -- a killed node stops
+heartbeating altogether.
+
+```mermaid
+flowchart LR
+    DEG["node reports degraded"] --> BIT["clear GPS health bit"]
+    DEG --> FIX["GPS_RAW_INT: 2D fix, -4 satellites, 3x eph"]
+    BIT --> QGC["QGC: amber health bar, GPS named"]
+    FIX --> QGC
+    KILL["node killed"] --> SILENT["no HEARTBEAT at all"]
+    SILENT --> LOST["QGC: link lost"]
+```
+
+## 10. Running it
 
 ```bash
 MAV_ENABLED=true docker compose up -d

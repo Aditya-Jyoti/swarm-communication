@@ -89,9 +89,14 @@ address just listens and nothing arrives. Several stations can be connected at o
 - **Leaders report a different custom mode** from workers, so the vehicle list shows roles.
 - **A killed node stops heartbeating**, so QGC reports the link lost. Leadership changes
   arrive as `STATUSTEXT`.
-- **Nodes drift** slowly around their home position. `MAV_DRIFT=false` holds them still, which
-  is what you want when debugging clustering: position drives emulated latency, so drift makes
-  election results jitter.
+- **Health, battery, GPS and a HUD are synthetic.** There is no airframe: the sensor health
+  bits, GPS fix, satellite count, battery and attitude are invented so QGC will show the swarm
+  as flyable. Position, role, liveness and mission progress are real. Section 9 of
+  [MAVLink Bridge](docs/architecture/mavlink-bridge.md) lists every field either way.
+- **Nodes drift** slowly around their home position. `MAV_MOTION=patrol` makes each node fly a
+  slow circuit instead, which keeps the fleet visibly moving in a demo; `MAV_MOTION=still`
+  holds them, which is what you want when debugging clustering. Position drives emulated
+  latency, so more motion makes election results jitter -- raise `SWARM_SIM_HYSTERESIS` with it.
 - **Plan a mission on a leader** and its whole cluster flies it, items going to the nearest
   idle member, so several vehicles move at once. Plan on a worker and it flies alone. Arm
   first: `MISSION_START` refuses while disarmed.
