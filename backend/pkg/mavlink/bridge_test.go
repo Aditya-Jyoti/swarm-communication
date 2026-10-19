@@ -990,3 +990,62 @@ func TestBridgeDefaults(t *testing.T) {
 		t.Errorf("intervals = %v/%v/%v", b.cfg.StatusInterval, b.cfg.PositionInterval, b.cfg.SyncInterval)
 	}
 }
+
+// TestBridgeServesTwoGroundStations is a regression test for a bug found with
+// QGroundControl and a diagnostic script connected at once -- which is what a
+// demo looks like. The bridge kept only the newest inbound sender, so the two
+// stations thrashed the single slot: whoever spoke last got the telemetry and
+// the other went silent a second at a time.
+func TestBridgeServesTwoGroundStations(t *testing.T) {
+	swarm := newFakeSwarm(node("swarm-net-node-2", false, true, at(10, 10, 10)))
+	// No configured GCS: both stations are learned, which is the real case.
+	b := newTestBridge(t, swarm, func(c *BridgeConfig) { c.GCS = "" })
+	b.sync(t)
+
+	second := newFakeGCS(t)
+	b.gcs.sendMsg(b.Addr(), &Heartbeat{Type: MavTypeGcs})
+	b.pumpOne(t)
+	second.sendMsg(b.Addr(), &Heartbeat{Type: MavTypeGcs})
+	b.pumpOne(t)
+
+	if got := len(b.stations); got != 2 {
+		t.Fatalf("learned %d ground stations, want 2", got)
+	}
+
+	// One status tick must reach BOTH, not whichever spoke last.
+	b.tickStatus()
+	for name, g := range map[string]*fakeGCS{"first": b.gcs, "second": second} {
+		var sawHeartbeat bool
+		for _, f := range g.recvN(2) {
+			if _, ok := f.Msg.(*Heartbeat); ok {
+				sawHeartbeat = true
+			}
+		}
+		if !sawHeartbeat {
+			t.Errorf("%s station got no HEARTBEAT", name)
+		}
+	}
+}
+
+// TestBridgeForgetsQuietGroundStation: a station that reconnects arrives from a
+// new source port, so stale entries must expire rather than doubling the
+// outbound traffic for ever.
+func TestBridgeForgetsQuietGroundStation(t *testing.T) {
+	swarm := newFakeSwarm(node("swarm-net-node-2", false, true, at(10, 10, 10)))
+	b := newTestBridge(t, swarm, func(c *BridgeConfig) { c.GCS = "" })
+	b.sync(t)
+
+	b.gcs.sendMsg(b.Addr(), &Heartbeat{Type: MavTypeGcs})
+	b.pumpOne(t)
+	if len(b.destinations()) != 1 {
+		t.Fatalf("destinations = %d, want 1", len(b.destinations()))
+	}
+
+	b.clock.advance(stationTTL + time.Second)
+	if got := len(b.destinations()); got != 0 {
+		t.Errorf("a station silent for longer than the TTL is still a destination (%d)", got)
+	}
+	if got := len(b.stations); got != 0 {
+		t.Errorf("expired station not forgotten: %d", got)
+	}
+}

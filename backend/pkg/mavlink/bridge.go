@@ -55,6 +55,17 @@ const (
 	// while the hub is busy with an election.
 	taskDepth = 64
 
+	// stationTTL is how long a ground station keeps getting telemetry after its
+	// last packet. A station heartbeats at 1 Hz, so this tolerates a long stall
+	// without dropping a live link, and forgets a dead one promptly enough that
+	// a reconnect from a new port does not double the outbound traffic for long.
+	stationTTL = 15 * time.Second
+	// stationMaxFails drops a station after this many consecutive failed
+	// writes. A refused write is normal and transient on UDP (an ICMP
+	// port-unreachable from an earlier datagram surfaces on a later send), so
+	// one failure means nothing; a run of them means nobody is there.
+	stationMaxFails = 20
+
 	// positionEpsilon is how far the swarm's idea of a node's position may
 	// differ from what the bridge last pushed before the bridge concludes
 	// somebody else moved it. In cube units: 1e-6 of a 20 m unit is 20 um, far
@@ -232,6 +243,24 @@ type vehicle struct {
 }
 
 // datagram is one received packet, handed from the reader to the loop.
+// station is one ground station that has sent us something.
+//
+// A SET rather than the single "newest sender" slot this started with. Two
+// stations talking at once -- QGroundControl plus a diagnostic script, which is
+// exactly what a demo looks like -- made the single slot thrash: whoever spoke
+// last got the telemetry and the other went silent, a second at a time.
+//
+// Each entry expires, so a station that reconnects from a new source port does
+// not leave the bridge shouting at the dead one for ever, and each counts its
+// own failures, so one unreachable station cannot starve a live one.
+type station struct {
+	addr *net.UDPAddr
+	// seen is when it last sent us anything, for expiry.
+	seen time.Time
+	// fails counts CONSECUTIVE failed writes. A write that succeeds clears it.
+	fails int
+}
+
 type datagram struct {
 	// b is a private copy: the reader reuses its receive buffer immediately.
 	b    []byte
@@ -304,12 +333,12 @@ type Bridge struct {
 	sendErrs  atomic.Uint64
 
 	// --- loop-owned, no synchronisation ---
-	vs      map[protocol.NodeID]*vehicle
-	order   []protocol.NodeID // vs keys, sorted: deterministic emission order
-	learned *net.UDPAddr      // newest inbound sender
-	out     []byte            // encode scratch, reused
-	boot    time.Time
-	lastPos time.Time
+	vs       map[protocol.NodeID]*vehicle
+	order    []protocol.NodeID   // vs keys, sorted: deterministic emission order
+	stations map[string]*station // ground stations that have spoken to us
+	out      []byte              // encode scratch, reused
+	boot     time.Time
+	lastPos  time.Time
 
 	// missions is the stored mission per owning sysid, and uploads the
 	// transfers in flight. Both are keyed by sysid rather than node id: a
@@ -361,6 +390,7 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 		configured: gcs,
 		vehicles:   NewVehicles(),
 		vs:         make(map[protocol.NodeID]*vehicle),
+		stations:   make(map[string]*station),
 		out:        make([]byte, 0, MaxFrameLen),
 		boot:       cfg.Now(),
 		lastPos:    cfg.Now(),
@@ -879,11 +909,23 @@ func (b *Bridge) send(sysID byte, m Message) {
 		if err := b.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 			return
 		}
-		if _, err := b.conn.WriteToUDP(b.out, d); err != nil {
+		_, err := b.conn.WriteToUDP(b.out, d)
+		if err != nil {
+			// Retry once. On an unconnected UDP socket, an ICMP
+			// port-unreachable provoked by an EARLIER datagram is reported on
+			// the next send -- which may be this one, aimed at a perfectly live
+			// station. Without the retry, one unreachable destination silently
+			// steals datagrams from the others.
+			_, err = b.conn.WriteToUDP(b.out, d)
+		}
+		if err != nil {
 			b.onSendError(d, m, err)
 			continue
 		}
 		b.sent.Add(1)
+		if st, ok := b.stations[d.String()]; ok {
+			st.fails = 0
+		}
 	}
 }
 
@@ -905,27 +947,60 @@ func (b *Bridge) onSendError(d *net.UDPAddr, m Message, err error) {
 	default:
 		b.log.Debug("mavlink send failed", "to", d, "msg", m.MsgName(), "err", err)
 	}
+	// A learned station that keeps failing is gone. The configured one is kept
+	// whatever happens: an operator put it there, and a station that is down
+	// now may come back.
+	if st, ok := b.stations[d.String()]; ok {
+		st.fails++
+		if st.fails >= stationMaxFails {
+			delete(b.stations, d.String())
+			b.log.Warn("mavlink: dropped unreachable ground station",
+				"addr", d, "consecutive_failures", st.fails)
+		}
+	}
 }
 
-// destinations is where to send: the configured ground station and the newest
-// one that has spoken to us, deduplicated.
+// destinations is where to send: the configured ground station, plus every
+// station that has spoken to us recently.
 //
-// Two slots rather than a set of every address ever seen. A ground station that
-// reconnects comes from a new source port, and a set would keep shouting at the
-// dead one for ever; a single learned slot follows the live link, and the
-// configured address keeps working for a ground station that never sends
-// anything.
+// Sorted, so a packet capture of one tick is reproducible rather than depending
+// on map order.
 func (b *Bridge) destinations() []*net.UDPAddr {
-	switch {
-	case b.configured == nil && b.learned == nil:
-		return nil
-	case b.configured == nil:
-		return []*net.UDPAddr{b.learned}
-	case b.learned == nil, sameAddr(b.configured, b.learned):
-		return []*net.UDPAddr{b.configured}
-	default:
-		return []*net.UDPAddr{b.configured, b.learned}
+	now := b.cfg.Now()
+	out := make([]*net.UDPAddr, 0, len(b.stations)+1)
+	if b.configured != nil {
+		out = append(out, b.configured)
 	}
+	for key, st := range b.stations {
+		if now.Sub(st.seen) > stationTTL {
+			delete(b.stations, key)
+			b.log.Info("mavlink: ground station went quiet", "addr", st.addr)
+			continue
+		}
+		if b.configured != nil && sameAddr(b.configured, st.addr) {
+			continue // already in the list
+		}
+		out = append(out, st.addr)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// learn records a ground station, or refreshes one we already know.
+func (b *Bridge) learn(from *net.UDPAddr, sysID byte) {
+	if from == nil {
+		return
+	}
+	key := from.String()
+	if st, ok := b.stations[key]; ok {
+		st.seen = b.cfg.Now()
+		return
+	}
+	b.stations[key] = &station{addr: from, seen: b.cfg.Now()}
+	// Logged once per station, not once per packet: two stations alternating
+	// used to produce a line every time either spoke.
+	b.log.Info("mavlink: learned ground station", "addr", from, "sysid", sysID,
+		"stations", len(b.stations))
 }
 
 func sameAddr(a, b *net.UDPAddr) bool {
@@ -953,10 +1028,7 @@ func (b *Bridge) onDatagram(d datagram) {
 		b.log.Warn("mavlink: decode failed", "from", d.from, "err", err)
 		return
 	}
-	if d.from != nil && (b.learned == nil || !sameAddr(b.learned, d.from)) {
-		b.learned = d.from
-		b.log.Info("mavlink: learned ground station", "addr", d.from, "sysid", f.SysID)
-	}
+	b.learn(d.from, f.SysID)
 
 	switch msg := f.Msg.(type) {
 	case *ParamRequestList:
