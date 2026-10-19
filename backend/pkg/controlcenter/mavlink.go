@@ -66,8 +66,13 @@ func (h *hub) mavNodes() []mavlink.NodeState {
 			// Who this node follows, for cluster membership. Empty while it is
 			// disconnected: a dead node's last known leader is not a cluster a
 			// mission should be handed to.
-			LeaderID:   leaderOf(connected, n.tel.Leader),
-			Connected:  connected,
+			LeaderID:  leaderOf(connected, n.tel.Leader),
+			Connected: connected,
+			// Chaos "delay" on this node. The bridge turns it into one
+			// withdrawn sensor health bit, so a ground station shows the same
+			// node in amber that the dashboard shows as degraded. A
+			// disconnected node is not degraded, it is gone.
+			Degraded:   connected && n.tel.Degraded,
 			Pos:        h.positionOf(id),
 			Dropped:    n.tel.Dropped,
 			LedgerSize: n.tel.LedgerSize,
