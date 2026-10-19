@@ -96,13 +96,20 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 	if err != nil {
 		return fmt.Errorf("control-center: listen http on %s: %w", cfg.HTTPListen, err)
 	}
-	cc, err := controlcenter.New(controlcenter.Config{
+	ccCfg := controlcenter.Config{
 		NodeListen:  cfg.NodeListen,
 		APIToken:    cfg.APIToken,
 		SimDisabled: !cfg.SimEnabled,
 		SimParams:   &cfg.SimParams,
 		Logger:      log,
-	})
+	}
+	if cfg.MAV.Enabled {
+		// Off by default: the bridge binds a UDP port and emits telemetry for
+		// every node, which is pure cost unless a ground station is watching.
+		bridge := cfg.MAV.Bridge()
+		ccCfg.MAVLink = &bridge
+	}
+	cc, err := controlcenter.New(ccCfg)
 	if err != nil {
 		_ = httpLn.Close()
 		return fmt.Errorf("control-center: %w", err)
@@ -112,6 +119,9 @@ func run(ctx context.Context, cfg Config, stderr io.Writer, onListening func(nod
 	}
 	// Whether auth is on, never the token itself.
 	log.Info("control center listening", "nodes", cc.NodeAddr(), "http", httpLn.Addr(), "version", version, "api_token", cfg.APIToken != "")
+	if addr := cc.MAVAddr(); addr != nil {
+		log.Info("mavlink bridge listening", "addr", addr, "gcs", cfg.MAV.GCS)
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
