@@ -132,6 +132,7 @@ services:
       # 500m working area / 100 cube units = 5 metres per unit.
       MAV_METRES_PER_UNIT: "${MAV_METRES_PER_UNIT:-5}"
       MAV_SPEED_UNITS_S: "${MAV_SPEED_UNITS_S:-3}"
+      MAV_MOTION: "${MAV_MOTION:-drift}"
       MAV_DRIFT: "${MAV_DRIFT:-true}"
       MAV_DRIFT_RADIUS: "${MAV_DRIFT_RADIUS:-4}"
       MAV_DRIFT_SPEED: "${MAV_DRIFT_SPEED:-0.4}"

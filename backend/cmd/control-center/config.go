@@ -58,7 +58,7 @@ type Config struct {
 }
 
 // MAVSettings is the MAVLink bridge's slice of the configuration
-// (docs/architecture/mavlink-bridge.md sections 2, 6 and 7).
+// (docs/architecture/mavlink-bridge.md sections 2, 6, 7 and 8).
 //
 // A plain comparable struct rather than a mavlink.BridgeConfig: BridgeConfig
 // carries a logger, a clock and the swarm source, none of which belong to
@@ -77,6 +77,9 @@ type MAVSettings struct {
 	Projection mavlink.Projection
 	// SpeedUnitsPerSec is flight speed. MAV_SPEED_UNITS_S.
 	SpeedUnitsPerSec float64
+	// Motion is what an idle node does: drift, patrol or still. MAV_MOTION,
+	// default drift (the behaviour that predates this knob).
+	Motion mavlink.IdleMode
 	// Drift turns idle drift on. MAV_DRIFT, default true. Positive here and
 	// inverted for mavlink.MoveConfig, because an operator reads MAV_DRIFT,
 	// not a zero value.
@@ -96,6 +99,7 @@ func (m MAVSettings) Bridge() mavlink.BridgeConfig {
 		Projection: m.Projection,
 		Move: mavlink.MoveConfig{
 			SpeedUnitsPerSec: m.SpeedUnitsPerSec,
+			Idle:             m.Motion,
 			DriftDisabled:    !m.Drift,
 			DriftRadius:      m.DriftRadius,
 			DriftSpeed:       m.DriftSpeed,
@@ -130,6 +134,7 @@ var settings = []setting{
 	{flag: "mav-origin-alt", env: "MAV_ORIGIN_ALT", def: fmtFloat(mavlink.DefaultOriginAltM), usage: "lab origin altitude, metres AMSL", noPrefix: true},
 	{flag: "mav-metres-per-unit", env: "MAV_METRES_PER_UNIT", def: fmtFloat(mavlink.DefaultMetresPerUnit), usage: "size of one cube unit in metres", noPrefix: true},
 	{flag: "mav-speed-units-s", env: "MAV_SPEED_UNITS_S", def: fmtFloat(mavlink.DefaultSpeedUnitsPerSec), usage: "flight speed toward a waypoint, units per second", noPrefix: true},
+	{flag: "mav-motion", env: "MAV_MOTION", def: string(mavlink.IdleDrift), usage: "what an idle node does: drift|patrol|still. patrol flies a slow circuit around home, which shows continuous movement in a demo -- but position drives emulated latency, so it also perturbs the election; raise SWARM_SIM_HYSTERESIS with it", noPrefix: true},
 	{flag: "mav-drift", env: "MAV_DRIFT", def: "true", usage: "let idle nodes drift around their home position", noPrefix: true},
 	{flag: "mav-drift-radius", env: "MAV_DRIFT_RADIUS", def: fmtFloat(mavlink.DefaultDriftRadius), usage: "maximum drift from home, units", noPrefix: true},
 	{flag: "mav-drift-speed", env: "MAV_DRIFT_SPEED", def: fmtFloat(mavlink.DefaultDriftSpeed), usage: "drift speed, units per second", noPrefix: true},
@@ -235,6 +240,12 @@ func loadMAV(raw map[string]*string) (MAVSettings, error) {
 	}
 	if m.Drift, err = parseBool("mav-drift", *raw["mav-drift"]); err != nil {
 		return MAVSettings{}, err
+	}
+	// A mistyped mode is a configuration error, like a mistyped origin: silently
+	// falling back to drift would leave an operator watching for a patrol that
+	// never starts.
+	if m.Motion, err = mavlink.ParseIdleMode(strings.TrimSpace(*raw["mav-motion"])); err != nil {
+		return MAVSettings{}, fmt.Errorf("%w: mav-motion: %v", errConfig, err)
 	}
 	if err = checkBind("mav-bind", m.Bind); err != nil {
 		return MAVSettings{}, err

@@ -22,6 +22,7 @@ func defaultMAV() MAVSettings {
 			MetresPerUnit: 20,
 		},
 		SpeedUnitsPerSec: 3,
+		Motion:           mavlink.IdleDrift,
 		Drift:            true,
 		DriftRadius:      4,
 		DriftSpeed:       0.4,
@@ -40,6 +41,7 @@ func TestLoadMAV(t *testing.T) {
 		"MAV_ORIGIN_ALT":      "58",
 		"MAV_METRES_PER_UNIT": "5",
 		"MAV_SPEED_UNITS_S":   "10",
+		"MAV_MOTION":          "patrol",
 		"MAV_DRIFT":           "false",
 		"MAV_DRIFT_RADIUS":    "0",
 		"MAV_DRIFT_SPEED":     "0",
@@ -56,6 +58,7 @@ func TestLoadMAV(t *testing.T) {
 		Projection: mavlink.Projection{OriginLat: -33.8688, OriginLon: 151.2093, OriginAltM: 58, MetresPerUnit: 5},
 
 		SpeedUnitsPerSec: 10,
+		Motion:           mavlink.IdlePatrol,
 		Drift:            false,
 	}
 	if cfg.MAV != want {
@@ -110,6 +113,10 @@ func TestLoadMAV(t *testing.T) {
 		{"-mav-drift-radius=101"},
 		{"-mav-drift-speed=-0.1"},
 		{"-mav-drift-speed=fast"},
+		// A mistyped motion mode must not silently fall back to drift: the
+		// operator would watch for a patrol that never starts.
+		{"-mav-motion=patroll"},
+		{"-mav-motion=Patrol"},
 	} {
 		if _, err := Load(args, noEnv); !errors.Is(err, errConfig) || exitCode(err) != exitConfig {
 			t.Errorf("Load(%v) = %v, want config error", args, err)
@@ -128,6 +135,11 @@ func TestMAVSettingsBridge(t *testing.T) {
 		t.Error("MAV_DRIFT=false did not disable drift")
 	}
 	m.Drift = true
+	// MAV_MOTION reaches the mover, and MAV_DRIFT=false still overrides it.
+	m.Motion = mavlink.IdlePatrol
+	if got := m.Bridge().Move.Idle; got != mavlink.IdlePatrol {
+		t.Errorf("MAV_MOTION=patrol reached the mover as %q", got)
+	}
 	if m.Bridge().Move.DriftDisabled {
 		t.Error("MAV_DRIFT=true disabled drift")
 	}

@@ -1,6 +1,7 @@
 package mavlink
 
 import (
+	"fmt"
 	"hash/fnv"
 	"math"
 	"math/rand/v2"
@@ -10,7 +11,7 @@ import (
 	"swarm-net/pkg/protocol"
 )
 
-// Movement defaults, from docs/architecture/mavlink-bridge.md section 6.
+// Movement defaults, from docs/architecture/mavlink-bridge.md section 8.
 const (
 	DefaultSpeedUnitsPerSec = 3.0
 	DefaultDriftRadius      = 4.0
@@ -27,20 +28,63 @@ const (
 // at the default 0.4 units/s the resulting path is smooth on a map.
 const driftTurnRate = 1.5
 
+// IdleMode is what a vehicle does when nothing is flying it: no mission leg,
+// no operator command. MAV_MOTION, contract section 8.
+//
+// A string rather than an int because the value an operator types into a
+// compose file IS this value, and a mistyped mode must be reportable by name
+// ("unknown MAV_MOTION \"patroll\"") rather than as an index.
+type IdleMode string
+
+const (
+	// IdleDrift is the default and the original behaviour: a bounded random
+	// walk around home.
+	IdleDrift IdleMode = "drift"
+	// IdlePatrol flies a slow circuit around home, so a demo shows continuous
+	// motion instead of a hover that only looks alive if you watch for a
+	// while.
+	IdlePatrol IdleMode = "patrol"
+	// IdleStill holds position. The same thing MAV_DRIFT=false has always
+	// meant, named so it can be asked for directly.
+	IdleStill IdleMode = "still"
+)
+
+// ParseIdleMode validates an operator-supplied mode. The empty string is the
+// default rather than an error, so an unset MAV_MOTION behaves exactly as
+// before this knob existed.
+func ParseIdleMode(s string) (IdleMode, error) {
+	switch m := IdleMode(s); m {
+	case "":
+		return IdleDrift, nil
+	case IdleDrift, IdlePatrol, IdleStill:
+		return m, nil
+	default:
+		return "", fmt.Errorf("unknown idle motion %q, want %s, %s or %s",
+			s, IdleDrift, IdlePatrol, IdleStill)
+	}
+}
+
 // MoveConfig is how a vehicle moves. Zero values take the contract defaults,
 // so the zero MoveConfig is a drifting vehicle, not a stationary one.
 type MoveConfig struct {
 	// SpeedUnitsPerSec is flight speed toward a target, in cube units per
 	// second. MAV_SPEED_UNITS_S.
 	SpeedUnitsPerSec float64
-	// DriftDisabled switches idle drift off. Inverted so the zero value is the
+	// Idle is the no-target behaviour. MAV_MOTION; empty means IdleDrift.
+	Idle IdleMode
+	// DriftDisabled switches idle motion off. Inverted so the zero value is the
 	// contract default (MAV_DRIFT=true); set it when you are debugging
 	// clustering and want nodes to hold still.
+	//
+	// It OVERRIDES Idle, rather than being a fourth mode: MAV_DRIFT=false
+	// predates MAV_MOTION, and an operator who has it in a compose file means
+	// "nothing moves on its own", whatever a mode they never set says.
 	DriftDisabled bool
-	// DriftRadius bounds how far a vehicle may drift from home, in units.
-	// MAV_DRIFT_RADIUS.
+	// DriftRadius bounds how far a vehicle may drift from home, in units, and
+	// is the radius of the patrol circuit. MAV_DRIFT_RADIUS.
 	DriftRadius float64
-	// DriftSpeed is drift speed in units per second. MAV_DRIFT_SPEED.
+	// DriftSpeed is drift and patrol speed in units per second.
+	// MAV_DRIFT_SPEED.
 	DriftSpeed float64
 }
 
@@ -53,6 +97,17 @@ func (c MoveConfig) withDefaults() MoveConfig {
 	}
 	if c.DriftSpeed <= 0 {
 		c.DriftSpeed = DefaultDriftSpeed
+	}
+	// Normalised once, here, so Step has no fallthrough case to get wrong: an
+	// unvalidated mode from somewhere other than the config parser drifts
+	// rather than freezing a vehicle a ground station is watching.
+	switch c.Idle {
+	case IdlePatrol, IdleStill:
+	default:
+		c.Idle = IdleDrift
+	}
+	if c.DriftDisabled {
+		c.Idle = IdleStill
 	}
 	return c
 }
@@ -113,6 +168,10 @@ type Mover struct {
 	// heading is the last known course in degrees clockwise from north. Held
 	// through a stop, because a stationary vehicle still points somewhere.
 	heading float64
+	// angle is the patrol circuit's bearing, in radians. Seeded from the node
+	// id so that a swarm on patrol is spread around its circuits instead of
+	// flying in formation, which would look like one vehicle rendered N times.
+	angle float64
 }
 
 // NewMover returns a mover for node, homed at and starting from home.
@@ -127,6 +186,9 @@ func NewMover(node protocol.NodeID, home protocol.Position, cfg MoveConfig) *Mov
 	// A starting direction, so the first step does not have to pick one from a
 	// zero vector.
 	m.dir = normP(m.randomUnit())
+	// Drawn from the same seeded stream, so patrol is as reproducible across
+	// restarts as drift is.
+	m.angle = m.rng.Float64() * 2 * math.Pi
 	return m
 }
 
@@ -212,9 +274,11 @@ func (m *Mover) Step(dt time.Duration) {
 	switch {
 	case m.target != nil:
 		m.flyStep(secs)
-	case m.cfg.DriftDisabled:
-		// Deliberately still: MAV_DRIFT=false means the only thing that moves a
-		// node is an operator or a mission.
+	case m.cfg.Idle == IdleStill:
+		// Deliberately still: MAV_MOTION=still (or MAV_DRIFT=false) means the
+		// only thing that moves a node is an operator or a mission.
+	case m.cfg.Idle == IdlePatrol:
+		m.patrolStep(secs)
 	default:
 		m.driftStep(secs)
 	}
@@ -277,6 +341,56 @@ func (m *Mover) driftStep(secs float64) {
 	if d := lenP(off); d > m.cfg.DriftRadius {
 		m.pos = addP(m.home, scaleP(off, m.cfg.DriftRadius/d))
 	}
+}
+
+// patrolStep advances one tick of the circuit around home.
+//
+// # Pursuit, not teleportation
+//
+// The obvious implementation is to place the vehicle on the circle directly:
+// pos = home + R*(sin a, cos a). It is wrong in two ways that both show up in a
+// ground station. A vehicle that starts at home jumps R units on its first
+// step, which at the defaults is a 20 m hop in 200 ms -- 100 m/s on the HUD --
+// and a vehicle whose home has just been adopted from the dashboard does it
+// again. So the circle is a MOVING TARGET the vehicle chases at DriftSpeed
+// instead: velocity is bounded by the same knob that sets the lap speed, the
+// first lap is a spiral outward, and Vel stays the honest measured displacement.
+//
+// The pursuit settles just inside DriftRadius (about 0.999 R at the defaults)
+// because chasing along the chord loses a little tangential speed to the
+// inward component. Inside the radius is the direction that cannot violate the
+// contract's bound, so the lag is left alone rather than compensated for.
+//
+// Angular speed is v/R, so DriftRadius 4 and DriftSpeed 0.4 give a 63-second
+// lap. That is deliberately slow: position feeds the latency model, which
+// feeds the election, so a fast circuit makes leadership flap. See
+// SWARM_SIM_HYSTERESIS in the contract.
+func (m *Mover) patrolStep(secs float64) {
+	if m.cfg.DriftSpeed <= 0 || m.cfg.DriftRadius <= 0 {
+		return
+	}
+	m.angle += m.cfg.DriftSpeed / m.cfg.DriftRadius * secs
+	// Wrapped rather than left to grow: a process that runs for a week would
+	// otherwise hand math.Sin an argument large enough to lose the precision
+	// the lap is drawn with.
+	m.angle = math.Mod(m.angle, 2*math.Pi)
+
+	// The circuit is horizontal, at the home altitude: climbing and descending
+	// in a circle would make every vehicle's relative altitude on the main
+	// flight display wander for no reason an operator could act on.
+	want := protocol.Position{
+		X: m.home.X + m.cfg.DriftRadius*math.Sin(m.angle),
+		Y: m.home.Y + m.cfg.DriftRadius*math.Cos(m.angle),
+		Z: m.home.Z,
+	}
+	d := subP(want, m.pos)
+	dist := lenP(d)
+	step := m.cfg.DriftSpeed * secs
+	if dist <= step || dist == 0 {
+		m.pos = want
+		return
+	}
+	m.pos = addP(m.pos, scaleP(d, step/dist))
 }
 
 // randomUnit draws a direction. Rejection sampling inside the unit ball rather

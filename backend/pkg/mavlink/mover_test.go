@@ -188,3 +188,145 @@ func TestHeadingOf(t *testing.T) {
 		})
 	}
 }
+
+func TestParseIdleMode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want IdleMode
+		ok   bool
+	}{
+		// Unset is the default, so a deployment that never heard of MAV_MOTION
+		// behaves exactly as it did before the knob existed.
+		{"", IdleDrift, true},
+		{"drift", IdleDrift, true},
+		{"patrol", IdlePatrol, true},
+		{"still", IdleStill, true},
+		// Named, not indexed: an operator typed this, and the error has to be
+		// readable in a compose log.
+		{"patroll", "", false},
+		{"Drift", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := ParseIdleMode(tc.in)
+			if (err == nil) != tc.ok {
+				t.Fatalf("ParseIdleMode(%q) error = %v, want ok %v", tc.in, err, tc.ok)
+			}
+			if got != tc.want {
+				t.Errorf("ParseIdleMode(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMoveConfigIdleNormalisation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   MoveConfig
+		want IdleMode
+	}{
+		{"zero value drifts", MoveConfig{}, IdleDrift},
+		{"patrol kept", MoveConfig{Idle: IdlePatrol}, IdlePatrol},
+		// An unvalidated mode must not freeze a vehicle a ground station is
+		// watching; the default is the safe reading.
+		{"garbage drifts", MoveConfig{Idle: "sideways"}, IdleDrift},
+		// MAV_DRIFT=false predates MAV_MOTION and wins: an operator who set it
+		// means "nothing moves on its own".
+		{"MAV_DRIFT=false overrides", MoveConfig{Idle: IdlePatrol, DriftDisabled: true}, IdleStill},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.withDefaults().Idle; got != tc.want {
+				t.Errorf("idle = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMoverPatrolFliesACircuit(t *testing.T) {
+	home := protocol.Position{X: 50, Y: 50, Z: 10}
+	cfg := MoveConfig{Idle: IdlePatrol, DriftRadius: 4, DriftSpeed: 0.4}
+	m := NewMover("swarm-net-node-1", home, cfg)
+
+	// One lap is 2*pi*R/v = 62.8 s at these numbers. Fly two of them at the
+	// bridge's own 5 Hz position rate.
+	const dt = 200 * time.Millisecond
+	const steps = 2 * 63 * 5
+	var minR, maxR = math.Inf(1), 0.0
+	var maxSpeed float64
+	for i := 0; i < steps; i++ {
+		m.Step(dt)
+		off := subP(m.Pos(), home)
+		if off.Z != 0 {
+			t.Fatalf("step %d: the circuit left the home altitude: %+v", i, m.Pos())
+		}
+		// The radius is a promise the contract makes about drift and patrol
+		// alike, so it is asserted every step, not just at the end.
+		if r := lenP(off); r > cfg.DriftRadius+1e-9 {
+			t.Fatalf("step %d: %.4f units from home, radius is %v", i, r, cfg.DriftRadius)
+		}
+		if s := lenP(m.Vel()); s > maxSpeed {
+			maxSpeed = s
+		}
+		// Ignore the first lap: it is the spiral outward onto the circuit.
+		if i > 63*5 {
+			r := lenP(off)
+			minR, maxR = math.Min(minR, r), math.Max(maxR, r)
+		}
+	}
+	// Settled on the circuit rather than hovering somewhere inside it.
+	if minR < 0.99*cfg.DriftRadius || maxR > cfg.DriftRadius {
+		t.Errorf("settled radius spans [%.3f, %.3f], want both near %v", minR, maxR, cfg.DriftRadius)
+	}
+	// Speed never exceeds the knob that sets it. This is what the pursuit
+	// formulation buys: placing the vehicle on the circle directly would have
+	// reported a 20-unit-per-second jump on the first step.
+	if maxSpeed > cfg.DriftSpeed+1e-9 {
+		t.Errorf("peak speed %.3f units/s, want at most %v", maxSpeed, cfg.DriftSpeed)
+	}
+
+	// It is still moving at the end: a demo watches this for minutes.
+	before := m.Pos()
+	for i := 0; i < 5; i++ {
+		m.Step(dt)
+	}
+	if lenP(subP(m.Pos(), before)) < 0.1 {
+		t.Errorf("patrol stalled at %+v", m.Pos())
+	}
+}
+
+func TestMoverPatrolPhaseDiffersPerNode(t *testing.T) {
+	// Otherwise the whole swarm flies the same circuit in formation, which
+	// renders as one vehicle with N labels on it.
+	home := protocol.Position{X: 50, Y: 50, Z: 10}
+	cfg := MoveConfig{Idle: IdlePatrol, DriftRadius: 6, DriftSpeed: 1}
+	first := NewMover("swarm-net-node-1", home, cfg)
+	second := NewMover("swarm-net-node-2", home, cfg)
+	for i := 0; i < 100; i++ {
+		first.Step(200 * time.Millisecond)
+		second.Step(200 * time.Millisecond)
+	}
+	if d := lenP(subP(first.Pos(), second.Pos())); d < 1 {
+		t.Errorf("two nodes are %.3f units apart on the same circuit", d)
+	}
+}
+
+func TestMoverPatrolYieldsToAMission(t *testing.T) {
+	// Patrol is the IDLE behaviour: a waypoint must win, and the vehicle must
+	// go back to patrolling after it.
+	home := protocol.Position{X: 50, Y: 50, Z: 10}
+	m := NewMover("seed", home, MoveConfig{Idle: IdlePatrol, SpeedUnitsPerSec: 3, DriftRadius: 4, DriftSpeed: 0.4})
+	m.SetTarget(protocol.Position{X: 80, Y: 50, Z: 10})
+	for i := 0; i < 20 && !m.Reached(); i++ {
+		m.Step(time.Second)
+	}
+	if !m.Reached() {
+		t.Fatal("patrol kept the vehicle from flying its waypoint")
+	}
+	m.ClearTarget()
+	before := m.Pos()
+	m.Step(time.Second)
+	if m.Pos() == before {
+		t.Error("the vehicle did not resume patrolling after the waypoint")
+	}
+}
