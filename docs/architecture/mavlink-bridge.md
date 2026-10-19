@@ -62,10 +62,14 @@ with $k$ metres per unit (default 20) and $R = 6378137$ m. Flat-earth error at l
 | `MAV_ORIGIN_LAT` | `47.397971` | Lab origin latitude |
 | `MAV_ORIGIN_LON` | `8.546164` | Lab origin longitude |
 | `MAV_ORIGIN_ALT` | `488` | Origin altitude, metres AMSL |
-| `MAV_METRES_PER_UNIT` | `20` | $k$, matches `world.metres_per_unit` in the Blender scene |
+| `MAV_METRES_PER_UNIT` | `5` | $k$. The cube is 100 units across, so 5 gives a 500 m area |
 
-The defaults are the standard ArduPilot SITL origin, so QGC opens on a sane map before you
-set your own.
+`relative_alt` is height above the GROUND PLANE, which is cube `z = 0`, not height above a
+vehicle's own position. A ground station shows relative altitude on the main flight display,
+so measuring it from anywhere else makes the swarm look like it never left the ground.
+
+The compose defaults are the VIT University lab origin. `backend/` keeps the ArduPilot SITL
+origin as its built-in default, so the binary alone still opens on a sane map.
 
 ## 3. Sysid assignment
 
@@ -73,8 +77,14 @@ QGC identifies a vehicle by system id, so the mapping must be stable across reco
 
 1. If the node id ends in digits in `1..254` and that id is free, use it. `swarm-net-node-3`
    becomes sysid 3.
-2. Otherwise take the lowest free id. `seed` gets one this way.
+2. Otherwise take the highest free id, counting down from 254. `seed` gets 254.
 3. An id is held for a node even while it is killed, so a restarted node keeps its vehicle.
+
+Rule 2 counts DOWN for a reason found on a live swarm. Counting up gave `seed` (no digits,
+and it connects early) id 1, so every numbered node found its own number taken and shifted:
+node-3 became vehicle 4. A ground station then reported the wrong aircraft dying on a kill.
+Keeping the low ids clear means a numbered node gets its number whatever order the swarm
+starts in.
 
 Component id is always 1 (`MAV_COMP_ID_AUTOPILOT1`).
 
@@ -85,7 +95,7 @@ Out, per vehicle:
 | Message | Rate | Carries |
 |---|---|---|
 | `HEARTBEAT` (0) | 1 Hz | Liveness. `custom_mode` is 1 for a leader, 0 for a worker. Armed while flying. |
-| `GLOBAL_POSITION_INT` (33) | 1 Hz | Projected position, altitude, ground velocity |
+| `GLOBAL_POSITION_INT` (33) | 5 Hz | Projected position, altitude, ground velocity |
 | `SYS_STATUS` (1) | 1 Hz | Dropped frames and ledger size, mapped onto load and error counters |
 | `STATUSTEXT` (253) | on event | `leader_change`, `node_down`, re-election, mission reassignment |
 | `MISSION_CURRENT` (42) | on change | Item the cluster is working on |
@@ -164,17 +174,24 @@ debugging clustering rather than demoing, set `MAV_DRIFT=false` and nodes hold s
 
 ## 7. Running it
 
-The bridge sends to QGC; QGC does not dial in. Point the CC at the host:
-
 ```bash
-# .env
-MAV_ENABLED=true
-MAV_GCS=host.docker.internal:14550
+MAV_ENABLED=true docker compose up -d
 ```
 
-Then in QGC, add a UDP link on 14550 and leave the target empty. Vehicles appear within a
-second or two.
+**QGC on the same machine as Docker (the usual case).** Let QGC dial IN. The bridge learns
+the ground station's address from its first packet and streams back to it, so nothing has to
+route from the container to the host:
 
-If QGC runs on another machine, set `MAV_GCS` to its address. The bridge also learns the
-sender address of any MAVLink packet it receives, so an inbound connection works without
-configuration.
+1. Compose publishes the bridge on `127.0.0.1:14555` (host) -> `14550` (container). The host
+   port differs on purpose: QGC binds 14550 locally for its own listener.
+2. In QGC: Application Settings -> Comm Links -> Add. Type UDP, Listening Port 14550, and add
+   `127.0.0.1:14555` as a target host. Connect.
+
+Vehicles appear within a second or two.
+
+**QGC on another machine.** Set `MAV_GCS` to its address and the bridge pushes to it
+unprompted. Outbound from a container to the Docker host is less reliable than it looks, which
+is why dialling in is the default for a local station.
+
+Either way the bridge answers whoever talks to it, so a station that connects is served even
+when `MAV_GCS` is wrong or empty.
