@@ -1690,3 +1690,19 @@ NEXT send, starving the real ground station. Each is written up in section 12.3.
 Vehicle count in the metrics (the bridge does not export it), per-node flow counters, a
 histogram for task durations (the hub keeps no buckets), and physics of any kind -- vehicles
 translate at constant speed. Synthetic fields are listed in the contract, section 9.
+
+### 13.6 Mission overlay on the dashboard
+
+QGroundControl draws a route only for the vehicle it is selected on, and only the owner holds
+the mission, so the swarm-level assignment -- which drone is flying which waypoint -- is
+invisible there. MAVLink has no message for it.
+
+The dashboard now shows it: numbered waypoint markers in both the 2D map and 3D (squares
+against the circular drones, so shape rather than colour separates them), a dashed line from
+each drone to the waypoint it is flying, and a Mission panel with owner, executing node,
+progress and a per-item table. A migration shows as `MIGRATED from <node>`.
+
+The snapshot carries it under `missions` (bridge section 5). Items with no position -- skipped
+ones, and a LAND or RTL nobody has picked up -- are listed in the panel but never drawn, since
+those arrive with no coordinate and plotting a zero would put a marker in the corner of the
+cube.
