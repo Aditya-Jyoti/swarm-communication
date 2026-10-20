@@ -1756,3 +1756,68 @@ this repo and a change would alter how its bytes are read.
   3.3.x install is 1.8 GB, because it bundles every chip's toolchain.
 - QGroundControl's USB auto-connect opened the ESP32's serial port and held it, which blocks
   flashing. QGC reaches the swarm over UDP and does not need it. See `esp/README.md`.
+
+## 2026-10-20 -- A real LiteWing as swarm node 9
+
+A LiteWing quadcopter (ESP32-S3, ESP-Drone firmware) now backs one swarm node. The handheld
+ground unit shows its live telemetry, and QGroundControl shows the same telemetry on node 9.
+Spec: `docs/specs/2026-10-20-litewing-live-vehicle-design.md`. Plan:
+`docs/plans/2026-10-20-litewing-live-vehicle.md`.
+
+```mermaid
+flowchart LR
+  D[LiteWing] -- "CRTP log, UDP 2390" --> H[ground unit, esp/]
+  H -- "USB serial, TLM lines" --> R[cmd/litewing-relay]
+  R -- "UDP 14560" --> B[pkg/mavlink live.go]
+  B -- "sysid 9" --> Q[QGroundControl]
+```
+
+### 15.1 Decisions
+
+| Decision | Choice | Rejected |
+|---|---|---|
+| Drone firmware | Unchanged: its stock CRTP log service over its own AP | Reflashing; reverse-engineering its custom ESP-NOW broadcast (no source on hand) |
+| Who joins the drone's AP | The handheld | The laptop: its only Wi-Fi card is on the campus network |
+| Handheld to laptop | `TLM {json}` lines on the USB serial port | Mapping the serial device into a container: it re-enumerates and its permissions reset |
+| QGC role | Takes over an existing node (9) | An 11th vehicle outside the swarm; a laptop process joining the Docker mesh |
+| Feed lost | Last real values, health bits withdrawn, one STATUSTEXT | Falling back to synthetic values |
+| Armed | Thrust or any motor above zero | `sys.armed`: ESP-Drone initialises it to true, so a drone on the bench reads armed |
+
+### 15.2 Read only, by construction
+
+The ESP-Drone firmware reads any 7-byte datagram starting with `now` as a stick command
+(`detectEspNow` in `wifilink.c`). The client only ever sends port 5 log packets (`0x5X`) and a
+port 15 sink keepalive (`0xF2`), and a test asserts nothing it sends starts with `n`.
+
+### 15.3 Tests
+
+| Unit | Suite | Coverage |
+|---|---|---|
+| `esp/crtp_log.h` | 475 checks against a fake drone written from `log.c` | 100% of lines |
+| `pkg/litewing` | parser, every field missing, every bound, garbage | 100% |
+| `cmd/litewing-relay` | fake ports, reconnects, a real pty for termios | 97.6% |
+| `pkg/mavlink/live.go` | every override, stale, recovery, reader branches | 100%; every added line in the bridge covered |
+| `cmd/control-center` | `MAV_LIVE_NODE`, `MAV_LIVE_BIND` validation | 100% of the new functions |
+
+### 15.4 Bugs found
+
+- **0% battery for half a second.** On the real drone the 10 Hz block lands before the 2 Hz
+  one, so the first published sample had no battery percent. The fake drone had started every
+  block timer at zero, so all blocks fired together and hid it. The fake now starts each timer
+  when its block starts, as the firmware does. That reproduced the bug, and no sample is now
+  published until every block in use has reported.
+- **A tight restart loop.** A drone rejecting every block made the client restart, re-read the
+  table and fail again inside one `poll()` loop, because replies arrived faster than `millis()`
+  moved. The test binary grew to 6 GB before it was killed. Every restart now waits a retry
+  interval, and a regression test bounds the attempts.
+- `syscall` exports no `CBAUD`, and `TCGETS` never fills `Termios.Ispeed`. The speed lives in
+  `c_cflag` only.
+
+### 15.5 Verified on hardware
+
+- The handheld read 316 log entries and found all 11 wanted variables. It reached streaming
+  with zero restarts and zero bad datagrams, at about 10 samples per second.
+- In QGC's stream, node 9 showed roll 2.32 deg, pitch 1.90 deg, 32 mm altitude, 4.098 V at
+  90%, and disarmed. The health bitmap was identical to the simulated nodes'.
+- Stopping the relay produced `LiteWing link lost` (CRITICAL) 1.6 s later, with health
+  `0x200fc2f` dropping to `0xf42c`. Restarting it produced `LiteWing link up`.
