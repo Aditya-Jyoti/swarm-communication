@@ -30,23 +30,45 @@
  */
 
 // ======================================================================================
-// SIMULATION MODE
+// FRAME SOURCE
 // ======================================================================================
-// 1 = no drone needed: flight_sim.h flies a repeating survey mission and produces
-//     the same 32-byte frames a drone transmits. They go through the normal
-//     receive path below, so the OLED and /telemetry.json show them exactly as
-//     they would show a real link. The radio is not used.
-// 0 = real ground unit: frames come from the NRF24L01+.
+// Where the telemetry on the screen comes from:
 //
-// SET THIS TO 0 BEFORE USING THE BOARD WITH A REAL AIRCRAFT. In sim mode the
-// display shows a healthy, flying drone whatever the real link is doing -- an
-// operator watching it would not see a lost link or a dying battery.
+// 2 = DRONE_SOURCE_LITEWING (default): a LiteWing / ESP-Drone quadcopter. The
+//     board joins the drone's own Wi-Fi access point and reads its log stream
+//     (crtp_log.h). READ ONLY: nothing sent can command the drone. Each sample
+//     is also printed as a "TLM {json}" line for backend/cmd/litewing-relay.
+// 1 = DRONE_SOURCE_SIM: no drone needed. flight_sim.h flies a repeating survey
+//     mission and produces the same 32-byte frames a drone transmits, through
+//     the normal receive path.
+// 0 = DRONE_SOURCE_NRF: frames come from the NRF24L01+.
 //
-// The JSON reports "source":"esp32-sim" and the serial log prints [SIM] lines,
-// so anything reading the API can tell which mode is running. Override from the
-// command line with -DDRONE_SIM_MODE=0.
-#ifndef DRONE_SIM_MODE
-#define DRONE_SIM_MODE 1
+// NEVER USE SIM WITH A REAL AIRCRAFT. In sim mode the display shows a healthy,
+// flying drone whatever the real link is doing -- an operator watching it would
+// not see a lost link or a dying battery. The JSON reports "source":"esp32-sim"
+// and the serial log prints [SIM] lines, so anything reading either can tell.
+//
+// Override from the command line with -DDRONE_SOURCE=0, 1 or 2. The older
+// -DDRONE_SIM_MODE=0 / =1 still works and means NRF / SIM.
+#define DRONE_SOURCE_NRF 0
+#define DRONE_SOURCE_SIM 1
+#define DRONE_SOURCE_LITEWING 2
+
+#ifndef DRONE_SOURCE
+#ifdef DRONE_SIM_MODE
+#if DRONE_SIM_MODE
+#define DRONE_SOURCE DRONE_SOURCE_SIM
+#else
+#define DRONE_SOURCE DRONE_SOURCE_NRF
+#endif
+#else
+#define DRONE_SOURCE DRONE_SOURCE_LITEWING
+#endif
+#endif
+
+#if DRONE_SOURCE != DRONE_SOURCE_NRF && DRONE_SOURCE != DRONE_SOURCE_SIM && \
+    DRONE_SOURCE != DRONE_SOURCE_LITEWING
+#error "DRONE_SOURCE must be 0 (NRF), 1 (SIM) or 2 (LITEWING)"
 #endif
 
 #include <Arduino.h>
@@ -62,8 +84,13 @@
 // structs, calculateChecksum() and validateFrameChecksum().
 #include "telemetry_frames.h"
 
-#if DRONE_SIM_MODE
+#if DRONE_SOURCE == DRONE_SOURCE_SIM
 #include "flight_sim.h"
+#endif
+
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+#include <WiFiUdp.h>
+#include "crtp_log.h"
 #endif
 
 // ======================================================================================
@@ -122,8 +149,31 @@ WebServer server(HTTP_PORT);
 const byte rfAddresses[][6] = {"1Node", "2Node"};
 const uint8_t RF_CHANNEL = 90; // 2.490 GHz
 
-#if DRONE_SIM_MODE
+#if DRONE_SOURCE == DRONE_SOURCE_SIM
 flightsim::FlightSim g_sim;
+#endif
+
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+// The drone's access point. ESP-Drone names it after its MAC, so another
+// LiteWing needs -DDRONE_LITEWING_SSID="LiteWing_xxxxxxxxxxxx".
+#ifndef DRONE_LITEWING_SSID
+#define DRONE_LITEWING_SSID "LiteWing_80456B54AA55"
+#endif
+#ifndef DRONE_LITEWING_PASSWORD
+#define DRONE_LITEWING_PASSWORD "12345678"
+#endif
+
+const uint16_t LITEWING_PORT = 2390;        // the drone's CRTP UDP port
+// Fixed, not ephemeral: the drone replies to the source of the LAST datagram it
+// received, so a source port that changed would split the conversation.
+const uint16_t LITEWING_LOCAL_PORT = 2399;
+const unsigned long LITEWING_WIFI_RETRY_MS = 5000;
+
+WiFiUDP g_lwUdp;
+crtplog::Client g_lw;
+bool g_lwUdpOpen = false;
+unsigned long g_lwWifiAttemptMs = 0;
+crtplog::State g_lwLastState = crtplog::ST_GET_INFO;
 #endif
 
 // ======================================================================================
@@ -138,6 +188,8 @@ uint8_t g_cellCount = 0;
 int16_t g_rssiVal = 0;       // %
 uint8_t g_linkQuality = 0;
 float g_altitude = 0.0;      // Meters
+bool g_altitudeValid = true; // false when a range sensor sees nothing
+float g_thrustPercent = 0.0;
 float g_altitudeMsl = 0.0;
 float g_climbRate = 0.0;
 double g_latitude = 0.0;     // Degrees
@@ -183,7 +235,11 @@ bool g_radioHardwareOk = false;
 bool g_wifiApMode = false;
 String g_wifiIpText = "0.0.0.0";
 unsigned long g_lastPacketTime = 0;
-const unsigned long DISCONNECT_TIMEOUT_MS = 10000; // 10 seconds timeout
+// 10 s suits the NRF link's bursty losses. The LiteWing streams at 10 Hz over
+// Wi-Fi, so 2 s of nothing is already a lost drone, and saying so sooner is
+// the point of a ground unit.
+const unsigned long DISCONNECT_TIMEOUT_MS =
+    DRONE_SOURCE == DRONE_SOURCE_LITEWING ? 2000 : 10000;
 
 // Display Refresh Timer
 unsigned long g_lastDisplayRefresh = 0;
@@ -407,7 +463,7 @@ void handleRadioPayload(const uint8_t* rawPayload, uint8_t payloadSize) {
 
     // Safe serial printing
     if (shouldPrintTelemetry) {
-      Serial.print(DRONE_SIM_MODE ? F("[SIM] BAT: ") : F("[RX] BAT: "));
+      Serial.print(DRONE_SOURCE == DRONE_SOURCE_SIM ? F("[SIM] BAT: ") : F("[RX] BAT: "));
       Serial.print(g_batVoltage, 2);
       Serial.print(F("V | RSSI: "));
       Serial.print(g_rssiVal);
@@ -468,7 +524,11 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
   u8g2.setFont(u8g2_font_6x12_tf);
   u8g2.setCursor(10, 46);
   if (!g_hasReceivedData) {
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+    u8g2.print(WiFi.status() == WL_CONNECTED ? F("Waiting LiteWing") : F("Joining LiteWing"));
+#else
     u8g2.print(F("Waiting NRF link"));
+#endif
   } else {
     unsigned long elapsedSec = elapsedMs / 1000;
     u8g2.print(F("Lost "));
@@ -560,6 +620,181 @@ void drawTelemetryScreen() {
   u8g2.sendBuffer();
 }
 
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+// ======================================================================================
+// LITEWING LINK
+// ======================================================================================
+void liteWingBegin() {
+  WiFi.mode(WIFI_STA);
+  // Modem sleep parks the radio between beacons and adds 100 ms or more to
+  // every reply, which is most of the client's retry budget.
+  WiFi.setSleep(false);
+  WiFi.begin(DRONE_LITEWING_SSID, DRONE_LITEWING_PASSWORD);
+  g_lwWifiAttemptMs = millis();
+  g_wifiIpText = "joining";
+  Serial.print(F("[LW] Joining "));
+  Serial.println(F(DRONE_LITEWING_SSID));
+}
+
+// One line per fast-block sample, for backend/cmd/litewing-relay. The field
+// set and ranges are what backend/pkg/litewing validates; change both together.
+void printTlmLine(const crtplog::Telemetry& t, int rssi) {
+  char alt[16];
+  if (t.altValid) {
+    snprintf(alt, sizeof alt, "%.3f", t.altM);
+  } else {
+    snprintf(alt, sizeof alt, "null");
+  }
+  char line[256];
+  snprintf(line, sizeof line,
+           "TLM {\"src\":\"litewing\",\"t\":%lu,\"roll\":%.2f,\"pitch\":%.2f,\"yaw\":%.2f,"
+           "\"thrust\":%.0f,\"alt\":%s,\"vbat\":%.3f,\"pct\":%u,\"armed\":%d,\"rssi\":%d,"
+           "\"m\":[%u,%u,%u,%u]}",
+           (unsigned long)t.droneMs, t.roll, t.pitch, t.yaw, t.thrust, alt, t.vbat,
+           (unsigned)t.pct, t.armed ? 1 : 0, rssi, (unsigned)t.motor[0], (unsigned)t.motor[1],
+           (unsigned)t.motor[2], (unsigned)t.motor[3]);
+  Serial.println(line);
+}
+
+void liteWingPump() {
+  unsigned long now = millis();
+  if (WiFi.status() != WL_CONNECTED) {
+    if (g_lwUdpOpen) {
+      g_lwUdp.stop();
+      g_lwUdpOpen = false;
+      g_wifiIpText = "joining";
+      Serial.println(F("[LW] Wi-Fi lost, rejoining"));
+    }
+    if (now - g_lwWifiAttemptMs >= LITEWING_WIFI_RETRY_MS) {
+      WiFi.disconnect();
+      WiFi.begin(DRONE_LITEWING_SSID, DRONE_LITEWING_PASSWORD);
+      g_lwWifiAttemptMs = now;
+    }
+    return;
+  }
+  if (!g_lwUdpOpen) {
+    g_lwUdpOpen = g_lwUdp.begin(LITEWING_LOCAL_PORT) == 1;
+    g_wifiIpText = WiFi.localIP().toString();
+    Serial.print(F("[LW] Joined, ip "));
+    Serial.print(g_wifiIpText);
+    Serial.print(F(", drone "));
+    Serial.println(WiFi.gatewayIP());
+    if (!g_lwUdpOpen) return;
+  }
+
+  // Receive everything waiting. A datagram over the link's 32 bytes is read
+  // into a larger buffer so decode() sees its true size and rejects it.
+  while (g_lwUdp.parsePacket() > 0) {
+    uint8_t buf[64];
+    int n = g_lwUdp.read(buf, sizeof buf);
+    if (n > 0) g_lw.onDatagram(now, buf, (size_t)n);
+  }
+
+  // Send whatever the client wants sent: requests, retries, keepalives.
+  uint8_t out[crtplog::MAX_DATAGRAM];
+  size_t n;
+  IPAddress drone = WiFi.gatewayIP();
+  while ((n = g_lw.poll(now, out, sizeof out)) > 0) {
+    g_lwUdp.beginPacket(drone, LITEWING_PORT);
+    g_lwUdp.write(out, n);
+    g_lwUdp.endPacket();
+  }
+
+  if (g_lw.state() != g_lwLastState) {
+    Serial.printf("[LW] %s -> %s (toc %u, missing %d, restarts %lu, bad %lu)\n",
+                  crtplog::stateName(g_lwLastState), crtplog::stateName(g_lw.state()),
+                  (unsigned)g_lw.tocCount(), g_lw.missing(), (unsigned long)g_lw.restarts(),
+                  (unsigned long)g_lw.badDatagrams());
+    g_lwLastState = g_lw.state();
+  }
+
+  if (!g_lw.takeFreshSample()) return;
+  const crtplog::Telemetry& t = g_lw.telemetry();
+  g_batVoltage = t.vbat;
+  g_batteryRemaining = t.pct;
+  g_altitudeValid = t.altValid;
+  g_altitude = t.altM;
+  g_roll = t.roll;
+  g_pitch = t.pitch;
+  g_yaw = t.yaw;
+  g_thrustPercent = t.thrust * 100.0f / 65535.0f;
+  g_armed = t.armed;
+  g_rssiVal = WiFi.RSSI();  // dBm on this source, not percent
+  g_hasReceivedData = true;
+  g_lastPacketTime = now;
+  g_heartbeatState = !g_heartbeatState;
+  printTlmLine(t, g_rssiVal);
+}
+
+// Same layout language as drawTelemetryScreen. No GPS on this airframe, so the
+// rows that carry coordinates elsewhere carry attitude and motor state.
+void drawLiteWingScreen() {
+  u8g2.clearBuffer();
+
+  // LEVEL 1: battery volts and percent, heartbeat dot
+  u8g2.setFont(u8g2_font_7x14B_tr);
+  u8g2.setCursor(2, 13);
+  u8g2.print(F("BAT:"));
+  u8g2.print(g_batVoltage, 2);
+  u8g2.print(F("V"));
+
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.setCursor(84, 12);
+  u8g2.print(g_batteryRemaining);
+  u8g2.print(F("%"));
+
+  if (g_heartbeatState) {
+    u8g2.drawDisc(122, 9, 3);
+  } else {
+    u8g2.drawCircle(122, 9, 3);
+  }
+
+  u8g2.drawHLine(0, 16, 128);
+
+  // LEVEL 2: Wi-Fi link strength and range-sensor altitude
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.setCursor(2, 29);
+  u8g2.print(F("RSSI:"));
+  u8g2.print(g_rssiVal);
+
+  u8g2.setCursor(68, 29);
+  u8g2.print(F("ALT:"));
+  if (g_altitudeValid) {
+    u8g2.print(g_altitude, 2);
+    u8g2.print(F("m"));
+  } else {
+    u8g2.print(F("---"));
+  }
+
+  u8g2.drawHLine(0, 33, 128);
+
+  // LEVEL 3: attitude, degrees
+  u8g2.setFont(u8g2_font_5x8_tr);
+  char row[32];
+  snprintf(row, sizeof row, "R:%+.1f P:%+.1f Y:%.0f", g_roll, g_pitch, g_yaw);
+  u8g2.setCursor(2, 45);
+  u8g2.print(row);
+
+  // LEVEL 4: thrust and motor state; ARMED is inverted so it cannot be missed
+  snprintf(row, sizeof row, "THR:%3.0f%%", g_thrustPercent);
+  u8g2.setCursor(2, 58);
+  u8g2.print(row);
+  if (g_armed) {
+    u8g2.drawBox(70, 50, 56, 10);
+    u8g2.setDrawColor(0);
+    u8g2.setCursor(80, 58);
+    u8g2.print(F("ARMED"));
+    u8g2.setDrawColor(1);
+  } else {
+    u8g2.setCursor(74, 58);
+    u8g2.print(F("DISARMED"));
+  }
+
+  u8g2.sendBuffer();
+}
+#endif
+
+
 void addCorsHeaders() {
   server.sendHeader(F("Access-Control-Allow-Origin"), F("*"));
   server.sendHeader(F("Access-Control-Allow-Methods"), F("GET, OPTIONS"));
@@ -573,8 +808,9 @@ String makeTelemetryJson() {
 
   // "source" says where the numbers came from. Anything consuming this API can
   // tell simulated telemetry from a real link by this field alone.
-  json += DRONE_SIM_MODE ? F("{\"source\":\"esp32-sim\",\"updated_ms\":")
-                         : F("{\"source\":\"esp32-nrf\",\"updated_ms\":");
+  json += DRONE_SOURCE == DRONE_SOURCE_SIM        ? F("{\"source\":\"esp32-sim\",\"updated_ms\":")
+          : DRONE_SOURCE == DRONE_SOURCE_LITEWING ? F("{\"source\":\"esp32-litewing\",\"updated_ms\":")
+                                                  : F("{\"source\":\"esp32-nrf\",\"updated_ms\":");
   json += millis();
   json += F(",\"connected\":");
   json += (radioFresh ? F("true") : F("false"));
@@ -805,9 +1041,12 @@ void setup() {
   Serial.println(F("\n\n=============================================="));
   Serial.println(F("    ESP32 Drone Telemetry Receiver Booting    "));
   Serial.println(F("=============================================="));
-#if DRONE_SIM_MODE
+#if DRONE_SOURCE == DRONE_SOURCE_SIM
   Serial.println(F("[SIM] SIMULATION MODE: telemetry is generated on this board."));
-  Serial.println(F("[SIM] Not a real link. Build with -DDRONE_SIM_MODE=0 for a drone."));
+  Serial.println(F("[SIM] Not a real link. Build with -DDRONE_SOURCE=0 or 2 for a drone."));
+#elif DRONE_SOURCE == DRONE_SOURCE_LITEWING
+  Serial.println(F("[LW] LITEWING MODE: reading the drone's log stream over its Wi-Fi."));
+  Serial.println(F("[LW] Read only. Samples are printed as TLM {json} lines."));
 #endif
 
   // 1. Initialize Hardware I2C and SH1106 OLED
@@ -826,11 +1065,18 @@ void setup() {
   u8g2.print(F("Initializing..."));
   u8g2.sendBuffer();
 
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+  // The Wi-Fi radio belongs to the drone link, so there is no HTTP API in this
+  // mode: the laptop gets the same data from the serial TLM lines instead.
+  liteWingBegin();
+  g_radioHardwareOk = true;
+#else
   setupWifiApi();
+#endif
 
-#if DRONE_SIM_MODE
-  // No radio in sim mode, so a missing or unwired NRF24 does not put the
-  // HARDWARE ERROR screen in front of the demo.
+#if DRONE_SOURCE != DRONE_SOURCE_NRF
+  // No NRF24 in sim or LiteWing mode, so a missing or unwired radio does not
+  // put the HARDWARE ERROR screen in front of a working link.
   g_radioHardwareOk = true;
 #else
   // 2. Initialize VSPI Bus
@@ -874,7 +1120,10 @@ void loop() {
     return;
   }
 
-#if DRONE_SIM_MODE
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+  // 1. Exchange datagrams with the drone and publish any new sample.
+  liteWingPump();
+#elif DRONE_SOURCE == DRONE_SOURCE_SIM
   // 1. Drain the simulated link, exactly as the radio is drained below.
   uint8_t simFrame[FRAME_SIZE];
   while (g_sim.nextFrame(millis(), simFrame)) {
@@ -903,7 +1152,11 @@ void loop() {
     if (!g_hasReceivedData || timeSinceLastPacket >= DISCONNECT_TIMEOUT_MS) {
       drawDisconnectScreen(timeSinceLastPacket);
     } else {
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+      drawLiteWingScreen();
+#else
       drawTelemetryScreen();
+#endif
     }
   }
 }
