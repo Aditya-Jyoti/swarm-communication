@@ -1690,3 +1690,69 @@ NEXT send, starving the real ground station. Each is written up in section 12.3.
 Vehicle count in the metrics (the bridge does not export it), per-node flow counters, a
 histogram for task durations (the hub keeps no buckets), and physics of any kind -- vehicles
 translate at constant speed. Synthetic fields are listed in the contract, section 9.
+
+## 2026-10-20 -- ESP32 ground unit: a simulated drone on the bench
+
+The ground unit (`esp/`) receives NRF24 telemetry and shows it on an SH1106 OLED. With no
+drone flying, it had nothing to show. It now has a simulation mode in which the board flies a
+mission itself.
+
+### 14.1 Decisions
+
+| Decision | Choice | Rejected |
+|---|---|---|
+| Where the data comes from | A flight model on the ESP32 itself | Streaming one swarm vehicle from the PC over USB: needs the stack and a feeder running |
+| How it reaches the display | Real 32-byte frames through the receiver's own decode path | Writing the display variables directly: would bypass checksums and the structs, and test nothing |
+| How sim mode is chosen | An explicit `DRONE_SIM_MODE` build switch | Falling back to simulation when the real link drops |
+| Labelling | No mark on the OLED; `"source":"esp32-sim"` in JSON, `[SIM]` on serial | Hiding it everywhere |
+
+The automatic fallback was rejected on safety grounds. A ground unit that quietly showed a
+healthy, flying aircraft the moment the real link died would hide exactly the failure it
+exists to report.
+
+### 14.2 What makes it read as a real aircraft
+
+Coupling, not noise. Every displayed value is derived from one kinematic and electrical
+state, so the numbers agree with each other the way real telemetry does:
+
+```mermaid
+flowchart LR
+    PH["Mission phase"] --> K["Kinematics: position, velocity"]
+    K --> ATT["Attitude: bank into turns, pitch to accelerate"]
+    K --> ALT["Altitude and climb rate"]
+    ATT --> MIX["Quad-X motor mixer"]
+    K --> I["Current draw"]
+    I --> BAT["LiPo: charge drains, voltage sags"]
+    K --> RNG["Range from home"]
+    RNG --> RSSI["RSSI falls"]
+    RNG --> LOSS["Packet loss rises, seq gaps"]
+    BAT --> FS["Below 15 percent: failsafe RTL"]
+```
+
+Frames go out at link rates (BASIC and ATTITUDE 5 Hz, MOTORS 2 Hz, POWER_SBC 1 Hz), and a lost
+frame still consumes its sequence number, as on a real radio.
+
+### 14.3 Tests
+
+`flight_sim.h` and `telemetry_frames.h` have no Arduino dependencies, so they are tested on
+the host: 26 tests and 546 checks, built as C++11 (what arduino-esp32 2.x compiles) and C++17.
+Line coverage is 99.5% and 100%. The two uncovered lines are documented defensive guards.
+
+The suite caught one real bug before commit. The arm state was decided after the motors were
+computed, so the props stayed at idle for one physics step after every disarm. It is now
+decided first, and a test checks motors against arm state on every step.
+
+### 14.4 Found, not changed
+
+`PowerSbcFrame` is 30 bytes, not 32. Its `checksum` member sits at byte 29, while the receiver
+validates byte 31. Fields up to byte 28 decode correctly, so nothing is broken today. It is
+pinned with a `static_assert` rather than fixed, because the transmitter's packer is not in
+this repo and a change would alter how its bytes are read.
+
+### 14.5 Environment notes
+
+- The sketch builds against the `esp32:esp32` 3.1.3 core already installed by Arduino IDE.
+  Drive it with `arduino-cli --config-file ~/.arduinoIDE/arduino-cli.yaml`. A fresh core
+  3.3.x install is 1.8 GB, because it bundles every chip's toolchain.
+- QGroundControl's USB auto-connect opened the ESP32's serial port and held it, which blocks
+  flashing. QGC reaches the swarm over UDP and does not need it. See `esp/README.md`.
