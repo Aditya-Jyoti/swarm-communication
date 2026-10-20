@@ -94,8 +94,12 @@ stateDiagram-v2
 
 | Block | Rate | Variables | Bytes |
 |---|---|---|---|
-| 1 | 10 Hz | `stabilizer.roll`, `.pitch`, `.yaw`, `.thrust` (float), `range.zrange` (uint16 mm), `pm.vbat` (float), `sys.armed` (int8) | 23 |
-| 2 | 2 Hz | `motor.m1`..`m4` (requested as uint16), `pm.batteryLevel` (uint8), `pm.state` (int8) | 10 |
+| 1 | 10 Hz | `stabilizer.roll`, `.pitch`, `.yaw`, `.thrust` (float), `range.zrange` (uint16 mm), `pm.vbat` (float) | 22 |
+| 2 | 2 Hz | `motor.m1`..`m4` (requested as uint16), `pm.batteryLevel` (uint8) | 9 |
+
+`sys.armed` is deliberately NOT used: ESP-Drone initialises it to `true`
+unless built with `START_DISARMED`, so it means "allowed to arm", not "props
+spinning". Armed is derived instead: thrust above zero or any motor above zero.
 
 - **A keepalive** (`0xF2`, link sink) every 250 ms while streaming, well inside
   the 1 s watchdog.
@@ -170,7 +174,7 @@ For the live node, while the newest sample is under 1.5 s old:
 | SYS_STATUS, BATTERY_STATUS | voltage, remaining | Drone; 1S pack so one cell |
 | GLOBAL_POSITION_INT | relative_alt | Range sensor |
 | VFR_HUD | alt, throttle | Range sensor, thrust as percent of 65535 |
-| HEARTBEAT | armed flag | `sys.armed`, or any motor spinning |
+| HEARTBEAT | armed flag | Thrust above zero or any motor spinning |
 
 Latitude and longitude stay the swarm's, because the drone has no GPS. Mission
 and command handling for the node are unchanged and never reach the drone.

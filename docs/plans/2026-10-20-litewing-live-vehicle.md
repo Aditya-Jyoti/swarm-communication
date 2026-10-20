@@ -89,7 +89,7 @@ class Client {
   - Lost item reply: re-request the same index.
   - Truncated item (size under 6): ignored, then retried.
   - A missing variable is left out of its block and counted in `missing`.
-  - `sys.armed` absent: armed comes from the motors instead.
+  - Armed is derived from thrust and motors (`sys.armed` defaults true, not used).
   - A create reply with EEXIST: send a reset (CONTROL_RESET) and redo.
   - Any other create error: restart.
   - No data for 2 s: back to GetInfo.
