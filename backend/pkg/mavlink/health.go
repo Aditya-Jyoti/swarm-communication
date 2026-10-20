@@ -152,23 +152,9 @@ func (b *battery) currentCA() int16 {
 	return saturateI16(math.Round(b.amps * 100))
 }
 
-// chargeState maps the percentage onto MAV_BATTERY_CHARGE_STATE. The thresholds
-// are the ordinary ones an operator expects: a warning with a lap of reserve
-// left, critical when it is time to land now.
-func (b *battery) chargeState() uint8 {
-	switch pct := b.remaining(); {
-	case pct >= 30:
-		return MavBatteryChargeStateOk
-	case pct >= 20:
-		return MavBatteryChargeStateLow
-	case pct >= 10:
-		return MavBatteryChargeStateCritical
-	case pct > 0:
-		return MavBatteryChargeStateEmergency
-	default:
-		return MavBatteryChargeStateFailed
-	}
-}
+// chargeState maps the percentage onto MAV_BATTERY_CHARGE_STATE; see
+// chargeStateOf, which the live vehicle shares.
+func (b *battery) chargeState() uint8 { return chargeStateOf(b.remaining()) }
 
 // batteryStatus is the full per-pack report.
 //
@@ -178,6 +164,9 @@ func (b *battery) chargeState() uint8 {
 // voltage in voltages[0] -- also legal -- makes a ground station draw a 25 V
 // cell.
 func (b *Bridge) batteryStatus(v *vehicle) *BatteryStatus {
+	if l := b.liveFor(v); l != nil {
+		return liveBatteryStatus(l)
+	}
 	m := &BatteryStatus{
 		ID:               0,
 		BatteryFunction:  MavBatteryFunctionAll,

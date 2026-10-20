@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"swarm-net/pkg/litewing"
 	"swarm-net/pkg/protocol"
 )
 
@@ -187,6 +188,9 @@ type BridgeConfig struct {
 	Now func() time.Time
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
+	// Live drives one vehicle from a real aircraft's telemetry. Off unless
+	// Live.Node is set; see live.go.
+	Live LiveConfig
 }
 
 func (c BridgeConfig) withDefaults() BridgeConfig {
@@ -215,6 +219,7 @@ func (c BridgeConfig) withDefaults() BridgeConfig {
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	c.Live = c.Live.withDefaults()
 	return c
 }
 
@@ -351,6 +356,15 @@ type Bridge struct {
 	sent      atomic.Uint64 // frames written (per destination)
 	sendErrs  atomic.Uint64
 
+	// liveConn is the live feed's socket, nil when the feed is off. Its reader
+	// is liveLoop; the samples it accepts reach the loop over liveIn.
+	liveConn     *net.UDPConn
+	liveIn       chan litewing.Sample
+	liveAccepted atomic.Uint64
+	liveRejected atomic.Uint64
+	// live is the feed's loop-owned state.
+	live liveState
+
 	// --- loop-owned, no synchronisation ---
 	vs       map[protocol.NodeID]*vehicle
 	order    []protocol.NodeID   // vs keys, sorted: deterministic emission order
@@ -405,7 +419,14 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mavlink: listen on %s: %w", cfg.Bind, err)
 	}
+	liveConn, err := listenLive(cfg.Live)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("mavlink: live feed on %q: %w", cfg.Live.Bind, err)
+	}
 	return &Bridge{
+		liveConn:   liveConn,
+		liveIn:     make(chan litewing.Sample, liveDepth),
 		cfg:        cfg,
 		log:        cfg.Logger.With("component", "mavlink"),
 		conn:       conn,
@@ -432,7 +453,12 @@ func (b *Bridge) Addr() net.Addr { return b.conn.LocalAddr() }
 // flight: that is how Run unblocks its reader.
 func (b *Bridge) Close() error {
 	var err error
-	b.closeOnce.Do(func() { err = b.conn.Close() })
+	b.closeOnce.Do(func() {
+		err = b.conn.Close()
+		if b.liveConn != nil {
+			_ = b.liveConn.Close()
+		}
+	})
 	return err
 }
 
@@ -448,6 +474,10 @@ type BridgeStats struct {
 	Sent uint64
 	// SendErrors is failed writes.
 	SendErrors uint64
+	// LiveAccepted and LiveRejected count live-feed datagrams that did and did
+	// not validate as a sample.
+	LiveAccepted uint64
+	LiveRejected uint64
 }
 
 // Stats reads the counters. They are independent atomics, so the four values
@@ -459,6 +489,9 @@ func (b *Bridge) Stats() BridgeStats {
 		DroppedIn:  b.dropped.Load(),
 		Sent:       b.sent.Load(),
 		SendErrors: b.sendErrs.Load(),
+
+		LiveAccepted: b.liveAccepted.Load(),
+		LiveRejected: b.liveRejected.Load(),
 	}
 }
 
@@ -498,6 +531,11 @@ func (b *Bridge) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); b.readLoop(ctx) }()
 	go func() { defer wg.Done(); b.syncLoop(ctx) }()
 	go func() { defer wg.Done(); b.taskLoop(ctx) }()
+	if b.liveConn != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); b.liveLoop(ctx) }()
+		b.log.Info("mavlink live feed listening", "addr", b.liveConn.LocalAddr(), "node", b.cfg.Live.Node)
+	}
 
 	b.log.Info("mavlink bridge listening", "addr", b.conn.LocalAddr(), "gcs", b.cfg.GCS)
 	b.loop(ctx)
@@ -526,6 +564,8 @@ func (b *Bridge) loop(ctx context.Context) {
 			b.onDatagram(d)
 		case e := <-b.events:
 			b.onEvent(e)
+		case s := <-b.liveIn:
+			b.onLive(s)
 		case r := <-b.syncs:
 			r.reply <- b.applyNodes(r.nodes)
 		case <-status.C:
@@ -771,6 +811,7 @@ func (b *Bridge) reorder() {
 // instead.
 func (b *Bridge) tickStatus() {
 	now := b.cfg.Now()
+	b.checkLive(now)
 	for _, id := range b.order {
 		v := b.vs[id]
 		if v == nil || !v.connected {
@@ -845,7 +886,14 @@ func (b *Bridge) heartbeat(v *vehicle) *Heartbeat {
 	}
 	base := uint8(MavModeFlagCustomModeEnabled)
 	state := uint8(MavStateStandby)
-	if v.armed {
+	armed := v.armed
+	if l := b.liveFor(v); l != nil {
+		// The real drone decides. The ground station's Arm button still gates
+		// this node's missions (v.armed), but it cannot make a grounded
+		// aircraft look armed, or an armed one look safe.
+		armed = l.s.Armed
+	}
+	if armed {
 		// Armed is what the ground station's Arm button sets, and it gates
 		// mission execution. Flying while disarmed is impossible, but a vehicle
 		// can be armed and holding station, which is what an operator expects to
@@ -887,7 +935,7 @@ func (b *Bridge) sysStatus(v *vehicle) *SysStatus {
 		delta = 0 // node restarted and its counter went back to zero
 	}
 	v.lastDropped = v.dropped
-	return &SysStatus{
+	m := &SysStatus{
 		// Present and enabled are the same set: there is no sensor here that
 		// could be fitted and switched off, so claiming a difference would
 		// invent a configuration nobody can change.
@@ -902,6 +950,15 @@ func (b *Bridge) sysStatus(v *vehicle) *SysStatus {
 		ErrorsComm:                   saturateU16(v.dropped),
 		ErrorsCount1:                 saturateU16(uint64(max(v.ledger, 0))),
 	}
+	if l := b.liveFor(v); l != nil {
+		m.VoltageBattery = liveVoltageMV(l)
+		m.CurrentBattery = -1 // no current sensor on the drone
+		m.BatteryRemaining = int8(l.s.Pct)
+		if !b.liveFresh(b.cfg.Now()) {
+			m.OnboardControlSensorsHealth &^= liveSensors
+		}
+	}
+	return m
 }
 
 func (b *Bridge) globalPosition(v *vehicle, now time.Time) *GlobalPositionInt {
@@ -924,15 +981,23 @@ func (b *Bridge) globalPosition(v *vehicle, now time.Time) *GlobalPositionInt {
 	if hdg >= 36000 {
 		hdg = 0
 	}
+	alt, rel, vz := g.AltMM, g.AltMM-groundAlt, toCMS(-vel.Z)
+	if l := b.liveFor(v); l != nil {
+		// Height is the range sensor's; latitude and longitude stay the
+		// swarm's, because the drone has no GPS to say otherwise.
+		rel = int32(math.Round(l.altM * 1000))
+		alt = groundAlt + rel
+		vz = saturateI16(math.Round(-l.climb * 100)) // NED: climbing is negative
+	}
 	return &GlobalPositionInt{
 		TimeBootMs:  uint32(now.Sub(b.boot).Milliseconds()),
 		Lat:         g.LatE7,
 		Lon:         g.LonE7,
-		Alt:         g.AltMM,
-		RelativeAlt: g.AltMM - groundAlt,
+		Alt:         alt,
+		RelativeAlt: rel,
 		Vx:          toCMS(vel.Y),
 		Vy:          toCMS(vel.X),
-		Vz:          toCMS(-vel.Z),
+		Vz:          vz,
 		Hdg:         hdg,
 	}
 }

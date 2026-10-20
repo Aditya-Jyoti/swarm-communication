@@ -3,6 +3,8 @@ package mavlink
 import (
 	"math"
 	"time"
+
+	"swarm-net/pkg/protocol"
 )
 
 // The flight instruments: VFR_HUD and ATTITUDE.
@@ -121,6 +123,18 @@ func wrapPi(rad float64) float64 {
 
 // attitude is the ATTITUDE message for v's current attitude state.
 func (b *Bridge) attitude(v *vehicle, now time.Time) *Attitude {
+	if l := b.liveFor(v); l != nil {
+		roll, pitch, yaw := l.s.AttitudeRad()
+		return &Attitude{
+			TimeBootMs: uint32(now.Sub(b.boot).Milliseconds()),
+			Roll:       float32(roll),
+			Pitch:      float32(pitch),
+			Yaw:        float32(yaw),
+			Rollspeed:  float32(l.rollRate),
+			Pitchspeed: float32(l.pitchRate),
+			Yawspeed:   float32(l.yawRate),
+		}
+	}
 	return &Attitude{
 		TimeBootMs: uint32(now.Sub(b.boot).Milliseconds()),
 		Roll:       float32(v.att.roll),
@@ -168,6 +182,15 @@ func (b *Bridge) vfrHud(v *vehicle) *VfrHud {
 	if hdg < 0 {
 		hdg += 360
 	}
+	climb := vel.Z * k
+	if l := b.liveFor(v); l != nil {
+		// The drone's own throttle and range-sensor height. Ground and air
+		// speed stay the swarm's: there is nothing on the drone to measure them.
+		_, _, groundM := b.cfg.Projection.ProjectFloat(protocol.Position{})
+		altM = groundM + l.altM
+		throttle = l.s.ThrottlePercent()
+		climb = l.climb
+	}
 	return &VfrHud{
 		Airspeed:    float32(ground),
 		Groundspeed: float32(ground),
@@ -179,6 +202,6 @@ func (b *Bridge) vfrHud(v *vehicle) *VfrHud {
 		Alt: float32(altM),
 		// Positive is UP in VFR_HUD, unlike the NED velocities in
 		// GLOBAL_POSITION_INT, so the cube's Z needs no sign flip here.
-		Climb: float32(vel.Z * k),
+		Climb: float32(climb),
 	}
 }
