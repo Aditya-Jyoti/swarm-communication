@@ -30,6 +30,7 @@ flowchart LR
 | Flight, idle drift, idle patrol | `backend/pkg/mavlink/mover.go` |
 | Sensor health, GPS, battery, home | `backend/pkg/mavlink/health.go` |
 | VFR_HUD and ATTITUDE | `backend/pkg/mavlink/instruments.go` |
+| Live vehicle (a real LiteWing) | `backend/pkg/mavlink/live.go`, `backend/pkg/litewing/` |
 | CC wiring | `backend/pkg/controlcenter/mavlink.go` |
 | Config | `backend/cmd/control-center/config.go` |
 
@@ -294,6 +295,10 @@ so they are invented.
 | Firmware version, uid | Synthetic |
 | Armed | A flag, not an airframe. It does gate mission execution |
 
+One exception: the **live vehicle** (section 11). For that one node, the battery,
+attitude, throttle, armed state and height above ground are real measurements
+from a LiteWing quadcopter.
+
 Two rules keep this honest rather than decorative:
 
 1. **No noise.** Nothing is fuzzed to look convincing. `GPS_RAW_INT` carries the
@@ -352,3 +357,71 @@ is why dialling in is the default for a local station.
 
 Either way the bridge answers whoever talks to it, so a station that connects is served even
 when `MAV_GCS` is wrong or empty.
+
+## 11. The live vehicle
+
+One node can be backed by a real aircraft. A LiteWing quadcopter streams its
+telemetry to the handheld ground unit (`esp/`), and the relay forwards it here:
+
+```mermaid
+flowchart LR
+  D[LiteWing] -- "CRTP log over its Wi-Fi" --> H[ground unit]
+  H -- "USB serial, TLM lines" --> R[cmd/litewing-relay]
+  R -- "UDP json, 127.0.0.1:14560" --> L[live.go reader]
+  L -- "liveIn channel" --> LOOP[bridge loop]
+  LOOP -- "sysid 9" --> QGC[QGroundControl]
+```
+
+```bash
+# .env
+MAV_ENABLED=true
+MAV_LIVE_NODE=swarm-net-node-9
+```
+
+```bash
+docker compose up -d
+cd backend && go run ./cmd/litewing-relay -port /dev/ttyUSB0
+```
+
+For that node only:
+
+| Message | Field | Source |
+|---|---|---|
+| ATTITUDE | roll, pitch, yaw, rates | Drone; rates differentiated across samples |
+| SYS_STATUS, BATTERY_STATUS | voltage, percent | Drone; one 1S cell, current "not provided" (-1) |
+| GLOBAL_POSITION_INT | `relative_alt`, `vz` | Downward range sensor |
+| VFR_HUD | `alt`, `climb`, `throttle` | Range sensor; thrust as a percent |
+| HEARTBEAT | armed | Thrust or any motor above zero |
+
+Unchanged: latitude and longitude, which stay the swarm's because the drone has
+no GPS. Election, clusters, missions and failover also behave as before. The
+drone's numbers never move the swarm, and nothing QGC sends to sysid 9 reaches
+the drone. QGC's Arm button still gates the node's missions, but the heartbeat
+reports the drone's real armed state.
+
+**When the feed stops** there is no fallback to synthetic values. A healthy
+battery on screen for an aircraft whose link just died is the worst thing a
+ground station can show.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Synthetic
+  Synthetic --> Live: first sample, STATUSTEXT link up
+  Live --> Stale: no sample for 1.5 s, STATUSTEXT link lost
+  Stale --> Live: sample, STATUSTEXT link up
+```
+
+| State | What QGC sees |
+|---|---|
+| Synthetic | The ordinary simulated node, so the stack can start before the drone |
+| Live | The drone's values, all sensors healthy |
+| Stale | The last real values, frozen. Gyro, accelerometer, attitude and battery health withdrawn, and a CRITICAL `LiteWing link lost` once |
+
+Each feed datagram is validated by `pkg/litewing` before it touches a vehicle:
+every field present, nothing extra, every value in this airframe's physical
+range. Rejections are counted in `BridgeStats.LiveRejected`.
+
+Verified on 2026-10-20 against the real drone, QGC 5.1.5 and a MAVLink decoder.
+Stopping the relay produced `LiteWing link lost` 1.6 s later, with health
+`0x200fc2f` dropping to `0xf42c`. Restarting it produced `LiteWing link up`.
+

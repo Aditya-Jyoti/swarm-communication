@@ -1,28 +1,101 @@
 # ESP32 ground unit
 
-Receives drone telemetry over an NRF24L01+ link and shows it on a 1.3" SH1106
-OLED, with the same data served as JSON over Wi-Fi.
+A handheld telemetry display: an ESP32 with a 1.3" SH1106 OLED. It shows a
+drone's telemetry from one of three sources, picked at build time:
 
-It can also run with **no drone at all**: in simulation mode the board flies a
-believable survey mission itself and feeds the frames through the normal receive
-path, so the display and the API look exactly as they would on a live link.
+| `DRONE_SOURCE` | Source | Notes |
+|---|---|---|
+| `2` (default) | A **LiteWing** quadcopter, over the drone's own Wi-Fi | Read only. Also feeds node 9 in QGroundControl |
+| `1` | The on-board **flight simulator** | No drone needed |
+| `0` | An **NRF24L01+** radio link | Serves the same data as JSON over Wi-Fi |
 
 | File | What it is |
 |---|---|
-| `esp.ino` | The receiver sketch. `DRONE_SIM_MODE` picks the frame source. |
-| `telemetry_frames.h` | The wire format: frame structs, checksum. Shared by both. |
+| `esp.ino` | The receiver sketch. `DRONE_SOURCE` picks the frame source. |
+| `crtp_log.h` | The LiteWing link: CRTP codec and log-protocol client. Plain C++. |
+| `telemetry_frames.h` | The NRF wire format: frame structs, checksum. |
 | `flight_sim.h` | The simulated aircraft. Plain C++, no Arduino headers. |
-| `test/` | Host unit tests for the two headers, with coverage. |
+| `test/` | Host unit tests for the three headers, with coverage. |
+
+The old `-DDRONE_SIM_MODE=1` / `=0` still works and means SIM / NRF.
+
+## LiteWing mode
+
+The LiteWing (ESP32-S3, ESP-Drone firmware) runs its own access point and serves
+the Crazyflie log protocol (CRTP) over UDP. The handheld joins that access point
+and asks the drone to stream the values it displays. Nothing is reflashed on the
+drone.
+
+```mermaid
+flowchart LR
+  D[LiteWing] -- "CRTP log, UDP 2390" --> H[Handheld + OLED]
+  H -- "USB serial, TLM lines" --> R[litewing-relay]
+  R -- "UDP 14560" --> B[MAVLink bridge]
+  B -- "sysid 9" --> Q[QGroundControl]
+```
+
+**On the OLED:** battery volts and percent, the Wi-Fi RSSI in dBm, altitude from
+the downward range sensor (`---` when nothing is in range), roll / pitch / yaw,
+thrust, and `ARMED` (inverted) or `DISARMED`. Armed means thrust or a motor above
+zero. With no sample for 2 s it shows `NO CONNECTION`.
+
+**Read only.** The handheld sends only log requests and a keepalive. It never
+sends a setpoint, so it cannot spin the motors. This is enforced in `crtp_log.h`
+and tested: the firmware reads any 7-byte datagram starting with `now` as a stick
+command, and no datagram the client sends can start with `n`.
+
+What the client does, in order:
+
+1. Reads the drone's log table (316 entries on this unit), keeping the 11 it wants
+   by name.
+2. Builds two log blocks: attitude, thrust, range and battery voltage at 10 Hz,
+   and motors and battery percent at 2 Hz.
+3. Sends a keepalive every 250 ms. With no packet for 1 s, the drone drops every
+   log block.
+4. Restarts from step 1 after 2 s without data, which covers a drone that was
+   switched off or rebooted.
+
+A different LiteWing has a different access point name:
+
+```bash
+$CLI compile --fqbn esp32:esp32:esp32 \
+  --build-property 'compiler.cpp.extra_flags=-DDRONE_LITEWING_SSID="LiteWing_xxxxxxxxxxxx"' esp/
+```
+
+**Serial output.** Each sample is printed as one line, and
+`backend/cmd/litewing-relay` forwards those lines to the swarm's MAVLink bridge:
+
+```text
+TLM {"src":"litewing","t":3258573,"roll":2.30,"pitch":1.91,"yaw":-116.73,"thrust":0,"alt":0.027,"vbat":4.052,"pct":80,"armed":0,"rssi":-29,"m":[0,0,0,0]}
+```
+
+In this mode the board's Wi-Fi is used for the drone link, so the HTTP API is
+not started.
+
+### Showing it in QGroundControl
+
+```bash
+# .env: MAV_ENABLED=true and MAV_LIVE_NODE=swarm-net-node-9
+docker compose up -d
+cd backend && go run ./cmd/litewing-relay -port /dev/ttyUSB0
+```
+
+Node 9 then reports the drone's real attitude, battery, altitude, throttle and
+armed state. Its map position stays the swarm's, because the drone has no GPS.
+If the feed stops for 1.5 s, QGC shows `LiteWing link lost` and the drone's
+health bits go red. It does not fall back to simulated values. See
+`docs/architecture/mavlink-bridge.md` section 11.
 
 ## Simulation mode
 
-```c
-#define DRONE_SIM_MODE 1   // top of esp.ino; 1 = simulated, 0 = real radio
+```bash
+$CLI compile --fqbn esp32:esp32:esp32 \
+  --build-property "compiler.cpp.extra_flags=-DDRONE_SOURCE=1" esp/
 ```
 
-**Set it to 0 before flying anything real.** In sim mode the screen shows a
-healthy aircraft regardless of what the radio is doing, so an operator would not
-see a lost link or a flat battery.
+**Never use it with anything real.** In sim mode the screen shows a healthy
+aircraft regardless of what the radio is doing, so an operator would not see a
+lost link or a flat battery.
 
 The OLED carries no "SIM" marking. The simulation is still named in two places:
 
@@ -78,15 +151,16 @@ $CLI upload  --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 esp/
 $CLI monitor -p /dev/ttyUSB0 -c baudrate=115200
 ```
 
-Real-radio build without editing the file:
+The default build is LiteWing mode. For the other sources, without editing the
+file:
 
 ```bash
 $CLI compile --fqbn esp32:esp32:esp32 \
-  --build-property "compiler.cpp.extra_flags=-DDRONE_SIM_MODE=0" esp/
+  --build-property "compiler.cpp.extra_flags=-DDRONE_SOURCE=0" esp/   # NRF radio
 ```
 
-Or open `esp/esp.ino` in Arduino IDE. The two headers sit next to it and are
-picked up automatically.
+Or open `esp/esp.ino` in Arduino IDE. The headers sit next to it and are picked
+up automatically.
 
 **If upload fails with "port busy"**, something else has the serial port open.
 QGroundControl's USB auto-connect will grab it, because it treats the board's
@@ -102,10 +176,24 @@ esp/test/run_tests.sh
 ```
 
 Needs only `g++` and `gcov`. It builds the headers as C++11 (what arduino-esp32
-2.x compiles) and C++17, runs the suite, and fails if either header drops below
+2.x compiles) and C++17, runs both suites, and fails if any header drops below
 95% line coverage.
 
-What the suite pins, beyond normal behaviour:
+The LiteWing suite runs the client against a fake drone written from the
+ESP-Drone source: the same reply layouts, checksum, 32-byte limit and block
+timers. It pins:
+
+- The handshake end to end, and decoded values that track the drone.
+- Retries of a lost request or reply, restarts when retries run out or the drone
+  goes silent, and recovery.
+- A missing variable is left out, not fatal, and nothing usable backs off for 5 s.
+- No datagram it sends can be a setpoint.
+- No sample is published until the 2 Hz block has reported. Before this, the
+  real drone showed 0% battery for the first half second.
+- A drone rejecting every block cannot spin the client inside one `loop()`.
+- `millis()` wrap, NaN floats, out-of-range altitude and clamped percent.
+
+What the flight-sim suite pins, beyond normal behaviour:
 
 - Every frame validates, and flipping any single bit fails the checksum.
 - Frames decode, through the receiver's own structs, to the simulated state.
