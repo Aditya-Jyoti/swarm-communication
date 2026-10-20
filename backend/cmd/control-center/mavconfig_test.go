@@ -26,6 +26,8 @@ func defaultMAV() MAVSettings {
 		Drift:            true,
 		DriftRadius:      4,
 		DriftSpeed:       0.4,
+		LiveNode:         "",
+		LiveBind:         ":14560",
 	}
 }
 
@@ -45,6 +47,8 @@ func TestLoadMAV(t *testing.T) {
 		"MAV_DRIFT":           "false",
 		"MAV_DRIFT_RADIUS":    "0",
 		"MAV_DRIFT_SPEED":     "0",
+		"MAV_LIVE_NODE":       " swarm-net-node-9 ",
+		"MAV_LIVE_BIND":       "0.0.0.0:14561",
 	}
 	getenv := func(k string) string { return env[k] }
 	cfg, err := Load(nil, getenv)
@@ -59,6 +63,8 @@ func TestLoadMAV(t *testing.T) {
 
 		SpeedUnitsPerSec: 10,
 		Motion:           mavlink.IdlePatrol,
+		LiveNode:         "swarm-net-node-9",
+		LiveBind:         "0.0.0.0:14561",
 		Drift:            false,
 	}
 	if cfg.MAV != want {
@@ -117,6 +123,14 @@ func TestLoadMAV(t *testing.T) {
 		// operator would watch for a patrol that never starts.
 		{"-mav-motion=patroll"},
 		{"-mav-motion=Patrol"},
+		{"-mav-live-bind="},
+		{"-mav-live-bind=14560"},
+		{"-mav-live-bind=:70000"},
+		// A node id with a space in it is a quoting mistake in .env, and would
+		// silently match no node at all.
+		{"-mav-live-node=swarm net node 9"},
+		// The live feed cannot share the MAVLink port.
+		{"-mav-live-node=seed", "-mav-live-bind=:14550"},
 	} {
 		if _, err := Load(args, noEnv); !errors.Is(err, errConfig) || exitCode(err) != exitConfig {
 			t.Errorf("Load(%v) = %v, want config error", args, err)
@@ -145,6 +159,15 @@ func TestMAVSettingsBridge(t *testing.T) {
 	}
 	if bc.Projection != m.Projection || bc.Bind != m.Bind {
 		t.Errorf("Bridge() = %+v", bc)
+	}
+	// The live feed is off unless a node is named, and reaches the bridge
+	// verbatim when one is.
+	if bc.Live.Node != "" {
+		t.Errorf("live node %q with nothing configured", bc.Live.Node)
+	}
+	m.LiveNode, m.LiveBind = "swarm-net-node-9", "127.0.0.1:14561"
+	if l := m.Bridge().Live; l.Node != "swarm-net-node-9" || l.Bind != "127.0.0.1:14561" {
+		t.Errorf("Bridge().Live = %+v", l)
 	}
 }
 

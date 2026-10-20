@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"swarm-net/pkg/controlcenter"
 	"swarm-net/pkg/geo"
 	"swarm-net/pkg/mavlink"
+	"swarm-net/pkg/protocol"
 )
 
 // errConfig is wrapped by every configuration failure so exitCode can map it
@@ -88,6 +90,11 @@ type MAVSettings struct {
 	DriftRadius float64
 	// DriftSpeed is drift speed in units per second. MAV_DRIFT_SPEED.
 	DriftSpeed float64
+	// LiveNode is the node whose instruments come from a real aircraft, empty
+	// for none. MAV_LIVE_NODE. See mavlink.LiveConfig.
+	LiveNode string
+	// LiveBind is the live feed's UDP address. MAV_LIVE_BIND.
+	LiveBind string
 }
 
 // Bridge turns the settings into a bridge configuration. The logger, the clock
@@ -104,6 +111,7 @@ func (m MAVSettings) Bridge() mavlink.BridgeConfig {
 			DriftRadius:      m.DriftRadius,
 			DriftSpeed:       m.DriftSpeed,
 		},
+		Live: mavlink.LiveConfig{Node: protocol.NodeID(m.LiveNode), Bind: m.LiveBind},
 	}
 }
 
@@ -138,6 +146,8 @@ var settings = []setting{
 	{flag: "mav-drift", env: "MAV_DRIFT", def: "true", usage: "let idle nodes drift around their home position", noPrefix: true},
 	{flag: "mav-drift-radius", env: "MAV_DRIFT_RADIUS", def: fmtFloat(mavlink.DefaultDriftRadius), usage: "maximum drift from home, units", noPrefix: true},
 	{flag: "mav-drift-speed", env: "MAV_DRIFT_SPEED", def: fmtFloat(mavlink.DefaultDriftSpeed), usage: "drift speed, units per second", noPrefix: true},
+	{flag: "mav-live-node", env: "MAV_LIVE_NODE", def: "", usage: "node whose instruments come from a real LiteWing via cmd/litewing-relay; empty for none", noPrefix: true},
+	{flag: "mav-live-bind", env: "MAV_LIVE_BIND", def: mavlink.DefaultLiveBind, usage: "UDP bind address for the live LiteWing feed", noPrefix: true},
 }
 
 // Bounds for the MAVLink settings. Out of range is a configuration error, not
@@ -231,8 +241,10 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 // eleven more settings in one function stops being readable.
 func loadMAV(raw map[string]*string) (MAVSettings, error) {
 	m := MAVSettings{
-		Bind: strings.TrimSpace(*raw["mav-bind"]),
-		GCS:  strings.TrimSpace(*raw["mav-gcs"]),
+		Bind:     strings.TrimSpace(*raw["mav-bind"]),
+		GCS:      strings.TrimSpace(*raw["mav-gcs"]),
+		LiveNode: strings.TrimSpace(*raw["mav-live-node"]),
+		LiveBind: strings.TrimSpace(*raw["mav-live-bind"]),
 	}
 	var err error
 	if m.Enabled, err = parseBool("mav-enabled", *raw["mav-enabled"]); err != nil {
@@ -256,6 +268,9 @@ func loadMAV(raw map[string]*string) (MAVSettings, error) {
 		if err = checkBind("mav-gcs", m.GCS); err != nil {
 			return MAVSettings{}, err
 		}
+	}
+	if err = checkLive(m); err != nil {
+		return MAVSettings{}, err
 	}
 	for _, f := range []struct {
 		name     string
@@ -316,6 +331,26 @@ func parseBool(name, raw string) (bool, error) {
 }
 
 // checkBind validates a bind address. An empty host is fine (all interfaces).
+// checkLive validates the live-feed settings. The bind is checked even with no
+// live node, so a typo is caught before someone turns the feed on.
+func checkLive(m MAVSettings) error {
+	if err := checkBind("mav-live-bind", m.LiveBind); err != nil {
+		return err
+	}
+	// A node id with whitespace inside is a quoting mistake, and would
+	// silently match no node.
+	if strings.ContainsFunc(m.LiveNode, unicode.IsSpace) {
+		return fmt.Errorf("%w: mav-live-node %q contains whitespace", errConfig, m.LiveNode)
+	}
+	// Two sockets on one port: the bridge would fail to start, so say why now.
+	_, livePort, _ := net.SplitHostPort(m.LiveBind)
+	_, mavPort, _ := net.SplitHostPort(m.Bind)
+	if m.LiveNode != "" && livePort == mavPort {
+		return fmt.Errorf("%w: mav-live-bind %q shares a port with mav-bind %q", errConfig, m.LiveBind, m.Bind)
+	}
+	return nil
+}
+
 func checkBind(name, v string) error {
 	if v == "" {
 		return fmt.Errorf("%w: %s must not be empty", errConfig, name)
