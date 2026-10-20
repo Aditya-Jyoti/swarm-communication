@@ -166,6 +166,9 @@ struct FakeDrone {
   bool silent = false;  // a drone that was switched off: no replies, no data
   int reportExtraItems = 0;  // count larger than the table: out-of-range reply
   uint32_t timestamp = 0x00ABCDEF;
+  // The drone's clock, set by Link. A started block's timer runs from its start,
+  // as xTimerStart does, so a 2 Hz block first reports 500 ms after starting.
+  uint32_t clock = 0;
 
   FakeDrone() {
     toc = {
@@ -284,6 +287,7 @@ struct FakeDrone {
         } else {
           b->periodMs = (uint32_t)p.data[2] * 10;
           b->started = true;
+          b->lastMs = clock;
         }
       }
       out.push_back(frame(CH_CONTROL, {cmd, id, ret}));
@@ -339,6 +343,7 @@ struct Link {
     uint8_t buf[MAX_DATAGRAM];
     for (uint32_t t = 0; t < ms; t += stepMs) {
       now += stepMs;
+      drone.clock = now;
       size_t n;
       while ((n = client.poll(now, buf, sizeof buf)) > 0) {
         sent.push_back(Bytes(buf, buf + n));
@@ -385,6 +390,18 @@ static void test_happy_path_streams_real_values() {
   uint32_t before = l.client.samples();
   l.run(1000);
   CHECK(l.client.samples() - before >= 9 && l.client.samples() - before <= 11);
+}
+
+// Regression, seen on the real drone: block 1 (10 Hz) arrives before block 2
+// (2 Hz), so the first published sample said 0% battery. No sample may be
+// published until every block in use has reported once.
+static void test_first_sample_waits_for_the_slow_block() {
+  Link l;
+  for (int i = 0; i < 400 && !l.client.hasSample(); ++i) l.run(5);
+  CHECK(l.client.hasSample());
+  CHECK(l.client.takeFreshSample());
+  CHECK(l.client.telemetry().pct == 87);
+  CHECK_NEAR(l.client.telemetry().roll, 1.5, 1e-6);
 }
 
 static void test_values_track_the_drone() {
@@ -807,6 +824,7 @@ int main() {
   RUN(test_decode_rejects_bad_input);
   RUN(test_header_helper);
   RUN(test_happy_path_streams_real_values);
+  RUN(test_first_sample_waits_for_the_slow_block);
   RUN(test_values_track_the_drone);
   RUN(test_armed_from_motors_alone);
   RUN(test_sys_armed_is_not_requested);

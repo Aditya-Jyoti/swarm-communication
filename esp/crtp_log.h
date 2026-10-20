@@ -508,8 +508,12 @@ class Client {
     }
     t_.droneMs = (uint32_t)p.data[1] | ((uint32_t)p.data[2] << 8) | ((uint32_t)p.data[3] << 16);
     t_.armed = t_.thrust > 0.0f || t_.motor[0] || t_.motor[1] || t_.motor[2] || t_.motor[3];
-    if (block == BLOCK_FAST) {
-      lastDataMs_ = now;
+    if (block == BLOCK_SLOW) slowSeen_ = true;
+    if (block == BLOCK_FAST) lastDataMs_ = now;  // the link is alive either way
+    // Nothing is published until every block in use has reported once: the
+    // 10 Hz block lands first, and publishing then showed 0% battery for the
+    // half second before the 2 Hz block arrived.
+    if (block == BLOCK_FAST && (slowSeen_ || !blockUsed(BLOCK_SLOW))) {
       lastSampleMs_ = now;
       hasSample_ = true;
       fresh_ = true;
@@ -531,6 +535,7 @@ class Client {
   Telemetry t_ = Telemetry();
   bool hasSample_ = false;
   bool fresh_ = false;
+  bool slowSeen_ = false;
   uint32_t lastSampleMs_ = 0;
   uint32_t samples_ = 0;
   uint32_t restarts_;
