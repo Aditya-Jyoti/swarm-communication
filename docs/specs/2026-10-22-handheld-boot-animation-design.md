@@ -79,3 +79,9 @@ SH1106's 3 x 100 ms reset delays and starts with display OFF, so the screen froz
 and flashed every second. It now sends `PANEL_REFRESH_CMDS`: the init settings
 without display-off, contrast 0xFF, display-on last. Measured: probe round at
 most 3 ms, frame at most 46 ms at 400 kHz.
+
+The screen still blinked once a second with that sequence; with the refresh
+disabled it stopped. Rewriting the scan-timing registers (0xD5, 0xA8, 0xDA,
+0xD9, 0xDB, 0xD3, 0x8D, 0x20) restarts the scan even with the same value. The
+refresh now carries only 0x40, 0xA1, 0xC8, 0x81 0xFF, 0xA4, 0xA6 and 0xAF, and
+the screen is steady (confirmed by eye).

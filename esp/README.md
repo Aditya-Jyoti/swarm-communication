@@ -56,10 +56,12 @@ variables are found. The logic is in `boot_anim.h`.
 delays the drone link. Once a second it probes I2C address 0x3C at 400, 100 and
 50 kHz and draws at the fastest clock that answers 5 probes out of 5. It drops a
 clock at once, and climbs back one step only after 5 clean seconds. A panel that
-keeps answering gets its settings re-sent each second as bare commands (no
-reset, no display-off), which heals one garbled by a glitch with no visible
-change. Not `initDisplay()`: that waits out 300 ms of reset delays and blanks
-the panel, which froze and flashed the screen every second. Serial shows each change:
+keeps answering gets 7 settings re-sent each second as bare commands: display
+on, not inverted, RAM output, contrast, orientation and start line. That heals
+the garbles a glitch can cause with no visible change. Two things are kept out,
+because each made the screen blink once a second: `initDisplay()` (300 ms of
+reset delays and a display-off) and the scan-timing registers (rewriting them
+restarts the scan, even with the same value). Serial shows each change:
 
 ```text
 [OLED] found at 0x3C, bus 50 kHz
