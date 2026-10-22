@@ -1837,3 +1837,53 @@ port 15 sink keepalive (`0xF2`), and a test asserts nothing it sends starts with
   90%, and disarmed. The health bitmap was identical to the simulated nodes'.
 - Stopping the relay produced `LiteWing link lost` (CRITICAL) 1.6 s later, with health
   `0x200fc2f` dropping to `0xf42c`. Restarting it produced `LiteWing link up`.
+
+## 2026-10-22 -- Ground unit: a blank OLED, then a screen that always moves
+
+The handheld's OLED stayed blank while the board streamed telemetry at 10 Hz.
+
+### 16.1 Diagnosis
+
+A throwaway I2C scanner, flashed from outside the repo, found no device at any address with
+SDA and SCL either way round. Each line was then read with the ESP32's internal pull-down on:
+
+| Pin | Reading under pull-down | Meaning |
+|---|---|---|
+| GPIO 22 (SCL) | always 1 | the module's pull-up is there: powered and wired |
+| GPIO 21 (SDA) | flipping 0 and 1 | not firmly connected |
+
+A loose SDA wire, not firmware: the display code was unchanged since the original sketch.
+After the user reseated it the panel answered at 0x3C.
+
+### 16.2 What changed
+
+```mermaid
+flowchart LR
+    W["Joining Wi-Fi"] --> I["Asking drone"]
+    I --> T["Reading TOC n of 316"]
+    T --> S["Setting up"]
+    S --> L["Telemetry screen with sweep"]
+    L -- "no sample for 2 s" --> W
+```
+
+- **Link screen.** From boot until the first sample, and after any loss: spinner, stage, TOC
+  position, a progress bar driven by the handshake (never a timer), stage dots and the IP.
+- **Activity.** A bar slides along the telemetry screen's header line; the NRF and SIM
+  disconnect screen has a spinner.
+- **Panel watch.** The sketch probes 0x3C once a second, logs `[OLED] found` or
+  `[OLED] not responding` on each change, and re-initialises a panel that comes back. A wire
+  that drops out no longer leaves the screen blank until a reboot.
+
+The logic lives in `esp/boot_anim.h`, plain C++, tested on the host: 426 checks, 100% of
+lines and branches. The client gained one accessor, `tocRead()`.
+
+### 16.3 Verified on hardware
+
+Boot log: `[OLED] found at 0x3C`, then get-info, read-toc, setup and streaming with zero
+restarts. 300 samples in 30 s, the same 10 Hz as before, and no OLED dropouts.
+
+### 16.4 Environment notes
+
+- Every replug resets `/dev/ttyUSB0` to 0660; the handheld was replugged three times today.
+- `write_flash` at 460800 and 921600 failed with "No serial data received" on this cable;
+  115200 worked each time.
