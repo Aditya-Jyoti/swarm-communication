@@ -151,28 +151,24 @@ inline PanelAction panelAction(Event e, bool present, bool slowedDown) {
   return PA_NONE;
 }
 
-// PA_REFRESH sends these as bare commands. They are u8g2's SH1106 init
-// sequence (u8x8_d_ssd1306_128x64_noname_init_seq) with the display-off
-// removed, the contrast the sketch sets, and display-on last: each one sets a
-// value a healthy panel already has, so nothing visibly changes, while a panel
-// garbled by a glitch is put right. Not initDisplay(): that resets the
-// interface, waits out the reset delays and opens with display OFF, which
-// froze and flashed the screen every second.
+// PA_REFRESH sends these as bare commands: the settings a glitch can visibly
+// garble, at the values begin() and setContrast(255) leave, display-on last.
+// Each sets a value a healthy panel already has.
+//
+// What is NOT here, and why, both found on the handheld on 2026-10-22:
+// - initDisplay(): it re-inits the interface, waits 3 x 100 ms of reset delays
+//   and opens with display OFF. The screen froze and flashed every second.
+// - The scan-timing registers (0xD5 clock, 0xA8 multiplex, 0xDA COM pins,
+//   0xD9 pre-charge, 0xDB VCOMH, 0xD3 offset, 0x8D, 0x20): rewriting them, even
+//   with the same value, restarts the panel's scan, and the screen still
+//   blinked once a second. begin() sets them; a panel garbled there is caught
+//   by the probe only if it stops answering.
 static const uint8_t PANEL_REFRESH_CMDS[] = {
-    0xD5, 0x80,  // clock divide and oscillator
-    0xA8, 0x3F,  // multiplex ratio, 64 rows
-    0xD3, 0x00,  // display offset
     0x40,        // start line 0
-    0x8D, 0x14,  // charge pump (as the library's init sends it)
-    0x20, 0x00,  // addressing mode (as the library's init sends it)
     0xA1,        // segment remap
     0xC8,        // COM scan reversed
-    0xDA, 0x12,  // COM pins
     0x81, 0xFF,  // contrast: setContrast(255)
-    0xD9, 0xF1,  // pre-charge
-    0xDB, 0x40,  // VCOMH deselect level
-    0x2E,        // scroll off
-    0xA4,        // output follows RAM
+    0xA4,        // output follows RAM, not all pixels on
     0xA6,        // not inverted
     0xAF,        // display on (a no-op when already on)
 };
@@ -180,14 +176,7 @@ const size_t PANEL_REFRESH_LEN = sizeof PANEL_REFRESH_CMDS;
 
 // Arguments that follow cmd in PANEL_REFRESH_CMDS: 1 for the two-byte
 // commands, 0 otherwise.
-inline int refreshArgCount(uint8_t cmd) {
-  switch (cmd) {
-    case 0xD5: case 0xA8: case 0xD3: case 0x8D: case 0x20:
-    case 0xDA: case 0x81: case 0xD9: case 0xDB:
-      return 1;
-  }
-  return 0;
-}
+inline int refreshArgCount(uint8_t cmd) { return cmd == 0x81 ? 1 : 0; }
 
 // I2C clock rungs, fastest first. 400 kHz is what the library uses. On the
 // 2026-10-22 wiring, with SDA through a poor contact, the panel answered

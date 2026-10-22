@@ -374,21 +374,24 @@ static bool hasCmd(uint8_t cmd) {
 }
 
 static void test_refresh_sequence_matches_begin() {
-  // The values u8g2's SH1106 begin() leaves the panel in (its init sequence
-  // and setContrast(255)): re-sending them to a healthy panel changes nothing.
-  CHECK(hasPair(0xD5, 0x80));  // clock divide
-  CHECK(hasPair(0xA8, 0x3F));  // multiplex 64
-  CHECK(hasPair(0xD3, 0x00));  // display offset
+  // Values u8g2's SH1106 begin() leaves the panel in (its init sequence and
+  // setContrast(255)), for the settings a glitch can visibly garble.
   CHECK(hasCmd(0x40));         // start line 0
   CHECK(hasCmd(0xA1));         // segment remap
   CHECK(hasCmd(0xC8));         // COM scan reversed
-  CHECK(hasPair(0xDA, 0x12));  // COM pins
   CHECK(hasPair(0x81, 0xFF));  // contrast, as the sketch sets it
-  CHECK(hasPair(0xD9, 0xF1));  // pre-charge
-  CHECK(hasPair(0xDB, 0x40));  // VCOMH
   CHECK(hasCmd(0xA4));         // output follows RAM
   CHECK(hasCmd(0xA6));         // not inverted
   CHECK(!hasPair(0x81, 0xCF)); // not the library's default contrast: no brightness dip
+}
+
+// Rewriting scan-timing registers restarts the panel's scan even with the
+// same value: with them in, the screen blinked once a second on the handheld
+// (2026-10-22, gone when the refresh was disabled). They are set by begin()
+// only.
+static void test_refresh_sequence_leaves_scan_timing_alone() {
+  const uint8_t timing[] = {0xD5, 0xA8, 0xDA, 0xD9, 0xDB, 0xD3, 0x8D, 0x20, 0xAD};
+  for (size_t t = 0; t < sizeof timing; ++t) CHECK(!hasCmd(timing[t]));
 }
 
 // The sketch sends each command with SendCmd and its argument with SendArg,
@@ -403,8 +406,7 @@ static void test_refresh_sequence_walks_cleanly() {
     ++cmds;
   }
   CHECK(i == PANEL_REFRESH_LEN);  // no command's argument runs off the end
-  CHECK(cmds == 16);
-  CHECK(refreshArgCount(0xD5) == 1);
+  CHECK(cmds == 7);
   CHECK(refreshArgCount(0x81) == 1);
   CHECK(refreshArgCount(0xAF) == 0);
   CHECK(refreshArgCount(0x40) == 0);
@@ -452,6 +454,7 @@ int main() {
   RUN(test_session_replay);
   RUN(test_refresh_sequence_never_blanks);
   RUN(test_refresh_sequence_matches_begin);
+  RUN(test_refresh_sequence_leaves_scan_timing_alone);
   RUN(test_refresh_sequence_walks_cleanly);
   RUN(test_event_names);
   std::printf("boot_anim: %d checks, %d failures\n", g_checks, g_failures);
