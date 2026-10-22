@@ -83,6 +83,9 @@
 // Wire format shared with the simulator: PACKET_MAGIC, FRAME_*, the frame
 // structs, calculateChecksum() and validateFrameChecksum().
 #include "telemetry_frames.h"
+// Link-screen stages, progress, spinner and sweep frames, and the OLED's
+// presence on the bus (PanelWatch). Pure C++, tested on the host.
+#include "boot_anim.h"
 
 #if DRONE_SOURCE == DRONE_SOURCE_SIM
 #include "flight_sim.h"
@@ -140,6 +143,11 @@ const uint16_t HTTP_PORT = 80;
 // ======================================================================================
 // SH1106 128x64 Full Buffer Hardware I2C (Address 0x3C)
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+const uint8_t OLED_I2C_ADDR = 0x3C;
+// Probed once a second. A panel on a loose wire can drop off the bus and come
+// back unconfigured, i.e. blank; seeing it return is the cue to re-init it.
+bootanim::PanelWatch g_panel;
+bool g_panelBootProbeDone = false;
 
 // NRF24L01 Radio on VSPI (CE=4, CSN=5)
 RF24 radio(PIN_NRF_CE, PIN_NRF_CSN);
@@ -503,6 +511,31 @@ void drawHardwareErrorScreen() {
   u8g2.sendBuffer();
 }
 
+// A short bar sliding along the header line: the screen moves even when the
+// numbers do not, so a live board never looks hung.
+void drawActivitySweep() {
+  u8g2.drawBox(bootanim::sweepX(millis(), 124), 15, 4, 3);
+}
+
+// Probes the panel when due, logs changes, and re-inits a panel that came back.
+void panelPoll(unsigned long now) {
+  if (!g_panel.due(now)) return;
+  Wire.beginTransmission(OLED_I2C_ADDR);
+  bool ack = Wire.endTransmission() == 0;
+  bootanim::Event e = g_panel.update(ack);
+  if (e != bootanim::EV_NONE) {
+    Serial.print(F("[OLED] "));
+    Serial.print(bootanim::eventName(e));
+    Serial.println(F(" at 0x3C (SDA 21, SCL 22)"));
+  }
+  // setup() already initialised the panel before the boot probe.
+  if (e == bootanim::EV_FOUND && g_panelBootProbeDone) {
+    u8g2.begin();
+    u8g2.setContrast(255);
+  }
+  g_panelBootProbeDone = true;
+}
+
 void drawDisconnectScreen(unsigned long elapsedMs) {
   u8g2.clearBuffer();
 
@@ -535,6 +568,9 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
     u8g2.print(elapsedSec);
     u8g2.print(F("s"));
   }
+  // Moves while the board is alive, so "lost" never looks like "frozen".
+  u8g2.setCursor(112, 46);
+  u8g2.print(bootanim::spinnerFrame(millis()));
 
   u8g2.setCursor(10, 59);
   u8g2.print(F("IP:"));
@@ -583,6 +619,7 @@ void drawTelemetryScreen() {
   }
 
   u8g2.drawHLine(0, 16, 128);
+  drawActivitySweep();
 
   // LEVEL 2: FlySky RSSI & Altitude in Meters
   u8g2.setFont(u8g2_font_6x12_tf);
@@ -726,6 +763,76 @@ void liteWingPump() {
   printTlmLine(t, g_rssiVal);
 }
 
+// The link screen: shown from boot until the first sample, and again whenever
+// the link is lost. Every element follows the real handshake (boot_anim.h).
+void drawLinkScreen(unsigned long now, unsigned long lostMs) {
+  bool wifiUp = WiFi.status() == WL_CONNECTED;
+  bootanim::Stage st = bootanim::stageOf(wifiUp, g_lw.state());
+  uint8_t pct = bootanim::progressPct(st, g_lw.tocRead(), g_lw.tocCount());
+
+  u8g2.clearBuffer();
+
+  // Header: what this screen is, or how long the link has been gone.
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.setCursor(2, 12);
+  if (g_hasReceivedData) {
+    u8g2.print(F("LINK LOST "));
+    u8g2.print(lostMs / 1000);
+    u8g2.print(F("s"));
+  } else {
+    u8g2.print(F("LITEWING LINK"));
+  }
+  u8g2.setCursor(110, 12);
+  u8g2.print('[');
+  u8g2.print(bootanim::spinnerFrame(now));
+  u8g2.print(']');
+  u8g2.drawHLine(0, 15, 128);
+
+  // Stage, with the TOC position while it is being read.
+  u8g2.setCursor(2, 29);
+  u8g2.print(bootanim::stageLabel(st));
+  if (st == bootanim::STG_READ_TOC && g_lw.tocCount() > 0) {
+    u8g2.print(' ');
+    u8g2.print(g_lw.tocRead());
+    u8g2.print('/');
+    u8g2.print(g_lw.tocCount());
+  }
+
+  // Progress bar and percent.
+  u8g2.drawFrame(2, 34, 100, 9);
+  u8g2.drawBox(4, 36, (uint8_t)(96u * pct / 100u), 5);
+  u8g2.setCursor(106, 42);
+  u8g2.print(pct);
+  u8g2.print('%');
+
+  // Stage dots: filled done, blinking current, dot to come, X failed.
+  char dots[bootanim::DOTS + 1];
+  bootanim::stageDots(st, dots);
+  bool blinkOn = (now / 250) % 2 == 0;
+  for (int i = 0; i < bootanim::DOTS; ++i) {
+    int x = 5 + i * 9, y = 56;
+    switch (dots[i]) {
+      case 'o': u8g2.drawDisc(x, y, 2); break;
+      case '*':
+        if (blinkOn) u8g2.drawDisc(x, y, 3);
+        else u8g2.drawCircle(x, y, 3);
+        break;
+      case 'x':
+        u8g2.drawLine(x - 2, y - 2, x + 2, y + 2);
+        u8g2.drawLine(x - 2, y + 2, x + 2, y - 2);
+        break;
+      default: u8g2.drawPixel(x, y); break;
+    }
+  }
+
+  u8g2.setFont(u8g2_font_5x8_tr);
+  u8g2.setCursor(50, 60);
+  u8g2.print(F("ip "));
+  u8g2.print(g_wifiIpText);
+
+  u8g2.sendBuffer();
+}
+
 // Same layout language as drawTelemetryScreen. No GPS on this airframe, so the
 // rows that carry coordinates elsewhere carry attitude and motor state.
 void drawLiteWingScreen() {
@@ -750,6 +857,7 @@ void drawLiteWingScreen() {
   }
 
   u8g2.drawHLine(0, 16, 128);
+  drawActivitySweep();
 
   // LEVEL 2: Wi-Fi link strength and range-sensor altitude
   u8g2.setFont(u8g2_font_6x12_tf);
@@ -1064,6 +1172,7 @@ void setup() {
   u8g2.setCursor(22, 45);
   u8g2.print(F("Initializing..."));
   u8g2.sendBuffer();
+  panelPoll(millis());
 
 #if DRONE_SOURCE == DRONE_SOURCE_LITEWING
   // The Wi-Fi radio belongs to the drone link, so there is no HTTP API in this
@@ -1145,12 +1254,18 @@ void loop() {
 
   // 2. Non-blocking OLED Screen Refresh
   unsigned long currentMillis = millis();
-  if (currentMillis - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
+  panelPoll(currentMillis);
+  // An absent panel would NACK every frame; skip drawing until it answers.
+  if (g_panel.present() && currentMillis - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
     g_lastDisplayRefresh = currentMillis;
 
     unsigned long timeSinceLastPacket = currentMillis - g_lastPacketTime;
     if (!g_hasReceivedData || timeSinceLastPacket >= DISCONNECT_TIMEOUT_MS) {
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+      drawLinkScreen(currentMillis, timeSinceLastPacket);
+#else
       drawDisconnectScreen(timeSinceLastPacket);
+#endif
     } else {
 #if DRONE_SOURCE == DRONE_SOURCE_LITEWING
       drawLiteWingScreen();
