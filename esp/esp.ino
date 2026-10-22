@@ -568,6 +568,23 @@ int probeBestRung() {
   return -1;
 }
 
+// Re-sends the panel's settings as bare commands (boot_anim.h), each command
+// and its argument in one transfer, as u8g2's own sequences do. No reset, no
+// delay, no display-off: a healthy panel shows no change.
+void refreshPanel() {
+  u8x8_t* u8x8 = u8g2.getU8x8();
+  u8x8_cad_StartTransfer(u8x8);
+  size_t i = 0;
+  while (i < bootanim::PANEL_REFRESH_LEN) {
+    uint8_t cmd = bootanim::PANEL_REFRESH_CMDS[i++];
+    u8x8_cad_SendCmd(u8x8, cmd);
+    for (int k = bootanim::refreshArgCount(cmd); k > 0 && i < bootanim::PANEL_REFRESH_LEN; --k) {
+      u8x8_cad_SendArg(u8x8, bootanim::PANEL_REFRESH_CMDS[i++]);
+    }
+  }
+  u8x8_cad_EndTransfer(u8x8);
+}
+
 // One probe round when due: pick the bus clock, track the panel, and begin or
 // refresh it (boot_anim.h). True when the screen must be redrawn now.
 bool panelRound(unsigned long now) {
@@ -586,16 +603,12 @@ bool panelRound(unsigned long now) {
   }
 
   bootanim::PanelAction a = bootanim::panelAction(e, g_panel.present(), g_bus.slowedDown());
-  if (a == bootanim::PA_BEGIN) {
-    u8g2.begin();
-  } else if (a == bootanim::PA_REFRESH) {
-    // The init sequence without the clear: heals a panel garbled by a glitch
-    // between probes, and its RAM survives, so nothing visibly blinks.
-    u8g2.initDisplay();
-    u8g2.setPowerSave(0);
-  } else {
-    return false;
+  if (a == bootanim::PA_REFRESH) {
+    refreshPanel();
+    return false;  // nothing to redraw: a healthy panel did not change
   }
+  if (a != bootanim::PA_BEGIN) return false;
+  u8g2.begin();
   u8g2.setContrast(255);
   return true;
 }
@@ -1236,21 +1249,27 @@ void drawCurrentScreen() {
 void displayTask(void*) {
   const unsigned long started = millis();
   bool stackReported = false;
+  unsigned long maxRoundMs = 0, maxFrameMs = 0;
   for (;;) {
     unsigned long now = millis();
     bool redrawNow = panelRound(now);
-    // Once, after every screen has had time to draw: how close the stack got.
+    unsigned long roundMs = millis() - now;
+    if (roundMs > maxRoundMs) maxRoundMs = roundMs;
+    // Once, after every screen has had time to draw: how close the stack got,
+    // and the longest stall a probe round or a frame caused (a freeze shows here).
     if (!stackReported && now - started >= 30000) {
       char line[64];
-      snprintf(line, sizeof line, "[OLED] task stack: %u bytes never used",
-               (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+      snprintf(line, sizeof line, "[OLED] stack %u B free, max round %lu ms, max frame %lu ms",
+               (unsigned)uxTaskGetStackHighWaterMark(nullptr), maxRoundMs, maxFrameMs);
       oledLog(line);
       stackReported = true;
     }
     // An absent panel would NACK every frame; skip drawing until it answers.
     if (g_panel.present() && (redrawNow || now - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS)) {
       g_lastDisplayRefresh = now;
+      unsigned long t0 = millis();
       drawCurrentScreen();
+      if (millis() - t0 > maxFrameMs) maxFrameMs = millis() - t0;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
