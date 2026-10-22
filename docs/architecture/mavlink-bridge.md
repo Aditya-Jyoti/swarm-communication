@@ -201,6 +201,64 @@ table. Flight is simulated; the task is not.
 A mission therefore survives the loss of the node it was uploaded to, which is the whole
 point of the swarm underneath it.
 
+### What the dashboard is told
+
+Mission state is owned by the bridge's loop goroutine, so the Control Center cannot read it.
+The bridge pushes a flat copy to the CC on its 1 Hz sync, and the CC serves whatever it last
+received in the snapshot's `missions` key. One tick stale is correct; a hub that blocked on
+the bridge would not be.
+
+```mermaid
+flowchart LR
+    LOOP["bridge loop (owns missions)"] -- "deep copy, once a second" --> HUB["CC hub (last view)"]
+    HUB -- "snapshot.missions" --> DASH[Dashboard]
+```
+
+The key is absent when there is no mission:
+
+```json
+"missions": [
+  {
+    "owner": 9, "owner_node": "swarm-net-node-9",
+    "exec": 1, "exec_node": "swarm-net-node-1",
+    "started": true, "current": 2,
+    "items": [
+      {"seq": 0, "cmd": 16, "state": "done", "node": "swarm-net-node-1",
+       "pos": {"x": 12.0, "y": 12.0, "z": 1.25}},
+      {"seq": 1, "cmd": 16, "state": "flying", "node": "swarm-net-node-2",
+       "pos": {"x": 88.0, "y": 88.0, "z": 1.25}},
+      {"seq": 2, "cmd": 16, "state": "pending", "node": "",
+       "pos": {"x": 20.0, "y": 80.0, "z": 1.25}},
+      {"seq": 3, "cmd": 206, "state": "skipped", "node": ""}
+    ]
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `owner`, `owner_node` | the sysid the mission was uploaded to. Never changes: a download comes from here |
+| `exec`, `exec_node` | the sysid whose cluster is flying it. Differs from `owner` after a migration |
+| `started` | false for an uploaded plan nobody has run. An upload is a plan, not a launch |
+| `current` | the last `MISSION_CURRENT` sequence sent, or `-1` when none has been |
+| `items[].state` | `pending`, `flying`, `done` or `skipped` |
+| `items[].node` | the node flying or that flew the item, `""` for nobody. This is how the dashboard maps an item to a node: `nodes[]` carries nothing about missions |
+| `items[].pos` | CUBE UNITS, the same space as `nodes[].pos`, so waypoints draw in the existing view with no conversion |
+| `truncated` | present and true when the plan is longer than the published list |
+
+Three details worth knowing before you draw it:
+
+- **`skipped` is about the command, not progress.** An item the simulation has no meaning for
+  (cmd 206 above, a camera trigger) is accepted and never flown, so it reads `skipped` for its
+  whole life rather than turning `done`.
+- **`pos` can be absent.** A `LAND`, a `RETURN_TO_LAUNCH` or a bare takeoff has no coordinate of
+  its own -- its target depends on the vehicle that gets it -- so there is nothing to draw until
+  it is assigned. Once assigned, `pos` is the goal the bridge handed to that vehicle.
+- **At most 100 items per mission** (`mavlink.MaxPublishedItems`), with `truncated: true` beyond
+  that. The whole snapshot goes to every browser once a second, and a 500-item plan is about
+  50 KB of that per browser; the cap keeps it near 10 KB. The published items are the head of
+  the plan, which is the part being flown.
+
 ## 6. Ground stations
 
 The bridge keeps a SET of stations, not one address:

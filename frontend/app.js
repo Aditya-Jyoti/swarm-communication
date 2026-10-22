@@ -6,7 +6,8 @@
 //
 // Data flow (contracts: docs/architecture/control-center.md and
 // docs/architecture/latency-simulation.md):
-//   server -> browser  {"type":"snapshot", sim:{...}, nodes:[...], tasks:[...]}  every 1s
+//   server -> browser  {"type":"snapshot", sim:{...}, nodes:[...], tasks:[...],
+//                       missions:[...]}                                        every 1s
 //   server -> browser  {"type":"event", kind, node, detail}                      as they happen
 //   browser -> server  {"type":"task", kind, body, count}
 //   browser -> server  {"type":"chaos", node, action, delay_ms}
@@ -15,7 +16,9 @@
 // Every field read from the server goes through a defensive accessor: a
 // missing or null field must degrade to "-", never throw and freeze the page.
 // The simulation fields (sim, pos, flows, threshold, hysteresis, sim_version)
-// are all optional, so the page also works against an older control center.
+// and the mission list (missions) are all optional, so the page also works
+// against an older control center: no key means no mission overlay and no
+// Mission panel, which is exactly the behaviour of an idle swarm.
 // All server text is inserted with textContent, never innerHTML.
 //
 // CSP: script-src 'self' and style-src 'self'. Nothing here sets a style
@@ -57,6 +60,22 @@
   // Persisted view choice. A first visit (or blocked storage) gets the map.
   var VIEW_KEY = "swarm-net.view";
   var LAYOUT_KEY = "swarm-net.layout2d";
+  var MISSION_KEY = "swarm-net.mission";
+
+  // Mission overlay. Waypoint markers are drawn at WP_R inside a scaled
+  // group (like the node glyphs), so WP_BASE is the on-screen radius at
+  // zoom 1 -- a little smaller than a worker, since drones come first.
+  var WP_R = 10;
+  var WP_BASE = 7.5;
+  var MISSION_STATES = { pending: 1, flying: 1, done: 1, skipped: 1 };
+  // MAV_CMD names worth reading at a glance. Anything else shows as a bare
+  // number, which is still better than nothing.
+  var MAV_CMD = {
+    16: "WAYPOINT", 17: "LOITER_UNLIM", 18: "LOITER_TURNS", 19: "LOITER_TIME",
+    20: "RTL", 21: "LAND", 22: "TAKEOFF", 82: "SPLINE_WAYPOINT", 112: "DELAY",
+    177: "JUMP", 178: "CHANGE_SPEED", 179: "SET_HOME", 201: "SET_ROI",
+    206: "CAM_TRIGG_DIST"
+  };
 
   // Message animation.
   var FLOW_WINDOW_MS = 1000;  // telemetry interval the counts cover
@@ -279,6 +298,7 @@
     byId: new Map(),
     addr: new Map(),    // node id -> advertise address, learnt from peer lists
     tasks: [],          // normalised, newest first
+    missions: [],       // normalised snapshot.missions; empty when absent
     sim: null,          // normalised snapshot.sim, or null (older backend)
     atMs: null,         // server time of the last snapshot
     recvAt: 0,          // local time the last snapshot arrived
@@ -380,6 +400,64 @@
       output: str(out),
       duration: num(t.duration_ms),
       submitted: num(t.submitted_unix_ms)
+    };
+  }
+
+  // A mission item. `pos` is in cube units, the same space as nodes[].pos,
+  // so it projects through the very same helpers as a node glyph.
+  //
+  // `pos` is often absent, and that is not an error:
+  //   - a `skipped` item never has one (the bridge never works out a
+  //     coordinate for an item it will not fly),
+  //   - nor does an unassigned LAND / RTL / altitude-only TAKEOFF, whose
+  //     target depends on which vehicle picks it up. Such an item GAINS a
+  //     pos once assigned, so nothing may cache "this one has no position".
+  // A plain WAYPOINT (cmd 16) always has one.
+  // Items with no position are listed in the panel and drawn nowhere.
+  function normMissionItem(it) {
+    it = obj(it);
+    if (!it) return null;
+    var seq = num(it.seq);
+    if (seq === null) return null;
+    var st = str(it.state).toLowerCase();
+    return {
+      seq: Math.round(seq),
+      cmd: num(it.cmd),
+      state: MISSION_STATES[st] ? st : "pending",
+      node: str(it.node),
+      pos: normPos(it.pos)
+    };
+  }
+
+  // One swarm-level mission (docs/architecture/mavlink-bridge.md, section 5):
+  // uploaded to one sysid ("owner"), executed by whichever node leads that
+  // cluster now ("exec"). The two differ after a re-election -- a migration.
+  function normMission(m, i) {
+    m = obj(m);
+    if (!m) return null;
+    var items = arr(m.items).map(normMissionItem).filter(Boolean);
+    if (!items.length) return null; // nothing to show, so show nothing
+    items.sort(function (a, b) { return a.seq - b.seq; });
+    var owner = num(m.owner);
+    var ownerNode = str(m.owner_node);
+    var done = 0;
+    items.forEach(function (w) { if (w.state === "done") done++; });
+    return {
+      // Stable across snapshots, so markers and rows are reused, not rebuilt.
+      key: "m" + (owner !== null ? owner : (ownerNode || i)),
+      owner: owner,
+      ownerNode: ownerNode,
+      exec: num(m.exec),
+      execNode: str(m.exec_node),
+      started: m.started === true,
+      // -1 (never omitted) means no MISSION_CURRENT has been sent yet.
+      current: num(m.current),
+      // The control center publishes at most MaxPublishedItems (100) items
+      // and gives no total, so with this flag `items.length` is a floor,
+      // not the size of the plan.
+      truncated: m.truncated === true,
+      items: items,
+      done: done
     };
   }
 
@@ -631,6 +709,9 @@
     model.byId = byId;
     model.addr = addr;
     model.tasks = tasks;
+    // Absent "missions" (no mission, or an older control center) must land
+    // on exactly today's behaviour: an empty list and a hidden panel.
+    model.missions = arr(msg.missions).map(normMission).filter(Boolean);
     model.sim = normSim(msg.sim);
     model.atMs = num(msg.at_unix_ms);
     model.recvAt = Date.now();
@@ -642,6 +723,8 @@
     spawnFlows(nodes);
     renderNodeTable();
     renderTaskTable();
+    syncMission();
+    renderMissionPanel();
     renderSimPanel();
     renderInspector();
     changed.forEach(function (id) {
@@ -1629,6 +1712,175 @@
     return true;
   }
 
+  // ---------------------------------------------------------------- mission overlay
+  //
+  // The swarm-level mission drawn into the space: a numbered marker per item
+  // at its position, the route joining them in sequence order, and a line
+  // from every drone in the air to the item it is flying.
+  //
+  // It lives inside #v3d, under #g3-nodes, so the map and 3D share one
+  // renderer (only the camera basis differs) and no marker can hide a drone.
+  // The grouped layout ignores positions entirely, so #v3d -- and with it
+  // the whole overlay -- is already hidden there.
+  //
+  // Structure is set once per snapshot (syncMission); geometry per frame,
+  // under the same sceneDirty guard as everything else (renderMission).
+
+  var wpMarks = new Map();   // "<mission key>#<seq>" -> glyph parts
+  var wpRoutes = new Map();  // mission key -> route path
+  var wpAssign = new Map();  // "<mission key>#<seq>" -> {line, hit, node}
+  var missionOn = true;
+  var hoverWp = null;
+
+  function wpKey(ms, w) { return ms.key + "#" + w.seq; }
+
+  // Drawn in the space only when there is a real coordinate to draw at.
+  // `skipped` is excluded even if a pos turns up: those items carry
+  // MAV_FRAME_MISSION lat/lon 0, which would plant a marker in the corner
+  // of the cube and read as a waypoint someone flew to. They are list-only.
+  function drawable(w) { return !!w.pos && w.state !== "skipped"; }
+
+  function findWp(key) {
+    var cut = key.lastIndexOf("#");
+    if (cut < 0) return null;
+    var mk = key.slice(0, cut);
+    var sq = Number(key.slice(cut + 1));
+    for (var i = 0; i < model.missions.length; i++) {
+      var ms = model.missions[i];
+      if (ms.key !== mk) continue;
+      for (var j = 0; j < ms.items.length; j++) {
+        if (ms.items[j].seq === sq) return { ms: ms, w: ms.items[j] };
+      }
+    }
+    return null;
+  }
+
+  function cmdName(cmd) {
+    if (cmd === null) return "-";
+    return cmd + (MAV_CMD[cmd] ? " " + MAV_CMD[cmd] : "");
+  }
+
+  function makeWpMark(key) {
+    var g = s("g", { "class": "wp", "data-wp": key });
+    var body = s("g", { "class": "wp-body" });
+    var parts = {
+      halo: s("circle", { "class": "wp-halo", r: WP_R + 5, display: "none" }),
+      mark: s("rect", { "class": "wp-mark", x: -WP_R, y: -WP_R, width: 2 * WP_R, height: 2 * WP_R, rx: 3 }),
+      slash: s("line", { "class": "wp-slash", x1: -WP_R, y1: WP_R, x2: WP_R, y2: -WP_R, display: "none" }),
+      seq: s("text", { "class": "wp-seq" }),
+      hit: s("rect", { "class": "wp-hit", x: -WP_R - 3, y: -WP_R - 3, width: 2 * WP_R + 6, height: 2 * WP_R + 6 })
+    };
+    ["halo", "mark", "slash", "seq", "hit"].forEach(function (p) { body.appendChild(parts[p]); });
+    g.appendChild(body);
+    $("g3-mmarks").appendChild(g);
+    parts.g = g;
+    parts.body = body;
+    parts.sc = -1;
+    parts.cls = "";
+    return parts;
+  }
+
+  function syncMission() {
+    var wantM = new Set(), wantA = new Set(), wantR = new Set();
+    model.missions.forEach(function (ms) {
+      wantR.add(ms.key);
+      if (!wpRoutes.has(ms.key)) {
+        var path = s("path", { "class": "wp-route" });
+        $("g3-mroute").appendChild(path);
+        wpRoutes.set(ms.key, path);
+      }
+      ms.items.forEach(function (w) {
+        if (!drawable(w)) return; // nothing to place
+        var key = wpKey(ms, w);
+        wantM.add(key);
+        var d = wpMarks.get(key);
+        if (!d) { d = makeWpMark(key); wpMarks.set(key, d); }
+        setText(d.seq, String(w.seq));
+        show(d.slash, w.state === "skipped");
+        show(d.halo, w.state === "flying");
+        // One assignment line per item actually in the air on a known node.
+        if (w.state !== "flying" || !w.node || !nodes3.has(w.node)) return;
+        wantA.add(key);
+        var A = wpAssign.get(key);
+        if (!A) {
+          A = {
+            line: s("line", { "class": "assign" }),
+            hit: s("line", { "class": "hit", "data-wp": key })
+          };
+          $("g3-massign").appendChild(A.line);
+          $("g3-massign").appendChild(A.hit);
+          wpAssign.set(key, A);
+        }
+        A.node = w.node;
+      });
+    });
+    wpMarks.forEach(function (d, k) { if (!wantM.has(k)) { d.g.remove(); wpMarks.delete(k); } });
+    wpAssign.forEach(function (A, k) {
+      if (wantA.has(k)) return;
+      A.line.remove(); A.hit.remove();
+      wpAssign.delete(k);
+    });
+    wpRoutes.forEach(function (p, k) { if (!wantR.has(k)) { p.remove(); wpRoutes.delete(k); } });
+    show($("g3-mission"), missionOn);
+    sceneDirty = true;
+  }
+
+  // Per-frame geometry, called from render3d with the current basis.
+  function renderMission(B) {
+    if (!missionOn) return;
+    var S = worldSize();
+    var seen = new Map(); // key -> screen point, for the assignment lines
+    model.missions.forEach(function (ms) {
+      var d = "";
+      var pen = false; // true while the route pen is down
+      ms.items.forEach(function (w) {
+        if (!drawable(w)) return;
+        var key = wpKey(ms, w);
+        var mark = wpMarks.get(key);
+        var p = project(B, w.pos.x / S, w.pos.y / S, w.pos.z / S);
+        if (!p) {
+          // Behind the eye: hide the marker and break the route there.
+          if (mark) show(mark.g, false);
+          pen = false;
+          return;
+        }
+        seen.set(key, p);
+        d += (pen ? "L" : "M") + p.x.toFixed(1) + "," + p.y.toFixed(1);
+        pen = true;
+        if (!mark) return;
+        show(mark.g, true);
+        attr(mark.g, "transform", "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ")");
+        var sc = WP_BASE * clamp(p.k / (FOCAL / CAM_DIST), 0.45, 2.6) / WP_R;
+        if (Math.abs(sc - mark.sc) > 0.01) {
+          mark.sc = sc;
+          attr(mark.body, "transform", "scale(" + sc.toFixed(3) + ")");
+        }
+        var sel = !!selectedId && w.node === selectedId;
+        var cls = "wp wps-" + w.state + (hoverWp === key ? " hl" : "") + (sel ? " sel" : "");
+        if (cls !== mark.cls) { mark.cls = cls; attr(mark.g, "class", cls); }
+      });
+      var path = wpRoutes.get(ms.key);
+      if (!path) return;
+      if (d) { attr(path, "d", d); show(path, true); } else { show(path, false); }
+    });
+    wpAssign.forEach(function (A, key) {
+      var n = nodes3.get(A.node);
+      setLine(A.line, n && n.p, seen.get(key));
+      setLine(A.hit, n && n.p, seen.get(key));
+      var hl = hoverWp === key || (!!selectedId && selectedId === A.node);
+      attr(A.line, "class", "assign" + (hl ? " hl" : ""));
+    });
+  }
+
+  function setMission(on, persist) {
+    missionOn = !!on;
+    var cb = $("show-mission");
+    if (cb.checked !== missionOn) cb.checked = missionOn;
+    if (persist) savePref(MISSION_KEY, missionOn ? "on" : "off");
+    syncMission();
+    kick();
+  }
+
   // ---------------------------------------------------------------- label layout
   //
   // Greedy, per frame, in view-box pixels. Node labels go first, then link
@@ -1842,6 +2094,9 @@
       var root = $("g3-nodes");
       list.forEach(function (d) { root.appendChild(d.g); });
     }
+
+    // Waypoints and assignment lines use the projected node points above.
+    renderMission(B);
 
     var labelled = [];
     links3.forEach(function (L, wid) {
@@ -2087,6 +2342,26 @@
     return lines;
   }
 
+  function tipForWaypoint(key) {
+    var f = findWp(key);
+    if (!f) return null;
+    var w = f.w, ms = f.ms;
+    var lines = [
+      "waypoint " + w.seq + " -- " + w.state.toUpperCase(),
+      "cmd: " + cmdName(w.cmd),
+      "flown by: " + (w.node ? shortId(w.node) : "(not assigned)")
+    ];
+    if (w.pos) {
+      lines.push("pos: x " + w.pos.x.toFixed(1) + "  y " + w.pos.y.toFixed(1) + "  z " + w.pos.z.toFixed(1));
+      if (mode === "map") lines.push("the map shows ground position");
+    }
+    lines.push("mission of " + (ms.ownerNode ? shortId(ms.ownerNode) : "sysid " + dash(ms.owner)));
+    if (migrated(ms)) lines.push("now run by " + shortId(ms.execNode) + " (MIGRATED)");
+    lines.push("progress: " + ms.done + " / " + ms.items.length + " done" +
+      (ms.truncated ? " (first " + ms.items.length + " of a longer plan)" : ""));
+    return lines;
+  }
+
   function tipForLink(wid) {
     var w = model.byId.get(wid);
     var l = w && model.byId.get(w.leader);
@@ -2156,6 +2431,7 @@
   function hideTip() {
     show($("tip"), false);
     setHoverLink(null);
+    setHoverWp(null);
     if (hoverId !== null) {
       hoverId = null;
       if (!selectedId) renderInspector();
@@ -2171,11 +2447,27 @@
     relabel();
   }
 
+  // A marker and its row in the Mission panel highlight together, whichever
+  // of the two the pointer is on. The row class is toggled straight away;
+  // the marker picks it up on the next redraw.
+  function setHoverWp(key) {
+    if (hoverWp === key) return;
+    var old = hoverWp ? missionRows.get(hoverWp) : null;
+    if (old) old.classList.remove("hl");
+    hoverWp = key;
+    var row = key ? missionRows.get(key) : null;
+    if (row) row.classList.add("hl");
+    sceneDirty = true;
+    kick();
+  }
+
   function hoverTarget(el) {
     while (el && el !== topo) {
       if (el.getAttribute) {
         var id = el.getAttribute("data-id");
         if (id) return { kind: "node", id: id };
+        var wp = el.getAttribute("data-wp");
+        if (wp) return { kind: "wp", id: wp };
         var lk = el.getAttribute("data-link");
         if (lk) return { kind: "link", id: lk };
         var pk = el.getAttribute("data-peer");
@@ -2189,9 +2481,11 @@
   function hover(target, vx, vy) {
     if (!target) { hideTip(); return; }
     var lines = target.kind === "node" ? tipForNode(target.id)
+      : target.kind === "wp" ? tipForWaypoint(target.id)
       : target.kind === "link" ? tipForLink(target.id) : tipForPeer(target.id);
     showTip(lines, vx, vy);
     setHoverLink(target.kind === "link" ? "w:" + target.id : target.kind === "peer" ? "p:" + target.id : null);
+    setHoverWp(target.kind === "wp" ? target.id : null);
     if (target.kind === "node" && hoverId !== target.id) {
       hoverId = target.id;
       if (!selectedId) renderInspector();
@@ -2347,7 +2641,12 @@
         var t = gesture.target;
         if (t && t.kind === "node") select(t.id, true);
         else if (t && t.kind === "link") select(t.id, false);
-        else select(null, false);
+        // Clicking a waypoint selects the drone flying it: that is the
+        // question the marker makes you ask.
+        else if (t && t.kind === "wp") {
+          var f = findWp(t.id);
+          select(f && f.w.node ? f.w.node : null, true);
+        } else select(null, false);
       }
       if (!pointers.size) gesture = null;
     }
@@ -2463,6 +2762,10 @@
       sceneDirty = true;
       kick();
     });
+    $("show-mission").addEventListener("change", function () {
+      setMission($("show-mission").checked, true);
+    });
+    setMission(loadPref(MISSION_KEY, ["on", "off"], "on") === "on", false);
   }
 
   // ---------------------------------------------------------------- simulation panel
@@ -2900,6 +3203,143 @@
     setText($("task-count-label"), ordered.length ? "(" + ordered.length + ")" : "");
   }
 
+  // ---------------------------------------------------------------- mission panel
+
+  // Rebuilt only when the mission data actually changed, so the 1 Hz
+  // snapshot does not churn 60 rows (and does not drop a hover halfway).
+  var missionRows = new Map();   // "<mission key>#<seq>" -> tr
+  var missionSig = "";
+  var prevExec = new Map();      // mission key -> exec node, to spot migrations
+
+  // Uploaded to one node, executed by another: a re-election moved the
+  // mission. The most interesting thing on screen, so it gets a badge, a
+  // coloured line, a panel flash and an entry in the event log.
+  function migrated(ms) {
+    return !!(ms.execNode && ms.ownerNode && ms.execNode !== ms.ownerNode);
+  }
+
+  function sysidOf(v) { return v === null ? "" : "  (sysid " + v + ")"; }
+
+  function missionBlock(ms) {
+    var wrap = h("div", "mission-block");
+
+    var head = h("div", "insp-head");
+    head.appendChild(h("strong", "mono", ms.ownerNode || ("sysid " + dash(ms.owner))));
+    head.appendChild(badge(ms.started ? "started" : "not started", ms.started ? "b-alive" : "b-pending"));
+    head.appendChild(badge(ms.done + " / " + ms.items.length + " done",
+      !ms.truncated && ms.done >= ms.items.length ? "b-done" : "b-worker"));
+    if (migrated(ms)) head.appendChild(badge("migrated", "b-degraded"));
+    if (ms.truncated) head.appendChild(badge("truncated", "b-unknown"));
+    wrap.appendChild(head);
+
+    var facts = h("ul", "insp-facts");
+    facts.appendChild(h("li", "mono", "uploaded to: " + (ms.ownerNode || "-") + sysidOf(ms.owner)));
+    facts.appendChild(h("li", "mono" + (migrated(ms) ? " mission-mig" : ""),
+      "executing on: " + (ms.execNode || "-") + sysidOf(ms.exec) +
+      (migrated(ms) ? "  -- MIGRATED from " + ms.ownerNode : "")));
+    // current is -1 until the first MISSION_CURRENT: "waypoint -1" would be
+    // nonsense, so say what it means.
+    facts.appendChild(h("li", "mono", "current item: " +
+      (ms.current === null || ms.current < 0 ? "none sent yet" : ms.current)));
+    // No total comes with the flag, so never claim items.length is the plan.
+    if (ms.truncated) {
+      facts.appendChild(h("li", "mono mission-mig",
+        "showing the first " + ms.items.length + " items of a longer plan"));
+    }
+    wrap.appendChild(facts);
+
+    var tw = h("div", "table-wrap scroll short");
+    var t = h("table", "insp-table");
+    var thead = h("thead");
+    var hr = h("tr");
+    ["seq", "state", "cmd", "node"].forEach(function (c) { hr.appendChild(h("th", "", c)); });
+    thead.appendChild(hr);
+    t.appendChild(thead);
+    var tb = h("tbody");
+    ms.items.forEach(function (w) {
+      var key = wpKey(ms, w);
+      var tr = h("tr", "wp-row");
+      tr.appendChild(h("td", "num", String(w.seq)));
+      var st = h("td");
+      st.appendChild(badge(w.state, "b-wp-" + w.state));
+      tr.appendChild(st);
+      tr.appendChild(h("td", "mono", cmdName(w.cmd)));
+      tr.appendChild(h("td", "mono", w.node || "-"));
+      // Only items with a marker on screen take part in the hover pairing.
+      if (drawable(w)) {
+        tr.classList.add("pick-row");
+        missionRows.set(key, tr);
+        tr.addEventListener("mouseenter", function () { setHoverWp(key); });
+        tr.addEventListener("mouseleave", function () { setHoverWp(null); });
+        tr.addEventListener("click", function () { if (w.node) select(w.node, true); });
+      }
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    tw.appendChild(t);
+    wrap.appendChild(tw);
+    return wrap;
+  }
+
+  function renderMissionPanel() {
+    var panel = $("mission-panel");
+    var box = $("mission-body");
+    var list = model.missions;
+
+    // Note migrations before the early return, so the log entry is emitted
+    // even on a snapshot where nothing else about the mission changed.
+    var flashKeys = [];
+    var live = new Set();
+    list.forEach(function (ms) {
+      live.add(ms.key);
+      var prev = prevExec.get(ms.key);
+      prevExec.set(ms.key, ms.execNode);
+      if (prev === undefined || prev === ms.execNode || !ms.execNode) return;
+      flashKeys.push(ms.key);
+      addEvent("mission", ms.execNode,
+        "mission of " + (ms.ownerNode || "sysid " + dash(ms.owner)) + " now executing here", null, true);
+    });
+    prevExec.forEach(function (v, k) { if (!live.has(k)) prevExec.delete(k); });
+
+    if (!list.length) {
+      panel.hidden = true;
+      if (missionSig === "") return;
+      missionSig = "";
+      missionRows.clear();
+      box.textContent = "";
+      setText($("mission-count-label"), "");
+      return;
+    }
+    panel.hidden = false;
+
+    var items = 0, flying = 0, cut = false;
+    list.forEach(function (ms) {
+      items += ms.items.length;
+      if (ms.truncated) cut = true;
+      ms.items.forEach(function (w) { if (w.state === "flying") flying++; });
+    });
+    setText($("mission-count-label"), "(" + (cut ? "first " : "") + items +
+      " item" + (items === 1 ? "" : "s") + ", " + flying + " in the air)");
+
+    var sig = JSON.stringify(list);
+    if (sig !== missionSig) {
+      missionSig = sig;
+      missionRows.clear();
+      box.textContent = "";
+      list.forEach(function (ms) {
+        var block = missionBlock(ms);
+        block.setAttribute("data-mission", ms.key);
+        box.appendChild(block);
+      });
+      // Re-apply a hover that survived the rebuild.
+      var row = hoverWp ? missionRows.get(hoverWp) : null;
+      if (row) row.classList.add("hl");
+    }
+    flashKeys.forEach(function (k) {
+      flash(box.querySelector('[data-mission="' + k + '"]'));
+    });
+  }
+
   // ---------------------------------------------------------------- events
 
   function addEvent(kind, node, detail, atMs, local) {
@@ -3039,6 +3479,10 @@
     queueSim: queueSim,
     flushSim: flushSim,
     dotCount: function () { return dots.length; },
+    missions: function () { return model.missions; },
+    waypointCount: function () { return wpMarks.size; },
+    assignCount: function () { return wpAssign.size; },
+    setMission: setMission,
     labelBoxes: function () { return labelBoxes.map(function (b) { return { x: b.x, y: b.y, w: b.w, h: b.h, kind: b.kind, id: b.id || (b.owner && b.owner.node ? b.owner.node.id : "") }; }); }
   };
 

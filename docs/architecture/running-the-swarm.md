@@ -125,6 +125,8 @@ hostname instead.
 | summary | node, leader and pending task counts |
 | space | **3D space** (default) or **Grouped** (one circle per cluster, workers inside) |
 | message animation | dots per message type, with a legend that toggles each type |
+| mission overlay | numbered waypoints, the route, and a line from each drone to the item it is flying |
+| Mission panel | owner, executing node, progress, and the item list (appears only when there is a mission) |
 | inspector | hover or click a node: position, role, RTTs, predicted delays |
 | broadcast task | pick a kind, a JSON body and a count |
 | Advanced: latency simulation | latency sliders, election overrides, positions |
@@ -150,6 +152,50 @@ dead nodes have an X, nodes cut off from the CC are hollow, killed nodes are gre
 
 Link labels show the distance, the measured RTT and the predicted delay. "all peer links" and
 "link labels" are toggles above the view. Click the space first so the keys reach it.
+
+### Mission overlay
+
+When a mission is uploaded to a leader, the whole cluster flies it (see
+[MAVLink Bridge](./mavlink-bridge), section 5). The dashboard draws it in both the 2D map and
+the 3D view, so you can see which drone is on which waypoint.
+
+| Drawn | Means |
+|---|---|
+| numbered square, filled and muted | `done` |
+| numbered square, filled, with a pulsing ring | `flying` -- look here first |
+| numbered square, outline only | `pending` |
+| thin dotted path | the route, in sequence order |
+| thick marching dashes | drone -> the item it is flying |
+
+Waypoints are **squares** and drones are **circles**, and the markers are drawn *under* the node
+glyphs, so a marker never hides the aircraft on it. Colour is never the only signal.
+
+Not everything is drawn:
+
+- A `skipped` item has no coordinate at all, so it is a row in the Mission panel only.
+- Nor does an unassigned `LAND`, `RETURN_TO_LAUNCH` or altitude-only `TAKEOFF`: their target
+  depends on which vehicle takes the item. A marker appears for them the moment one does.
+
+The **Mission panel** sits under the topology and appears only while there is a mission. It
+shows the node the mission was uploaded to, the node executing it now, started yes/no, progress
+as `done/total`, and every item with its seq, state and assigned node. Hovering a row highlights
+its marker and the other way round; clicking a row or a marker selects the drone flying it.
+
+**When the two nodes differ**, the panel says `MIGRATED from <node>` and logs it: a re-election
+handed the mission to a new leader and the unflown items went with it. That is the swarm healing
+mid-mission, and it is the thing to watch for.
+
+Two details the data forces:
+
+- `current` is `-1` until the first `MISSION_CURRENT`, shown as "none sent yet".
+- A plan longer than the published cap (100 items) arrives flagged `truncated`, with no total.
+  The panel then says "showing the first N items of a longer plan" rather than pretending `N`
+  is the whole thing.
+
+**mission overlay** above the view hides the waypoints, route and assignment lines; the Mission
+panel stays. The choice is remembered in `localStorage` like "all peer links" and
+"Show messages". With no mission -- or an older control center that does not publish one -- the
+overlay draws nothing and the panel does not appear.
 
 ### Advanced panel
 

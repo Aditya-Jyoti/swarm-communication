@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"swarm-net/pkg/geo"
+	"swarm-net/pkg/mavlink"
 	"swarm-net/pkg/network"
 	"swarm-net/pkg/protocol"
 	"swarm-net/pkg/telemetry"
@@ -66,6 +67,11 @@ type hub struct {
 	// dropping is the expected outcome, not a failure, and the dashboard
 	// shows it as such until the entry expires or the ID reconnects.
 	killed map[protocol.NodeID]struct{}
+	// missions is the MAVLink bridge's last published mission state, nil when
+	// the bridge is disabled or has nothing. Written only by
+	// mavSource.SetMissions, which runs as a hub op, and read only by
+	// snapshot: hub-owned like everything else here.
+	missions []mavlink.MissionView
 }
 
 func newHub(s *Server) *hub {
@@ -470,6 +476,9 @@ func (h *hub) snapshot() Snapshot {
 		Sim:      h.simView(),
 		Nodes:    make([]NodeView, 0, len(h.nodes)),
 		Tasks:    make([]TaskView, 0, len(h.tasks)),
+		// Shared, not copied: both this value and h.missions stay on the hub
+		// goroutine, and the slice is already the bridge's deep copy.
+		Missions: h.missions,
 	}
 	for _, n := range h.nodes {
 		v := NodeView{

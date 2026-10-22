@@ -232,6 +232,9 @@ Notes on the snapshot:
   the node reports, not the CC's overrides. They are 0 until the node's first telemetry.
 - `flows` is the latest sample, emptied once older than 3 s. Never null.
 - `tasks` holds the newest 200 tasks.
+- `missions` is present only while the MAVLink bridge holds a mission. It is the bridge's own
+  state, pushed to the hub once a second, so it is at most one tick behind. Shape and fields:
+  [MAVLink Bridge, section 5](./mavlink-bridge#_5-swarm-level-missions).
 - A `score` of `-1` means **not measured yet**, not "excellent".
 
 ## Tasks through the CC

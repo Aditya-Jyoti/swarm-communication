@@ -150,6 +150,16 @@ type SwarmSource interface {
 	// snapshot and the call is idempotent.
 	SetPositions(ctx context.Context, positions map[protocol.NodeID]protocol.Position) error
 
+	// SetMissions publishes the bridge's mission state, for the Control
+	// Center's snapshot and so the dashboard. Called once per sync interval
+	// with the whole list, including an empty one: it is a snapshot, like
+	// SetPositions, and a cleared mission has to reach the dashboard too.
+	//
+	// Pushed rather than pulled because the receiver builds its snapshot on
+	// its own goroutine and must not block on the bridge's loop; see
+	// Bridge.syncMissions.
+	SetMissions(ctx context.Context, missions []MissionView) error
+
 	// SubmitTask hands the swarm one task for a reached waypoint. Called from
 	// the bridge's task goroutine, never from its loop: submitting crosses into
 	// the swarm and can be slow exactly when a mission is interesting (mid
@@ -390,6 +400,10 @@ type Bridge struct {
 	events chan swarmEvent
 	syncs  chan syncReq
 	tasks  chan MissionTask
+	// missionReqs carries requests for the published mission view. Its own
+	// channel rather than a field on syncReq so that Missions is callable on
+	// its own, by a test or a future endpoint, without faking a swarm sync.
+	missionReqs chan missionReq
 }
 
 // NewBridge opens the UDP socket. Nothing is sent or received until Run.
@@ -425,24 +439,25 @@ func NewBridge(cfg BridgeConfig) (*Bridge, error) {
 		return nil, fmt.Errorf("mavlink: live feed on %q: %w", cfg.Live.Bind, err)
 	}
 	return &Bridge{
-		liveConn:   liveConn,
-		liveIn:     make(chan litewing.Sample, liveDepth),
-		cfg:        cfg,
-		log:        cfg.Logger.With("component", "mavlink"),
-		conn:       conn,
-		configured: gcs,
-		vehicles:   NewVehicles(),
-		vs:         make(map[protocol.NodeID]*vehicle),
-		stations:   make(map[string]*station),
-		out:        make([]byte, 0, MaxFrameLen),
-		boot:       cfg.Now(),
-		lastPos:    cfg.Now(),
-		missions:   make(map[byte]*mission),
-		uploads:    make(map[byte]*upload),
-		inbox:      make(chan datagram, inboxDepth),
-		events:     make(chan swarmEvent, eventDepth),
-		syncs:      make(chan syncReq),
-		tasks:      make(chan MissionTask, taskDepth),
+		liveConn:    liveConn,
+		liveIn:      make(chan litewing.Sample, liveDepth),
+		cfg:         cfg,
+		log:         cfg.Logger.With("component", "mavlink"),
+		conn:        conn,
+		configured:  gcs,
+		vehicles:    NewVehicles(),
+		vs:          make(map[protocol.NodeID]*vehicle),
+		stations:    make(map[string]*station),
+		out:         make([]byte, 0, MaxFrameLen),
+		boot:        cfg.Now(),
+		lastPos:     cfg.Now(),
+		missions:    make(map[byte]*mission),
+		uploads:     make(map[byte]*upload),
+		inbox:       make(chan datagram, inboxDepth),
+		missionReqs: make(chan missionReq),
+		events:      make(chan swarmEvent, eventDepth),
+		syncs:       make(chan syncReq),
+		tasks:       make(chan MissionTask, taskDepth),
 	}, nil
 }
 
@@ -568,6 +583,10 @@ func (b *Bridge) loop(ctx context.Context) {
 			b.onLive(s)
 		case r := <-b.syncs:
 			r.reply <- b.applyNodes(r.nodes)
+		case r := <-b.missionReqs:
+			// A deep copy, built here because this goroutine is the only one
+			// allowed to read mission state. See missionview.go.
+			r.reply <- b.missionViews()
 		case <-status.C:
 			b.tickStatus()
 			b.expireUploads()
@@ -685,12 +704,15 @@ func (b *Bridge) syncOnce(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	}
-	if len(positions) == 0 {
-		return
+	if len(positions) > 0 {
+		if err := b.cfg.Source.SetPositions(ctx, positions); err != nil && ctx.Err() == nil {
+			b.log.Warn("mavlink: push positions", "err", err)
+		}
 	}
-	if err := b.cfg.Source.SetPositions(ctx, positions); err != nil && ctx.Err() == nil {
-		b.log.Warn("mavlink: push positions", "err", err)
-	}
+	// Unconditionally, even with no positions to push: a swarm with no flyable
+	// vehicle can still hold a mission, and the dashboard needs to be told
+	// when the last one is cleared.
+	b.syncMissions(ctx)
 }
 
 // --- loop: swarm state ---------------------------------------------------------

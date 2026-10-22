@@ -49,6 +49,29 @@ func (m mavSource) SetPositions(ctx context.Context, positions map[protocol.Node
 	return nil
 }
 
+// SetMissions implements mavlink.SwarmSource: the bridge's mission state,
+// pushed once a second, stored for the next snapshot.
+//
+// Stored and not copied. The bridge built the view as a deep copy and never
+// touches it again (see mavlink.Bridge.Missions), so this is a hand-over of
+// ownership from the bridge's loop to the hub, which is the same move
+// mavNodes makes in the other direction.
+//
+// # Why the hub does not ask the bridge instead
+//
+// The snapshot is built on the hub goroutine, and a call into the bridge's
+// loop would make every browser's 1 Hz tick wait on a goroutine that is also
+// answering a ground station. So the hub serves the last view it was given.
+// That is stale by at most one sync interval; a hub blocked on the bridge
+// would be stale for as long as the bridge was busy, and would hold up node
+// telemetry while it was.
+func (m mavSource) SetMissions(ctx context.Context, missions []mavlink.MissionView) error {
+	if !m.s.do(ctx, func(h *hub) { h.missions = missions }) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 // mavNodes snapshots the node table for the bridge. Hub-owned.
 //
 // Sorted by id so the bridge assigns system ids in a stable order on the first
