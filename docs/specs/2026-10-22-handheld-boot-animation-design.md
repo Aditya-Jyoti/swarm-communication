@@ -69,7 +69,13 @@ wiring even when connected. Changes:
 |---|---|
 | `BusLadder`: probe at 400, 100, 50 kHz, use the fastest clean one | the library's clock was too fast for the contact |
 | Down at once, up one rung after 5 clean rounds | a marginal clock must not flap |
-| Re-send the init sequence every second while answering | a glitch between probes can garble a panel that still answers |
+| Re-send the panel's settings every second while answering, as bare commands | a glitch between probes can garble a panel that still answers |
 | Drawing in its own task on core 0 | a 50 kHz frame takes about 200 ms, which would starve the link pump |
 | `[OLED]` lines printed by `loop()` | two tasks writing Serial can split a TLM line |
 | IP text in a fixed buffer | a String shared across tasks can be freed under the reader |
+
+The first version of that refresh called `initDisplay()`. It waits out the
+SH1106's 3 x 100 ms reset delays and starts with display OFF, so the screen froze
+and flashed every second. It now sends `PANEL_REFRESH_CMDS`: the init settings
+without display-off, contrast 0xFF, display-on last. Measured: probe round at
+most 3 ms, frame at most 46 ms at 400 kHz.

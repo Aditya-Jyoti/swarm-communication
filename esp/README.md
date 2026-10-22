@@ -56,13 +56,19 @@ variables are found. The logic is in `boot_anim.h`.
 delays the drone link. Once a second it probes I2C address 0x3C at 400, 100 and
 50 kHz and draws at the fastest clock that answers 5 probes out of 5. It drops a
 clock at once, and climbs back one step only after 5 clean seconds. A panel that
-keeps answering gets its setup re-sent each second, which heals one garbled by a
-glitch, with no visible blink. Serial shows each change:
+keeps answering gets its settings re-sent each second as bare commands (no
+reset, no display-off), which heals one garbled by a glitch with no visible
+change. Not `initDisplay()`: that waits out 300 ms of reset delays and blanks
+the panel, which froze and flashed the screen every second. Serial shows each change:
 
 ```text
 [OLED] found at 0x3C, bus 50 kHz
 [OLED] not responding at 0x3C (SDA 21, SCL 22)
+[OLED] stack 4244 B free, max round 3 ms, max frame 46 ms
 ```
+
+The last line comes once, 30 s after boot. A max round over a few ms means the
+display task is stalling.
 
 `not responding` for good means the wiring: SDA is GPIO 21, SCL is GPIO 22. A
 panel found only at 50 kHz means a poor contact on SDA or SCL. It works, but
