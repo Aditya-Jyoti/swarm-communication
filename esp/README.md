@@ -52,11 +52,21 @@ for 2 s, the OLED shows the handshake instead:
 The bar jumps from part-way to 90% when the TOC scan stops early, once all 11
 variables are found. The logic is in `boot_anim.h`.
 
-**OLED check.** The sketch probes the panel at I2C address 0x3C once a second and
-logs each change on serial: `[OLED] found at 0x3C` or `[OLED] not responding`. A
-panel that comes back after a dropout is re-initialised, so a loose wire no
-longer leaves it blank until a reboot. `not responding` at boot means wiring:
-SDA is GPIO 21, SCL is GPIO 22.
+**OLED check.** The panel has its own task, so a slow or missing screen never
+delays the drone link. Once a second it probes I2C address 0x3C at 400, 100 and
+50 kHz and draws at the fastest clock that answers 5 probes out of 5. It drops a
+clock at once, and climbs back one step only after 5 clean seconds. A panel that
+keeps answering gets its setup re-sent each second, which heals one garbled by a
+glitch, with no visible blink. Serial shows each change:
+
+```text
+[OLED] found at 0x3C, bus 50 kHz
+[OLED] not responding at 0x3C (SDA 21, SCL 22)
+```
+
+`not responding` for good means the wiring: SDA is GPIO 21, SCL is GPIO 22. A
+panel found only at 50 kHz means a poor contact on SDA or SCL. It works, but
+reseat or solder the wire.
 
 **Read only.** The handheld sends only log requests and a keepalive. It never
 sends a setpoint, so it cannot spin the motors. This is enforced in `crtp_log.h`
