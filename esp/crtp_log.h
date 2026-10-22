@@ -265,6 +265,8 @@ class Client {
   uint32_t restarts() const { return restarts_; }
   uint32_t badDatagrams() const { return bad_; }
   uint16_t tocCount() const { return tocCount_; }
+  // TOC entries read so far in this handshake; the screen's progress bar.
+  uint16_t tocRead() const { return nextItem_; }
   const Telemetry& telemetry() const { return t_; }
   bool has(VarIndex v) const { return ids_[v] >= 0; }
 

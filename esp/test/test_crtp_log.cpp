@@ -806,6 +806,54 @@ static void test_toc_progress_is_reported() {
   CHECK(l.client.tocCount() == l.drone.toc.size());
 }
 
+// tocRead() drives the handheld's progress bar: it must only ever move forward
+// one entry at a time while reading, and start over with the handshake.
+static void test_toc_read_counts_entries_and_resets() {
+  Link l;
+  CHECK(l.client.tocRead() == 0);
+  // Step one datagram at a time: Link::run answers inside the poll loop, so a
+  // whole TOC would otherwise be read between two observations.
+  uint8_t buf[MAX_DATAGRAM];
+  uint16_t prev = 0;
+  bool sawReading = false, oneAtATime = true;
+  for (int i = 0; i < 2000 && l.client.state() != ST_STREAMING; ++i) {
+    l.now += 1;
+    l.drone.clock = l.now;
+    size_t n = l.client.poll(l.now, buf, sizeof buf);
+    if (n == 0) continue;
+    std::vector<Bytes> replies = l.drone.handle(buf, n);
+    for (size_t k = 0; k < replies.size(); ++k) {
+      l.deliver(replies[k]);
+      uint16_t r = l.client.tocRead();
+      if (l.client.state() == ST_READ_TOC) {
+        sawReading = true;
+        CHECK(r <= l.client.tocCount());
+      }
+      if (r != prev && r != prev + 1 && r != 0) oneAtATime = false;
+      prev = r;
+    }
+  }
+  CHECK(sawReading);
+  CHECK(oneAtATime);
+  CHECK(l.client.state() == ST_SETUP || l.client.state() == ST_STREAMING);
+  CHECK(prev > 0);
+  CHECK(l.client.tocRead() == prev);  // kept after the scan, for the screen
+  l.run(1500);
+  CHECK(l.client.state() == ST_STREAMING);
+  l.drone.silent = true;
+  l.run(2500);  // the 2 s watchdog restarts the handshake
+  CHECK(l.client.restarts() == 1);
+  CHECK(l.client.tocRead() == 0);
+}
+
+static void test_toc_read_stalls_on_a_lost_reply() {
+  Link l;
+  l.drone.dropAllItemReplies = true;
+  l.run(200);
+  CHECK(l.client.state() == ST_READ_TOC);
+  CHECK(l.client.tocRead() == 0);
+}
+
 // Names each test before it runs, so a hang or a crash points at its test.
 #define RUN(fn)                                   \
   do {                                            \
@@ -855,6 +903,8 @@ int main() {
   RUN(test_take_fresh_sample_once_per_sample);
   RUN(test_restart_counts_and_state_names);
   RUN(test_toc_progress_is_reported);
+  RUN(test_toc_read_counts_entries_and_resets);
+  RUN(test_toc_read_stalls_on_a_lost_reply);
   std::printf("crtp_log: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
