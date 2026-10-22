@@ -1,7 +1,7 @@
 # Handheld ground unit -- restore
 
 ESP-WROOM-32 (ESP32-D0WD-V3), 4 MB flash, CP2102 on `/dev/ttyUSB0`. Built from
-`esp/` at commit 7f98d2d (branch `litewing-live`), core `esp32:esp32` 3.1.3.
+`esp/` at commit a1bfa71 (branch `oled-boot-anim`), core `esp32:esp32` 3.1.3.
 
 | Image | Source |
 |---|---|
@@ -36,3 +36,9 @@ arduino-cli --config-file ~/.arduinoIDE/arduino-cli.yaml upload  --fqbn esp32:es
 
 Add `--build-property "compiler.cpp.extra_flags=-DDRONE_SOURCE=1"` (or `=0`) to
 the compile for the other sources. See `esp/README.md`.
+
+## After flashing
+
+The serial log should show `[OLED] found at 0x3C` within a second of boot. If it
+says `not responding`, check the OLED wiring (SDA GPIO 21, SCL GPIO 22). If
+`write_flash` fails with "No serial data received", retry with `--baud 115200`.
