@@ -1,0 +1,13 @@
+f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0  ./build/boot_app0.bin
+b37c436a57bf2fdb1e41f9de006b7b4ebed350581dcc99b599e719a151b72517  ./build/litewing/esp.ino.bin
+33888163394bde7074aea9344bd198ced5d7d053f7cc411a27b2ac4e0cba2b63  ./build/litewing/esp.ino.bootloader.bin
+9c5c0ed3dd8f545f60c16b685eb007ae1f1290f9e44f364aa863f98742bb7157  ./build/litewing/esp.ino.merged.bin
+148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1  ./build/litewing/esp.ino.partitions.bin
+48ef891e84a9305c97250496a4f58fdcce9788dc03a2834f609a8775603b86a7  ./build/nrf/esp.ino.bin
+33888163394bde7074aea9344bd198ced5d7d053f7cc411a27b2ac4e0cba2b63  ./build/nrf/esp.ino.bootloader.bin
+a137362ef126ff7196c1a3d77e08f0280f6656ca3eca8aeb506932474b25d0ba  ./build/nrf/esp.ino.merged.bin
+148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1  ./build/nrf/esp.ino.partitions.bin
+a5053500d695159e38a084d5e5c8cb069b28c6b0b6ea81fda32ce29874ddc497  ./build/sim/esp.ino.bin
+33888163394bde7074aea9344bd198ced5d7d053f7cc411a27b2ac4e0cba2b63  ./build/sim/esp.ino.bootloader.bin
+646513b983893538cce123a1925e774eed5706f6903e42bb60126a3f9bc7ad3c  ./build/sim/esp.ino.merged.bin
+148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1  ./build/sim/esp.ino.partitions.bin
