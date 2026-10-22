@@ -37,7 +37,26 @@ flowchart LR
 **On the OLED:** battery volts and percent, the Wi-Fi RSSI in dBm, altitude from
 the downward range sensor (`---` when nothing is in range), roll / pitch / yaw,
 thrust, and `ARMED` (inverted) or `DISARMED`. Armed means thrust or a motor above
-zero. With no sample for 2 s it shows `NO CONNECTION`.
+zero. A short bar slides along the header line, so a live board never looks hung.
+
+**Link screen.** From boot until the first sample, and whenever no sample arrives
+for 2 s, the OLED shows the handshake instead:
+
+| Element | Shows |
+|---|---|
+| Header | `LITEWING LINK`, or `LINK LOST 12s`, and a spinner |
+| Stage | `Joining Wi-Fi`, `Asking drone`, `Reading TOC 142/316`, `Setting up` |
+| Bar | Progress through the real handshake, never a timer |
+| Dots | Wi-Fi, info, TOC, setup, streaming: filled done, blinking current |
+
+The bar jumps from part-way to 90% when the TOC scan stops early, once all 11
+variables are found. The logic is in `boot_anim.h`.
+
+**OLED check.** The sketch probes the panel at I2C address 0x3C once a second and
+logs each change on serial: `[OLED] found at 0x3C` or `[OLED] not responding`. A
+panel that comes back after a dropout is re-initialised, so a loose wire no
+longer leaves it blank until a reboot. `not responding` at boot means wiring:
+SDA is GPIO 21, SCL is GPIO 22.
 
 **Read only.** The handheld sends only log requests and a keepalive. It never
 sends a setpoint, so it cannot spin the motors. This is enforced in `crtp_log.h`
@@ -176,7 +195,7 @@ esp/test/run_tests.sh
 ```
 
 Needs only `g++` and `gcov`. It builds the headers as C++11 (what arduino-esp32
-2.x compiles) and C++17, runs both suites, and fails if any header drops below
+2.x compiles) and C++17, runs all three suites, and fails if any header drops below
 95% line coverage.
 
 The LiteWing suite runs the client against a fake drone written from the
@@ -192,6 +211,12 @@ timers. It pins:
   real drone showed 0% battery for the first half second.
 - A drone rejecting every block cannot spin the client inside one `loop()`.
 - `millis()` wrap, NaN floats, out-of-range altitude and clamped percent.
+
+The boot animation suite (`test_boot_anim.cpp`) pins the stage for every Wi-Fi
+and client state, a bar that never goes backwards through the handshake and
+never divides by zero, the spinner and sweep across `millis()` wrap, and the
+OLED probe: once a second, the first probe always logged, then only changes,
+including a wire flapping on every probe.
 
 What the flight-sim suite pins, beyond normal behaviour:
 
