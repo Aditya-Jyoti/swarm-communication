@@ -1939,3 +1939,13 @@ its command's transfer. Host tests pin that the sequence never blanks, matches w
 - 600 samples in 60 s and 1199 in 120 s, no OLED dropouts, no split TLM lines.
 - `boot_anim.h`: 611 checks, 100% of lines and branches.
 - Visual check of the screen by the user: pending.
+
+### 17.5 The blink, second round
+
+The screen still blinked once a second after 17.3. An experiment build with the refresh
+disabled stopped it (user, by eye), so the refresh was still the cause. Rewriting the
+scan-timing registers -- clock, multiplex, COM pins, pre-charge, VCOMH, offset -- restarts
+the SH1106's scan even with an unchanged value. The refresh now sends 7 commands only:
+start line, segment remap, COM scan, contrast 0xFF, RAM output, normal (not inverted), and
+display on. Steady by eye; `max round 1 ms, max frame 43 ms`. A host test pins the timing
+commands out of the sequence.
