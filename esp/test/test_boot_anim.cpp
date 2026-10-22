@@ -346,6 +346,70 @@ static void test_session_replay() {
   CHECK(bus.hz() == 400000);       // climbed 50k -> 100k -> 400k, 5 rounds each
 }
 
+// The once-a-second refresh. It used to be u8g2's initDisplay(), which
+// resets the interface, waits out the reset delays and starts with display
+// OFF: the user saw the screen freeze and flash every second. The refresh is
+// now bare settings only.
+static void test_refresh_sequence_never_blanks() {
+  CHECK(PANEL_REFRESH_LEN == sizeof PANEL_REFRESH_CMDS);
+  CHECK(PANEL_REFRESH_LEN > 0);
+  for (size_t i = 0; i < PANEL_REFRESH_LEN; ++i) {
+    CHECK(PANEL_REFRESH_CMDS[i] != 0xAE);  // display off
+    CHECK(PANEL_REFRESH_CMDS[i] != 0xA5);  // all pixels on
+    CHECK(PANEL_REFRESH_CMDS[i] != 0xA7);  // inverted
+  }
+  CHECK(PANEL_REFRESH_CMDS[PANEL_REFRESH_LEN - 1] == 0xAF);  // display on, last
+}
+
+static bool hasPair(uint8_t cmd, uint8_t arg) {
+  for (size_t i = 0; i + 1 < PANEL_REFRESH_LEN; ++i)
+    if (PANEL_REFRESH_CMDS[i] == cmd && PANEL_REFRESH_CMDS[i + 1] == arg) return true;
+  return false;
+}
+
+static bool hasCmd(uint8_t cmd) {
+  for (size_t i = 0; i < PANEL_REFRESH_LEN; ++i)
+    if (PANEL_REFRESH_CMDS[i] == cmd) return true;
+  return false;
+}
+
+static void test_refresh_sequence_matches_begin() {
+  // The values u8g2's SH1106 begin() leaves the panel in (its init sequence
+  // and setContrast(255)): re-sending them to a healthy panel changes nothing.
+  CHECK(hasPair(0xD5, 0x80));  // clock divide
+  CHECK(hasPair(0xA8, 0x3F));  // multiplex 64
+  CHECK(hasPair(0xD3, 0x00));  // display offset
+  CHECK(hasCmd(0x40));         // start line 0
+  CHECK(hasCmd(0xA1));         // segment remap
+  CHECK(hasCmd(0xC8));         // COM scan reversed
+  CHECK(hasPair(0xDA, 0x12));  // COM pins
+  CHECK(hasPair(0x81, 0xFF));  // contrast, as the sketch sets it
+  CHECK(hasPair(0xD9, 0xF1));  // pre-charge
+  CHECK(hasPair(0xDB, 0x40));  // VCOMH
+  CHECK(hasCmd(0xA4));         // output follows RAM
+  CHECK(hasCmd(0xA6));         // not inverted
+  CHECK(!hasPair(0x81, 0xCF)); // not the library's default contrast: no brightness dip
+}
+
+// The sketch sends each command with SendCmd and its argument with SendArg,
+// in the same I2C transfer, as the library does: an argument sent as a
+// command of its own would start a new transfer and could be misread.
+static void test_refresh_sequence_walks_cleanly() {
+  size_t i = 0, cmds = 0;
+  while (i < PANEL_REFRESH_LEN) {
+    int args = refreshArgCount(PANEL_REFRESH_CMDS[i]);
+    CHECK(args == 0 || args == 1);
+    i += 1 + (size_t)args;
+    ++cmds;
+  }
+  CHECK(i == PANEL_REFRESH_LEN);  // no command's argument runs off the end
+  CHECK(cmds == 16);
+  CHECK(refreshArgCount(0xD5) == 1);
+  CHECK(refreshArgCount(0x81) == 1);
+  CHECK(refreshArgCount(0xAF) == 0);
+  CHECK(refreshArgCount(0x40) == 0);
+}
+
 static void test_event_names() {
   CHECK(std::strcmp(eventName(EV_NONE), "none") == 0);
   CHECK(std::strcmp(eventName(EV_FOUND), "found") == 0);
@@ -386,6 +450,9 @@ int main() {
   RUN(test_ladder_marginal_rung_cannot_flap);
   RUN(test_ladder_loss_and_out_of_range);
   RUN(test_session_replay);
+  RUN(test_refresh_sequence_never_blanks);
+  RUN(test_refresh_sequence_matches_begin);
+  RUN(test_refresh_sequence_walks_cleanly);
   RUN(test_event_names);
   std::printf("boot_anim: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
