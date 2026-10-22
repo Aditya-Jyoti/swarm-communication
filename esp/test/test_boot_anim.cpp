@@ -211,6 +211,141 @@ static void test_panel_watch_flapping_wire() {
   CHECK(w.found() == 33);
 }
 
+// What the sketch does to the panel after each probe round. Nothing initialises
+// the panel before the first probe (it may be on a bus too slow for the
+// library's default clock), so every find is a full begin.
+static void test_panel_action() {
+  CHECK(panelAction(EV_FOUND, true, false) == PA_BEGIN);
+  CHECK(panelAction(EV_FOUND, true, true) == PA_BEGIN);
+  CHECK(panelAction(EV_LOST, false, false) == PA_NONE);
+  CHECK(panelAction(EV_LOST, false, true) == PA_NONE);
+  CHECK(panelAction(EV_NONE, false, false) == PA_NONE);  // still gone
+  CHECK(panelAction(EV_NONE, false, true) == PA_NONE);
+  // Still answering: re-send the setup anyway. A glitch between two probes can
+  // garble the panel's settings (display off, contrast, remap) while it keeps
+  // answering, so no probe would ever see a change.
+  CHECK(panelAction(EV_NONE, true, false) == PA_REFRESH);
+  // Answering only at a slower clock: frames sent at the old one were garbage.
+  CHECK(panelAction(EV_NONE, true, true) == PA_BEGIN);
+}
+
+static void test_panel_action_unknown_event() {
+  CHECK(panelAction((Event)9, true, false) == PA_NONE);
+  CHECK(panelAction((Event)9, false, true) == PA_NONE);
+}
+
+// ---------------------------------------------------------------- bus ladder
+
+static void test_rung_speeds() {
+  CHECK(BUS_RUNGS == 3);
+  CHECK(rungHz(0) == 400000);
+  CHECK(rungHz(1) == 100000);
+  CHECK(rungHz(2) == 50000);
+  CHECK(rungHz(-1) == 0);
+  CHECK(rungHz(3) == 0);
+  for (int r = 1; r < BUS_RUNGS; ++r) CHECK(rungHz(r) < rungHz(r - 1));  // fastest first
+}
+
+static void test_ladder_starts_absent() {
+  BusLadder l;
+  CHECK(l.rung() == -1);
+  CHECK(l.hz() == 0);
+  CHECK(!l.update(-1));  // still absent: no change
+  CHECK(l.rung() == -1);
+}
+
+static void test_ladder_takes_the_fastest_passing_rung_when_found() {
+  BusLadder a;
+  CHECK(a.update(0));
+  CHECK(a.hz() == 400000);
+  BusLadder b;
+  CHECK(b.update(2));  // the 2026-10-22 wiring: only 50 kHz passes
+  CHECK(b.hz() == 50000);
+  CHECK(!b.slowedDown());  // a find is not a slow-down
+}
+
+static void test_ladder_drops_at_once() {
+  BusLadder l;
+  l.update(0);
+  CHECK(l.update(1));
+  CHECK(l.hz() == 100000);
+  CHECK(l.slowedDown());
+  CHECK(l.update(2));
+  CHECK(l.slowedDown());
+  CHECK(!l.update(2));
+  CHECK(!l.slowedDown());  // reported once, on the round it happened
+}
+
+static void test_ladder_climbs_one_rung_after_a_streak() {
+  BusLadder l;
+  l.update(2);
+  for (int i = 1; i < UPSHIFT_ROUNDS; ++i) {
+    CHECK(!l.update(0));  // faster passes, but not long enough yet
+    CHECK(l.hz() == 50000);
+  }
+  CHECK(l.update(0));
+  CHECK(l.hz() == 100000);  // one rung, not straight to the top
+  CHECK(!l.slowedDown());
+  for (int i = 1; i < UPSHIFT_ROUNDS; ++i) CHECK(!l.update(0));
+  CHECK(l.update(0));
+  CHECK(l.hz() == 400000);
+  CHECK(!l.update(0));  // at the top
+}
+
+static void test_ladder_streak_resets_on_a_miss() {
+  BusLadder l;
+  l.update(2);
+  for (int i = 1; i < UPSHIFT_ROUNDS; ++i) l.update(1);
+  CHECK(!l.update(2));  // the faster rung failed once: start counting again
+  for (int i = 1; i < UPSHIFT_ROUNDS; ++i) CHECK(!l.update(1));
+  CHECK(l.update(1));
+  CHECK(l.hz() == 100000);
+}
+
+static void test_ladder_marginal_rung_cannot_flap() {
+  // 100 kHz passing 3 rounds in 5 (as measured on the bad wire) never wins.
+  BusLadder l;
+  l.update(2);
+  int changes = 0;
+  for (int i = 0; i < 100; ++i) changes += l.update(i % 5 < 3 ? 1 : 2) ? 1 : 0;
+  CHECK(changes == 0);
+  CHECK(l.hz() == 50000);
+}
+
+static void test_ladder_loss_and_out_of_range() {
+  BusLadder l;
+  l.update(1);
+  CHECK(l.update(-1));
+  CHECK(l.rung() == -1);
+  CHECK(!l.slowedDown());
+  l.update(1);
+  CHECK(l.update(BUS_RUNGS));  // nonsense input counts as absent
+  CHECK(l.rung() == -1);
+  CHECK(!l.update(99));
+}
+
+// The 2026-10-22 bench, round by round: boot with SDA open, contact made but
+// only 50 kHz clean, a dropout, back, then a reseated wire clean at 400 kHz.
+static void test_session_replay() {
+  BusLadder bus;
+  PanelWatch w;
+  int begins = 0, refreshes = 0;
+  uint32_t hzAtBegin[8] = {0};
+  const int rounds[] = {-1, -1, 2, 2, 2, -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  for (size_t i = 0; i < sizeof rounds / sizeof rounds[0]; ++i) {
+    bus.update(rounds[i]);
+    Event e = w.update(bus.rung() >= 0);
+    PanelAction a = panelAction(e, w.present(), bus.slowedDown());
+    if (a == PA_BEGIN) hzAtBegin[begins++ & 7] = bus.hz();
+    if (a == PA_REFRESH) ++refreshes;
+  }
+  CHECK(begins == 2);              // on first contact, and after the dropout
+  CHECK(hzAtBegin[0] == 50000);    // never at a clock that cannot work
+  CHECK(hzAtBegin[1] == 50000);
+  CHECK(refreshes == 13);          // every other answering round
+  CHECK(bus.hz() == 400000);       // climbed 50k -> 100k -> 400k, 5 rounds each
+}
+
 static void test_event_names() {
   CHECK(std::strcmp(eventName(EV_NONE), "none") == 0);
   CHECK(std::strcmp(eventName(EV_FOUND), "found") == 0);
@@ -240,6 +375,17 @@ int main() {
   RUN(test_panel_watch_first_probe_reports_either_way);
   RUN(test_panel_watch_transitions_only);
   RUN(test_panel_watch_flapping_wire);
+  RUN(test_panel_action);
+  RUN(test_panel_action_unknown_event);
+  RUN(test_rung_speeds);
+  RUN(test_ladder_starts_absent);
+  RUN(test_ladder_takes_the_fastest_passing_rung_when_found);
+  RUN(test_ladder_drops_at_once);
+  RUN(test_ladder_climbs_one_rung_after_a_streak);
+  RUN(test_ladder_streak_resets_on_a_miss);
+  RUN(test_ladder_marginal_rung_cannot_flap);
+  RUN(test_ladder_loss_and_out_of_range);
+  RUN(test_session_replay);
   RUN(test_event_names);
   std::printf("boot_anim: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

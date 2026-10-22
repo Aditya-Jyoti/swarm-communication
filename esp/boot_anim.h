@@ -123,6 +123,96 @@ inline const char* eventName(Event e) {
   return "?";
 }
 
+// What the sketch does to the panel after a probe round.
+//   PA_BEGIN    full init and clear.
+//   PA_REFRESH  re-send the init sequence only, no clear, then redraw. The
+//               panel's RAM survives, so this is a ~1 ms blink nobody sees.
+enum PanelAction { PA_NONE, PA_BEGIN, PA_REFRESH };
+
+// Nothing initialises the panel before the first probe round, because the
+// library's default 400 kHz may be too fast for the wiring; so every find is a
+// full begin.
+//
+// Why refresh a panel that answers: on a contact that flickers (the 2026-10-22
+// handheld's SDA wire), a dropout in the middle of a frame turns data bytes
+// into commands -- display off, contrast 0, a different remap -- while the
+// panel keeps answering its address. No probe sees a change, so without a
+// periodic refresh it stays blank until a reboot. With it, within a second.
+// A drop to a slower clock is a begin: frames at the old clock were garbage.
+inline PanelAction panelAction(Event e, bool present, bool slowedDown) {
+  switch (e) {
+    case EV_FOUND: return PA_BEGIN;
+    case EV_LOST: return PA_NONE;
+    case EV_NONE:
+      if (!present) return PA_NONE;
+      return slowedDown ? PA_BEGIN : PA_REFRESH;
+  }
+  return PA_NONE;
+}
+
+// I2C clock rungs, fastest first. 400 kHz is what the library uses. On the
+// 2026-10-22 wiring, with SDA through a poor contact, the panel answered
+// 0/20 probes at 400 and 200 kHz, 3/20 at 100 kHz and 20/20 at 50 kHz: slow
+// edges, not a dead bus.
+const int BUS_RUNGS = 3;
+// Probes per rung per round; a rung passes only if all of them are answered.
+const int PROBES_PER_RUNG = 5;
+// Rounds a faster rung must pass in a row before the bus moves up to it.
+const int UPSHIFT_ROUNDS = 5;
+
+inline uint32_t rungHz(int rung) {
+  switch (rung) {
+    case 0: return 400000;
+    case 1: return 100000;
+    case 2: return 50000;
+  }
+  return 0;
+}
+
+// Picks the bus clock from each probe round's result. Down at once (frames at
+// a failing clock are garbage), up one rung at a time and only after
+// UPSHIFT_ROUNDS clean rounds, so a marginal clock cannot make it flap.
+class BusLadder {
+ public:
+  BusLadder() : rung_(-1), streak_(0), slowed_(false) {}
+
+  // best: the fastest rung that passed this round, -1 for none. True when the
+  // rung changed.
+  bool update(int best) {
+    int prev = rung_;
+    slowed_ = false;
+    if (best < 0 || best >= BUS_RUNGS) {
+      rung_ = -1;
+      streak_ = 0;
+    } else if (rung_ < 0) {
+      rung_ = best;
+      streak_ = 0;
+    } else if (best > rung_) {
+      rung_ = best;
+      streak_ = 0;
+      slowed_ = true;
+    } else if (best < rung_) {
+      if (++streak_ >= UPSHIFT_ROUNDS) {
+        --rung_;
+        streak_ = 0;
+      }
+    } else {
+      streak_ = 0;
+    }
+    return rung_ != prev;
+  }
+
+  int rung() const { return rung_; }
+  uint32_t hz() const { return rungHz(rung_); }
+  // True only for the round that moved the bus to a slower rung.
+  bool slowedDown() const { return slowed_; }
+
+ private:
+  int rung_;
+  int streak_;
+  bool slowed_;
+};
+
 // Tracks the panel across probes. The first probe reports either way, so the
 // boot log always says whether the panel answered; after that only changes
 // are reported. EV_FOUND after a loss tells the sketch to re-initialise the
