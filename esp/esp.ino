@@ -144,10 +144,18 @@ const uint16_t HTTP_PORT = 80;
 // SH1106 128x64 Full Buffer Hardware I2C (Address 0x3C)
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 const uint8_t OLED_I2C_ADDR = 0x3C;
-// Probed once a second. A panel on a loose wire can drop off the bus and come
-// back unconfigured, i.e. blank; seeing it return is the cue to re-init it.
+// The panel is owned by its own task (displayTask): probed once a second at
+// each bus clock, drawn at its own pace. A slow or absent panel can then never
+// hold up the drone link, and the link can never freeze the screen.
+// Everything below is touched by that task only, except the log hand-off.
 bootanim::PanelWatch g_panel;
-bool g_panelBootProbeDone = false;
+bootanim::BusLadder g_bus;
+TaskHandle_t g_displayTask = nullptr;
+// The task's [OLED] lines are printed by loop(): two tasks writing Serial can
+// split a TLM line in half, and the relay would reject it.
+portMUX_TYPE g_oledLogMux = portMUX_INITIALIZER_UNLOCKED;
+char g_oledLog[64] = "";
+volatile uint32_t g_oledLogSeq = 0;
 
 // NRF24L01 Radio on VSPI (CE=4, CSN=5)
 RF24 radio(PIN_NRF_CE, PIN_NRF_CSN);
@@ -241,7 +249,10 @@ bool g_hasReceivedData = false;
 bool g_heartbeatState = false;
 bool g_radioHardwareOk = false;
 bool g_wifiApMode = false;
-String g_wifiIpText = "0.0.0.0";
+// A fixed buffer, not a String: the display task reads it while loop() may
+// rewrite it, and a String's heap buffer can be freed under the reader. The
+// last byte is never written, so a torn read is still a terminated string.
+char g_wifiIpText[20] = "0.0.0.0";
 unsigned long g_lastPacketTime = 0;
 // 10 s suits the NRF link's bursty losses. The LiteWing streams at 10 Hz over
 // Wi-Fi, so 2 s of nothing is already a lost drone, and saying so sooner is
@@ -249,9 +260,13 @@ unsigned long g_lastPacketTime = 0;
 const unsigned long DISCONNECT_TIMEOUT_MS =
     DRONE_SOURCE == DRONE_SOURCE_LITEWING ? 2000 : 10000;
 
-// Display Refresh Timer
+// Display Refresh Timer (display task only)
 unsigned long g_lastDisplayRefresh = 0;
-const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 60; // ~16 FPS
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 60; // ~16 FPS at 400 kHz; slower clocks draw slower
+
+void setIpText(const char* text) {
+  snprintf(g_wifiIpText, sizeof g_wifiIpText - 1, "%s", text);
+}
 
 // ======================================================================================
 // LABEL HELPERS
@@ -491,6 +506,7 @@ void handleRadioPayload(const uint8_t* rawPayload, uint8_t payloadSize) {
 // OLED DRAWING FUNCTIONS
 // ======================================================================================
 void drawHardwareErrorScreen() {
+  if (!g_panel.present()) return;
   u8g2.clearBuffer();
   u8g2.drawRFrame(0, 0, 128, 64, 3);
 
@@ -517,23 +533,71 @@ void drawActivitySweep() {
   u8g2.drawBox(bootanim::sweepX(millis(), 124), 15, 4, 3);
 }
 
-// Probes the panel when due, logs changes, and re-inits a panel that came back.
-void panelPoll(unsigned long now) {
-  if (!g_panel.due(now)) return;
-  Wire.beginTransmission(OLED_I2C_ADDR);
-  bool ack = Wire.endTransmission() == 0;
-  bootanim::Event e = g_panel.update(ack);
-  if (e != bootanim::EV_NONE) {
-    Serial.print(F("[OLED] "));
-    Serial.print(bootanim::eventName(e));
-    Serial.println(F(" at 0x3C (SDA 21, SCL 22)"));
+// Hands one line to loop() for printing (see g_oledLog).
+void oledLog(const char* text) {
+  portENTER_CRITICAL(&g_oledLogMux);
+  snprintf(g_oledLog, sizeof g_oledLog, "%s", text);
+  g_oledLogSeq = g_oledLogSeq + 1;
+  portEXIT_CRITICAL(&g_oledLogMux);
+}
+
+// Called from loop(): prints the display task's latest line, if any.
+void printOledLog() {
+  static uint32_t printed = 0;
+  if (g_oledLogSeq == printed) return;
+  char line[sizeof g_oledLog];
+  portENTER_CRITICAL(&g_oledLogMux);
+  memcpy(line, g_oledLog, sizeof line);
+  printed = g_oledLogSeq;
+  portEXIT_CRITICAL(&g_oledLogMux);
+  Serial.println(line);
+}
+
+// The fastest rung at which the panel answers every probe, or -1.
+int probeBestRung() {
+  for (int r = 0; r < bootanim::BUS_RUNGS; ++r) {
+    Wire.setClock(bootanim::rungHz(r));
+    int ok = 0;
+    while (ok < bootanim::PROBES_PER_RUNG) {
+      Wire.beginTransmission(OLED_I2C_ADDR);
+      if (Wire.endTransmission() != 0) break;
+      ++ok;
+    }
+    if (ok == bootanim::PROBES_PER_RUNG) return r;
   }
-  // setup() already initialised the panel before the boot probe.
-  if (e == bootanim::EV_FOUND && g_panelBootProbeDone) {
+  return -1;
+}
+
+// One probe round when due: pick the bus clock, track the panel, and begin or
+// refresh it (boot_anim.h). True when the screen must be redrawn now.
+bool panelRound(unsigned long now) {
+  if (!g_panel.due(now)) return false;
+  bool clockChanged = g_bus.update(probeBestRung());
+  bootanim::Event e = g_panel.update(g_bus.rung() >= 0);
+  if (g_bus.rung() >= 0) u8g2.setBusClock(g_bus.hz());  // u8g2 applies it per transfer
+
+  char line[64];
+  if (e == bootanim::EV_LOST) {
+    oledLog("[OLED] not responding at 0x3C (SDA 21, SCL 22)");
+  } else if (e == bootanim::EV_FOUND || clockChanged) {
+    snprintf(line, sizeof line, "[OLED] %s at 0x3C, bus %lu kHz",
+             e == bootanim::EV_FOUND ? "found" : "answering", (unsigned long)(g_bus.hz() / 1000));
+    oledLog(line);
+  }
+
+  bootanim::PanelAction a = bootanim::panelAction(e, g_panel.present(), g_bus.slowedDown());
+  if (a == bootanim::PA_BEGIN) {
     u8g2.begin();
-    u8g2.setContrast(255);
+  } else if (a == bootanim::PA_REFRESH) {
+    // The init sequence without the clear: heals a panel garbled by a glitch
+    // between probes, and its RAM survives, so nothing visibly blinks.
+    u8g2.initDisplay();
+    u8g2.setPowerSave(0);
+  } else {
+    return false;
   }
-  g_panelBootProbeDone = true;
+  u8g2.setContrast(255);
+  return true;
 }
 
 void drawDisconnectScreen(unsigned long elapsedMs) {
@@ -580,6 +644,7 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
 }
 
 void drawWifiStatusScreen(const __FlashStringHelper* title, const char* ssid, const String& ipText) {
+  if (!g_panel.present()) return;  // drawn from setup(), before the display task
   u8g2.clearBuffer();
   u8g2.drawRFrame(0, 0, 128, 64, 4);
   u8g2.setFont(u8g2_font_6x12_tf);
@@ -668,7 +733,7 @@ void liteWingBegin() {
   WiFi.setSleep(false);
   WiFi.begin(DRONE_LITEWING_SSID, DRONE_LITEWING_PASSWORD);
   g_lwWifiAttemptMs = millis();
-  g_wifiIpText = "joining";
+  setIpText("joining");
   Serial.print(F("[LW] Joining "));
   Serial.println(F(DRONE_LITEWING_SSID));
 }
@@ -699,7 +764,7 @@ void liteWingPump() {
     if (g_lwUdpOpen) {
       g_lwUdp.stop();
       g_lwUdpOpen = false;
-      g_wifiIpText = "joining";
+      setIpText("joining");
       Serial.println(F("[LW] Wi-Fi lost, rejoining"));
     }
     if (now - g_lwWifiAttemptMs >= LITEWING_WIFI_RETRY_MS) {
@@ -711,7 +776,7 @@ void liteWingPump() {
   }
   if (!g_lwUdpOpen) {
     g_lwUdpOpen = g_lwUdp.begin(LITEWING_LOCAL_PORT) == 1;
-    g_wifiIpText = WiFi.localIP().toString();
+    setIpText(WiFi.localIP().toString().c_str());
     Serial.print(F("[LW] Joined, ip "));
     Serial.print(g_wifiIpText);
     Serial.print(F(", drone "));
@@ -1059,7 +1124,7 @@ bool hasFallbackAccessPointCredentials() {
 void startFallbackAccessPoint() {
   if (!hasFallbackAccessPointCredentials()) {
     g_wifiApMode = false;
-    g_wifiIpText = "NO WIFI";
+    setIpText("NO WIFI");
     WiFi.mode(WIFI_OFF);
     Serial.println(F("[WIFI] Fallback AP disabled. Define DRONE_WIFI_FALLBACK_AP_PASSWORD with a per-device strong password."));
     drawWifiStatusScreen(F("WIFI NOT CONFIG"), "NO CREDENTIALS", g_wifiIpText);
@@ -1069,7 +1134,7 @@ void startFallbackAccessPoint() {
   g_wifiApMode = true;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(WIFI_FALLBACK_AP_SSID, WIFI_FALLBACK_AP_PASSWORD);
-  g_wifiIpText = WiFi.softAPIP().toString();
+  setIpText(WiFi.softAPIP().toString().c_str());
 
   Serial.print(F("[WIFI] Fallback AP started: "));
   Serial.print(WIFI_FALLBACK_AP_SSID);
@@ -1099,7 +1164,7 @@ void setupWifiApi() {
     Serial.println();
 
     if (WiFi.status() == WL_CONNECTED) {
-      g_wifiIpText = WiFi.localIP().toString();
+      setIpText(WiFi.localIP().toString().c_str());
       Serial.print(F("[WIFI] Connected: "));
       Serial.print(WIFI_STA_SSID);
       Serial.print(F(" / "));
@@ -1114,7 +1179,7 @@ void setupWifiApi() {
     startFallbackAccessPoint();
   }
 
-  if (g_wifiIpText == "NO WIFI") {
+  if (strcmp(g_wifiIpText, "NO WIFI") == 0) {
     Serial.println(F("[HTTP] Telemetry JSON disabled until Wi-Fi credentials are configured."));
     return;
   }
@@ -1140,6 +1205,58 @@ void setupWifiApi() {
 }
 
 // ======================================================================================
+// DISPLAY TASK
+// ======================================================================================
+void drawCurrentScreen() {
+  if (!g_radioHardwareOk) {
+    drawHardwareErrorScreen();
+    return;
+  }
+  // Read the packet time BEFORE the clock: loop() may stamp a packet between
+  // the two reads, and the other order would make "since" underflow to ~49
+  // days and flash the lost screen for a frame.
+  unsigned long lastPacket = g_lastPacketTime;
+  unsigned long now = millis();
+  unsigned long since = now - lastPacket;
+  if (!g_hasReceivedData || since >= DISCONNECT_TIMEOUT_MS) {
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+    drawLinkScreen(now, since);
+#else
+    drawDisconnectScreen(since);
+#endif
+  } else {
+#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
+    drawLiteWingScreen();
+#else
+    drawTelemetryScreen();
+#endif
+  }
+}
+
+void displayTask(void*) {
+  const unsigned long started = millis();
+  bool stackReported = false;
+  for (;;) {
+    unsigned long now = millis();
+    bool redrawNow = panelRound(now);
+    // Once, after every screen has had time to draw: how close the stack got.
+    if (!stackReported && now - started >= 30000) {
+      char line[64];
+      snprintf(line, sizeof line, "[OLED] task stack: %u bytes never used",
+               (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+      oledLog(line);
+      stackReported = true;
+    }
+    // An absent panel would NACK every frame; skip drawing until it answers.
+    if (g_panel.present() && (redrawNow || now - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS)) {
+      g_lastDisplayRefresh = now;
+      drawCurrentScreen();
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// ======================================================================================
 // ARDUINO SETUP
 // ======================================================================================
 void setup() {
@@ -1157,22 +1274,24 @@ void setup() {
   Serial.println(F("[LW] Read only. Samples are printed as TLM {json} lines."));
 #endif
 
-  // 1. Initialize Hardware I2C and SH1106 OLED
+  // 1. Initialize Hardware I2C and SH1106 OLED. The first probe round picks a
+  // bus clock the wiring can carry and begins the panel at it; u8g2's own
+  // 400 kHz fails outright on a poor SDA contact.
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  u8g2.begin();
-  u8g2.setContrast(255);
+  panelRound(millis());
 
   // Splash Screen
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_ncenB08_tr);
-  u8g2.drawRFrame(0, 0, 128, 64, 4);
-  u8g2.setCursor(12, 25);
-  u8g2.print(F("DRONE TELEMETRY"));
-  u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.setCursor(22, 45);
-  u8g2.print(F("Initializing..."));
-  u8g2.sendBuffer();
-  panelPoll(millis());
+  if (g_panel.present()) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawRFrame(0, 0, 128, 64, 4);
+    u8g2.setCursor(12, 25);
+    u8g2.print(F("DRONE TELEMETRY"));
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.setCursor(22, 45);
+    u8g2.print(F("Initializing..."));
+    u8g2.sendBuffer();
+  }
 
 #if DRONE_SOURCE == DRONE_SOURCE_LITEWING
   // The Wi-Fi radio belongs to the drone link, so there is no HTTP API in this
@@ -1216,12 +1335,18 @@ void setup() {
     Serial.println(RF_CHANNEL);
   }
 #endif
+
+  // From here on only the display task touches Wire and u8g2. Core 0, beside
+  // the Wi-Fi stack: its I2C waits block, they do not spin, and loop() keeps
+  // core 1 to itself.
+  xTaskCreatePinnedToCore(displayTask, "oled", 6144, nullptr, 1, &g_displayTask, 0);
 }
 
 // ======================================================================================
 // MAIN ARDUINO LOOP
 // ======================================================================================
 void loop() {
+  printOledLog();
   server.handleClient();
 
   if (!g_radioHardwareOk) {
@@ -1251,27 +1376,5 @@ void loop() {
     handleRadioPayload(rawPayload, payloadSize);
   }
 #endif
-
-  // 2. Non-blocking OLED Screen Refresh
-  unsigned long currentMillis = millis();
-  panelPoll(currentMillis);
-  // An absent panel would NACK every frame; skip drawing until it answers.
-  if (g_panel.present() && currentMillis - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
-    g_lastDisplayRefresh = currentMillis;
-
-    unsigned long timeSinceLastPacket = currentMillis - g_lastPacketTime;
-    if (!g_hasReceivedData || timeSinceLastPacket >= DISCONNECT_TIMEOUT_MS) {
-#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
-      drawLinkScreen(currentMillis, timeSinceLastPacket);
-#else
-      drawDisconnectScreen(timeSinceLastPacket);
-#endif
-    } else {
-#if DRONE_SOURCE == DRONE_SOURCE_LITEWING
-      drawLiteWingScreen();
-#else
-      drawTelemetryScreen();
-#endif
-    }
-  }
+  // The OLED is drawn by displayTask.
 }
