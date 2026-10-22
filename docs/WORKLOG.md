@@ -1887,3 +1887,55 @@ restarts. 300 samples in 30 s, the same 10 Hz as before, and no OLED dropouts.
 - Every replug resets `/dev/ttyUSB0` to 0660; the handheld was replugged three times today.
 - `write_flash` at 460800 and 921600 failed with "No serial data received" on this cable;
   115200 worked each time.
+
+## 2026-10-22 -- Ground unit: an OLED that survives its wiring
+
+After a power cycle the OLED stayed blank again, though section 16 had reported it found.
+
+### 17.1 What was measured
+
+Scratch sketches on the handheld, outside the repo:
+
+| SDA (GPIO 21) | 50 kHz | 100 kHz | 200 kHz | 400 kHz |
+|---|---|---|---|---|
+| open, most rounds | 0/20 | 0/20 | 0/20 | 0/20 |
+| connected | 20/20 | 3/20 | 0/20 | 0/20 |
+
+Two faults. The SDA contact opened for minutes at a time, and even when closed it was too
+poor for 400 kHz, the clock u8g2 always uses for the SH1106. Section 16's single `found`
+had been a lucky probe; it proved nothing about the next boot.
+
+### 17.2 What changed
+
+```mermaid
+flowchart LR
+    P["Probe 0x3C at 400, 100, 50 kHz"] --> B["BusLadder picks the fastest clean clock"]
+    B --> W["PanelWatch: found, lost"]
+    W --> A["panelAction"]
+    A -- "found or slowed" --> G["begin"]
+    A -- "still answering" --> R["bare refresh"]
+```
+
+- **Adaptive clock.** Down at once, up one rung after 5 clean rounds, so a marginal clock
+  cannot flap.
+- **Display task.** Drawing moved to a FreeRTOS task on core 0. A 50 kHz frame takes about
+  200 ms, which inside `loop()` would have dropped TLM samples. Its log lines go through
+  `loop()` so they cannot split a TLM line, and the IP text became a fixed buffer.
+- **Self-heal.** While the panel answers, its settings are re-sent every second.
+
+### 17.3 Bug found by the user
+
+The first self-heal called `initDisplay()`. In the library source it re-inits the
+interface, waits the SH1106's 3 x 100 ms reset delays and sends display OFF first. Once a
+second the screen froze for about 300 ms and flashed. The refresh is now bare commands
+(`PANEL_REFRESH_CMDS`): no display-off, contrast 0xFF, display-on last, each argument in
+its command's transfer. Host tests pin that the sequence never blanks, matches what
+`begin()` sets, and walks cleanly.
+
+### 17.4 Verified
+
+- After the user reseated the wire: `[OLED] found at 0x3C, bus 400 kHz` at boot.
+- `max round 3 ms, max frame 46 ms` over the first 30 s, from the new stall report.
+- 600 samples in 60 s and 1199 in 120 s, no OLED dropouts, no split TLM lines.
+- `boot_anim.h`: 611 checks, 100% of lines and branches.
+- Visual check of the screen by the user: pending.
