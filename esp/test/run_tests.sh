@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds and runs the host unit tests for the ground unit's plain-C++ headers
-# (the flight simulator, the frame format and the LiteWing CRTP log client),
+# (the flight simulator, the frame format, the LiteWing CRTP log client and
+# the OLED boot animation model),
 # with line and branch coverage of every header the board compiles.
 #
 #   esp/test/run_tests.sh
@@ -19,6 +20,7 @@ trap 'rm -rf "$out"' EXIT
 g++ -std=c++11 -Wall -Wextra -Werror -I"$here/.." -o "$out/cxx11" -x c++ - <<'CXX11'
 #include "flight_sim.h"
 #include "crtp_log.h"
+#include "boot_anim.h"
 int main() {
   flightsim::FlightSim sim;
   uint8_t buf[FRAME_SIZE];
@@ -26,7 +28,9 @@ int main() {
   crtplog::Client client;
   uint8_t dg[crtplog::MAX_DATAGRAM];
   bool asked = client.poll(0, dg, sizeof dg) > 0;
-  return sim.framesSent() > 0 && asked ? 0 : 1;
+  bootanim::PanelWatch w;
+  bool watched = w.due(0) && w.update(true) == bootanim::EV_FOUND;
+  return sim.framesSent() > 0 && asked && watched ? 0 : 1;
 }
 CXX11
 "$out/cxx11" && echo "C++11 link and run: ok"
@@ -35,8 +39,10 @@ g++ -std=c++17 -O0 -g --coverage -Wall -Wextra -Werror \
   -fno-inline -o "$out/tests" "$here/test_flight_sim.cpp"
 g++ -std=c++17 -O0 -g --coverage -Wall -Wextra -Werror \
   -fno-inline -o "$out/crtp" "$here/test_crtp_log.cpp"
+g++ -std=c++17 -O0 -g --coverage -Wall -Wextra -Werror \
+  -fno-inline -o "$out/anim" "$here/test_boot_anim.cpp"
 
-(cd "$out" && ./tests && ./crtp)
+(cd "$out" && ./tests && ./crtp && ./anim)
 
 echo
 echo "coverage (headers compiled into the firmware):"
@@ -45,7 +51,7 @@ cd "$out"
 # Each header is measured from the suite that owns it.
 status=0
 for pair in tests-test_flight_sim:flight_sim.h tests-test_flight_sim:telemetry_frames.h \
-            crtp-test_crtp_log:crtp_log.h; do
+            crtp-test_crtp_log:crtp_log.h anim-test_boot_anim:boot_anim.h; do
   data="${pair%%:*}" f="${pair#*:}"
   report="$(gcov -b -c "$data.gcda" 2>/dev/null)"
   block="$(printf '%s\n' "$report" | grep -A3 "^File '.*/$f'" || true)"
