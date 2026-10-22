@@ -1,7 +1,7 @@
 # Handheld ground unit -- restore
 
 ESP-WROOM-32 (ESP32-D0WD-V3), 4 MB flash, CP2102 on `/dev/ttyUSB0`. Built from
-`esp/` at commit 4dfdbbc (branch `oled-self-heal`), core `esp32:esp32` 3.1.3.
+`esp/` at commit bfae414 (branch `oled-self-heal`), core `esp32:esp32` 3.1.3.
 
 | Image | Source |
 |---|---|
